@@ -1,6 +1,6 @@
 # EDM-ARS: Educational Data Mining Automated Research System
 
-A multi-agent pipeline that automates end-to-end prediction-focused EDM research. Given the HSLS:09 dataset and an optional research prompt, it produces a complete, reviewer-ready LaTeX paper with real citations, validated methodology, and interpretable results.
+A multi-agent pipeline that automates end-to-end prediction-focused EDM research. Given the HSLS:09 dataset and an optional research prompt, it produces a complete, reviewer-ready LaTeX paper with real citations, validated methodology, and interpretable results. See website for a brief introduction: [edmars.ai](https://edmars.ai/).
 
 > **Current version: v1.1.3** — See [What's New in v1.1](#whats-new-in-v11) for AutoResearchClaw-inspired improvements.
 
@@ -132,6 +132,7 @@ The repair prompt uses the **last 3,000 characters of stderr** for maximum conte
 | Docker Engine | 24.0+ | Required for sandboxed code execution (optional — see below) |
 | Anthropic API key | — | Primary provider: `claude-sonnet-4-6` + `claude-opus-4-6` |
 | *or* MiniMax API key | — | Alternative provider: `MiniMax-M2.5` (see [LLM Provider](#llm-provider)) |
+| Semantic Scholar API key | — | — |
 | HSLS:09 public-use CSV | — | Obtainable from NCES; see [Data Setup](#data-setup) |
 
 ---
@@ -155,7 +156,8 @@ source .venv/bin/activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Set your API key
+# 4. Set your API keys
+
 # --- Option A: Anthropic (default) ---
 # Windows (PowerShell)
 $env:ANTHROPIC_API_KEY = "sk-ant-..."
@@ -168,6 +170,12 @@ $env:MINIMAX_API_KEY = "your-minimax-key"
 # macOS / Linux
 export MINIMAX_API_KEY="your-minimax-key"
 # Then set llm_provider: minimax in config.yaml
+
+# --- Semantic Scholar API Key ---
+# Windows (PowerShell)
+$env:SEMANTIC_SCHOLAR_API_KEY = "your-s2-api-key"
+# macOS / Linux
+export SEMANTIC_SCHOLAR_API_KEY="your-s2-api-key"
 ```
 
 > **Never put your API key in code or config files.** The pipeline reads keys exclusively from environment variables (`ANTHROPIC_API_KEY` or `MINIMAX_API_KEY`).
