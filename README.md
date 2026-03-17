@@ -1,6 +1,6 @@
 # EDM-ARS: Educational Data Mining Automated Research System
 
-A multi-agent pipeline that automates end-to-end prediction-focused EDM research. Given the HSLS:09 dataset and an optional research prompt, it produces a complete, reviewer-ready LaTeX paper with real citations, validated methodology, and interpretable results. See website for a brief introduction: [edmars.ai](https://edmars.ai/).
+A multi-agent pipeline that automates end-to-end EDM research, with the goal of supporting a broad range of topics, including prediction, causal inference, transfer learning, and psychometrics. We begin with prediction tasks using a single dataset and plan to expand the system to support additional datasets and broader research themes. In current version, given the HSLS:09 dataset and an optional research prompt, it produces a complete, reviewer-ready LaTeX paper with real citations, validated methodology, and interpretable results. See website for a brief introduction: [edmars.ai](https://edmars.ai/).
 
 > **Current version: v1.1.3** — See [What's New in v1.1](#whats-new-in-v11) for AutoResearchClaw-inspired improvements.
 
@@ -133,7 +133,7 @@ The repair prompt uses the **last 3,000 characters of stderr** for maximum conte
 | Anthropic API key | — | Primary provider: `claude-sonnet-4-6` + `claude-opus-4-6` |
 | *or* MiniMax API key | — | Alternative provider: `MiniMax-M2.5` (see [LLM Provider](#llm-provider)) |
 | Semantic Scholar API key | — | — |
-| HSLS:09 public-use CSV | — | Obtainable from NCES; see [Data Setup](#data-setup) |
+| HSLS:09 public-use CSV | — | Obtainable from NCES; [CSV is available here.](https://drive.google.com/drive/folders/1bKc8_nNTqOIE0xWycMxzKfr7SrnWdQGe?usp=sharing) |
 
 ---
 
