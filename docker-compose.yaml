@@ -1,0 +1,10 @@
+# Convenience file for building the EDM-ARS sandbox image.
+# Usage: docker compose build sandbox
+services:
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: edm-ars-sandbox:latest
+    profiles:
+      - build-only

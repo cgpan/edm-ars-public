@@ -1,0 +1,42 @@
+# Raw data (large, not for version control)
+data/raw/
+
+# Pipeline run outputs — ignore everything
+output/
+
+# Findings memory — contents are local, only .gitkeep is tracked
+findings_memory/*
+!findings_memory/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Secrets
+.env
+*.env
+set_env.ps1
+
+# Local dev tools
+CLAUDE.md
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+texput.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
