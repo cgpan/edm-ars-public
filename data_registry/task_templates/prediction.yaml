@@ -1,0 +1,827 @@
+# EDM-ARS Task Template: Prediction
+# Used by all agents to understand the expected workflow and output standards
+# for prediction-type research tasks. Agents receive this file at runtime via
+# BaseAgent.load_task_template().
+
+name: prediction
+version: "1.0"
+description: >
+  End-to-end automated workflow for supervised prediction research using
+  educational survey/longitudinal data. Produces a machine learning study
+  comparing multiple model families with SHAP interpretability and subgroup
+  fairness analysis.
+
+task_type: prediction
+supported_datasets:
+  - hsls09_public    # Phase 2: assistments, pisa2022
+
+# ============================================================================
+# REQUIRED SPECIFICATIONS
+# What ProblemFormulator must provide in research_spec.json before the
+# pipeline can proceed. All fields are required unless noted optional.
+# ============================================================================
+required_specifications:
+  research_question:
+    type: string
+    description: "A specific, answerable, prediction-oriented research question"
+    constraints:
+      - "Must reference a named outcome variable"
+      - "Must specify a target population (e.g., 'full sample', 'STEM-interested students')"
+      - "Must be answerable with supervised ML on the specified dataset"
+      - "Must NOT imply causation (correlational study)"
+
+  outcome_variable:
+    type: string
+    description: "HSLS:09 variable name of the dependent variable"
+    constraints:
+      - "Must appear in the registry outcomes section"
+      - "Must NOT appear in predictor_set"
+      - "Outcome wave must be temporally after all predictor waves"
+
+  outcome_type:
+    type: enum
+    values: [binary, continuous]
+    description: "Determines evaluation metric family (AUC vs. RMSE)"
+
+  predictor_set:
+    type: list
+    min_length: 3
+    max_length: 30
+    description: "Variables used as input features"
+    item_schema:
+      variable:
+        type: string
+        description: "HSLS:09 variable name (must exist in registry Tier 1 or Tier 2)"
+      rationale:
+        type: string
+        min_length: 30
+        description: "Educational justification for including this predictor"
+      wave:
+        type: enum
+        values: [base_year, first_follow_up, second_follow_up, update_panel]
+        description: "Data collection wave; must precede outcome wave"
+    constraints:
+      - "All predictor waves must precede outcome wave in temporal_order"
+      - "No variable may appear twice"
+      - "Tier-3 excluded variables (weights, flags, IDs) must not be included"
+      - "No redundant composites (e.g., X1SES and X1SES_U together)"
+
+  target_population:
+    type: string
+    description: "Description of the analytic sample (e.g., 'full HSLS:09 sample')"
+
+  subgroup_analyses:
+    type: list
+    description: "Protected attributes for fairness subgroup analysis"
+    recommended: [X1SEX, X1RACE]
+    constraints:
+      - "Each listed variable must be in predictor_set if used as a predictor"
+      - "At minimum one protected attribute required"
+
+  novelty_score_self_assessment:
+    type: integer
+    range: [1, 5]
+    minimum_passing: 3
+    description: >
+      ProblemFormulator's honest self-assessment of research novelty.
+      1 = replicate known finding, 5 = highly novel contribution.
+      Must be ≥ 3 or the orchestrator will request regeneration.
+
+  expected_contribution:
+    type: string
+    description: "What this study adds that prior work does not provide"
+
+  potential_limitations:
+    type: list
+    description: "Known methodological limitations to be disclosed"
+    required_items:
+      - "Multilevel structure not modeled"
+
+# ============================================================================
+# STANDARD WORKFLOW
+# Step-by-step pipeline executed by the orchestrator. Each stage maps to an
+# agent. Substeps and checks are guidance for the LLM-powered agents.
+# ============================================================================
+standard_workflow:
+
+  # --------------------------------------------------------------------------
+  # STAGE 1: Data Preparation  (DataEngineer agent)
+  # --------------------------------------------------------------------------
+  data_preparation:
+    agent: DataEngineer
+    inputs:
+      - research_spec.json
+      - dataset registry YAML
+      - raw data CSV path
+    outputs:
+      - train_X.csv
+      - train_y.csv
+      - test_X.csv
+      - test_y.csv
+      - data_report.json
+
+    substeps:
+      - id: dp_01
+        name: load_raw_data
+        description: "Load raw CSV from configured raw_data path"
+        action: "pd.read_csv(raw_data_path)"
+
+      - id: dp_02
+        name: select_variables
+        description: "Keep only outcome + predictor columns named in research_spec"
+        action: "df = df[predictor_columns + [outcome_variable]]"
+
+      - id: dp_03
+        name: recode_nces_missing
+        description: >
+          Replace NCES skip/nonresponse codes with NaN.
+          Affected codes: -1 (legitimate skip), -4 (nonrespondent), -7 (missing),
+          -8 (unit nonresponse), -9 (missing by design).
+        action: "df.replace([-1, -4, -7, -8, -9], pd.NA)"
+
+      - id: dp_04
+        name: drop_missing_outcome
+        description: >
+          Drop all rows where the outcome variable is NaN BEFORE any imputation.
+          Never impute the outcome.
+        action: "df = df.dropna(subset=[outcome_variable])"
+
+      - id: dp_05
+        name: assess_missingness
+        description: >
+          Compute per-column missingness percentage on the remaining rows.
+          Record in data_report.missingness_summary.
+        action: "pct_missing = df.isnull().mean() * 100"
+
+      - id: dp_06
+        name: apply_missing_data_protocol
+        description: >
+          For each predictor column apply the tiered protocol:
+          - pct_missing < 5%: SimpleImputer(strategy='median') for continuous,
+            SimpleImputer(strategy='most_frequent') for categorical
+          - 5% ≤ pct_missing ≤ 20%: IterativeImputer(max_iter=5, random_state=42)
+          - pct_missing > 20%: IterativeImputer(max_iter=5, random_state=42)
+            AND add warning to data_report.warnings
+          - If complete-case retention < 60% of original_n: set validation_passed=false, ABORT
+        action: "fit imputers on train set; transform train and test"
+        timeout_s: 300
+
+      - id: dp_07
+        name: encode_categoricals
+        description: >
+          One-hot encode nominal categorical variables (drop_first=True).
+          Treat ordered categoricals as integer-coded continuous unless registry
+          specifies otherwise. Do not encode binary (0/1) variables.
+        action: "pd.get_dummies(df, drop_first=True)"
+
+      - id: dp_08
+        name: drop_constant_columns
+        description: >
+          Remove any column with zero variance after encoding.
+          Record removed columns in data_report.variables_flagged.
+        action: "df = df.loc[:, df.var() > 0]"
+
+      - id: dp_09
+        name: train_test_split
+        description: >
+          Split into 80% train / 20% test.
+          Classification: stratify=y (stratified on outcome class).
+          Regression: random split.
+          Use random_state=42. Test set must be ≥ 20% of analytic_n.
+        action: "train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)"
+
+      - id: dp_10
+        name: report_class_balance
+        description: >
+          For binary outcomes: compute majority/minority class proportion.
+          Record in data_report.class_balance. Warn if ratio > 9:1.
+        action: "y_train.value_counts(normalize=True)"
+
+      - id: dp_11
+        name: save_outputs
+        description: "Save train_X, train_y, test_X, test_y as CSVs (index=False)"
+
+      - id: dp_12
+        name: add_multilevel_warning
+        description: >
+          Always append this exact string to data_report.warnings:
+          'Multilevel structure (students nested in schools) is not modeled. This is a limitation.'
+
+    checks:
+      - id: check_dp_no_nan
+        description: "No NaN values in train_X, train_y, test_X, or test_y"
+        severity: critical
+        failure_action: set_validation_passed_false
+
+      - id: check_dp_outcome_type
+        description: "Outcome variable has expected type and value range per registry"
+        severity: critical
+        failure_action: set_validation_passed_false
+
+      - id: check_dp_no_constant
+        description: "No zero-variance columns remain after encoding"
+        severity: major
+        failure_action: drop_and_warn
+
+      - id: check_dp_stratified_split
+        description: "Train/test split is stratified for classification outcomes"
+        severity: major
+        failure_action: set_validation_passed_false
+
+      - id: check_dp_analytic_n
+        description: "analytic_n ≥ 10,000"
+        severity: critical
+        failure_action: abort
+
+      - id: check_dp_ratio_rule
+        description: "analytic_n ≥ 10 × number of predictors (10p rule)"
+        severity: major
+        failure_action: warn
+
+      - id: check_dp_retention
+        description: "Complete-case retention ≥ 60% of original_n (23,503)"
+        severity: critical
+        failure_action: abort
+
+      - id: check_dp_multilevel_warning
+        description: "Multilevel limitation string present in data_report.warnings"
+        severity: major
+        failure_action: add_warning
+
+  # --------------------------------------------------------------------------
+  # STAGE 2: Model Training  (Analyst agent)
+  # --------------------------------------------------------------------------
+  model_training:
+    agent: Analyst
+    inputs:
+      - train_X.csv
+      - train_y.csv
+      - data_report.json
+      - research_spec.json
+    outputs:
+      - results.json (partial — filled in through evaluation stage)
+      - fitted model objects (in-memory; not serialized in pilot)
+
+    model_battery:
+      # Pilot: exactly these six families. Do NOT add SVM.
+      - id: model_lr
+        name: LogisticRegression
+        regression_equivalent: LinearRegression
+        implementation: sklearn.linear_model
+        hyperparameters:
+          C: 1.0            # fixed; not tuned in pilot
+          max_iter: 1000
+          random_state: 42
+        tuning: none        # baseline; no inner CV needed
+        shap_explainer: LinearExplainer
+
+      - id: model_rf
+        name: RandomForestClassifier
+        regression_equivalent: RandomForestRegressor
+        implementation: sklearn.ensemble
+        hyperparameter_grid:
+          n_estimators: [100, 300, 500]
+          max_depth: [5, 10, null]
+          min_samples_leaf: [1, 5, 10]
+        tuning: GridSearchCV
+        tuning_cv_folds: 5
+        tuning_data: train_only    # NEVER use test data for tuning
+        random_state: 42
+        shap_explainer: TreeExplainer
+
+      - id: model_xgb
+        name: XGBClassifier
+        regression_equivalent: XGBRegressor
+        implementation: xgboost
+        hyperparameter_grid:
+          learning_rate: [0.01, 0.05, 0.1]
+          n_estimators: [100, 300, 500]
+          max_depth: [3, 5, 7]
+        tuning: GridSearchCV
+        tuning_cv_folds: 5
+        tuning_data: train_only
+        random_state: 42
+        shap_explainer: TreeExplainer
+
+      - id: model_enet
+        name: SGDClassifier  # loss='log_loss', penalty='elasticnet'
+        regression_equivalent: ElasticNet
+        implementation: sklearn.linear_model
+        hyperparameter_grid:
+          alpha: [0.001, 0.01, 0.1, 1.0]
+          l1_ratio: [0.1, 0.5, 0.7, 0.9]
+        tuning: GridSearchCV
+        tuning_cv_folds: 5
+        tuning_data: train_only
+        random_state: 42
+        shap_explainer: LinearExplainer
+
+      - id: model_mlp
+        name: MLPClassifier
+        regression_equivalent: MLPRegressor
+        implementation: sklearn.neural_network
+        fixed_params:
+          max_iter: 500
+          early_stopping: true
+          validation_fraction: 0.1
+          random_state: 42
+        hyperparameter_grid:
+          hidden_layer_sizes: [[64], [128], [64, 32]]
+          learning_rate_init: [0.001, 0.01]
+          alpha: [0.0001, 0.001]
+        tuning: GridSearchCV
+        tuning_cv_folds: 5
+        tuning_data: train_only
+        random_state: 42
+        shap_explainer: KernelExplainer
+        shap_kernel_explainer_constraints:
+          sample_cap: 1000          # sample from test set if n_test > 1000
+          background: "shap.kmeans(train_X, 100)"
+          timeout_s: 600
+          nsamples: 500
+          fallback_on_timeout: "next-best non-MLP individual model"
+
+      - id: model_stacking
+        name: StackingClassifier
+        regression_equivalent: StackingRegressor
+        implementation: sklearn.ensemble
+        base_estimators: [model_lr, model_rf, model_xgb, model_enet, model_mlp]
+        meta_learner_classification: LogisticRegressionCV
+        meta_learner_regression: RidgeCV
+        cv: 5
+        passthrough: false
+        tuning: none        # meta-learner self-tunes; no grid search
+        random_state: 42
+        shap_explainer: skip  # NEVER compute SHAP for StackingEnsemble
+        note: "Built after all 5 individual models are tuned. Reported in model_comparison.csv only."
+
+    excluded_models:
+      - SVM   # excluded: KernelExplainer timeout risk without bounded sample cap
+      # Note: KernelExplainer IS now allowed, but only for MLP with sample_cap ≤ 1000
+
+    substeps:
+      - id: mt_01
+        name: instantiate_models
+        description: "Create model objects with fixed hyperparameters (LR) or grid (RF, XGBoost, ElasticNet, MLP)"
+
+      - id: mt_02
+        name: tune_rf
+        description: >
+          Run GridSearchCV(cv=5, scoring='roc_auc' or 'neg_root_mean_squared_error')
+          on training data only. Select best estimator.
+        timeout_s: 300
+
+      - id: mt_03
+        name: tune_xgb
+        description: >
+          Run GridSearchCV(cv=5, ...) on training data only.
+          Select best estimator.
+        timeout_s: 300
+
+      - id: mt_04
+        name: fit_final_models
+        description: >
+          Fit each individual model (best estimator after tuning) on the full training set.
+          Use random_state=42.
+        timeout_s: 300
+
+      - id: mt_05
+        name: tune_elasticnet
+        description: >
+          Run GridSearchCV(cv=5, ...) for ElasticNet/SGDClassifier on training data only.
+          Select best estimator.
+        timeout_s: 300
+
+      - id: mt_06
+        name: tune_mlp
+        description: >
+          Run GridSearchCV(cv=5, ...) for MLP on training data only.
+          Select best estimator. MLP always uses max_iter=500, early_stopping=True,
+          validation_fraction=0.1.
+        timeout_s: 300
+
+      - id: mt_07
+        name: build_stacking_ensemble
+        description: >
+          After all 5 individual models are tuned, build StackingClassifier or
+          StackingRegressor using the 5 tuned base estimators and the appropriate
+          meta-learner (LogisticRegressionCV for classification, RidgeCV for regression).
+          cv=5, passthrough=False. No hyperparameter grid — meta-learner self-tunes.
+          Fit on full training set.
+        timeout_s: 300
+
+    checks:
+      - id: check_mt_train_only
+        description: "Test data was not used during hyperparameter tuning"
+        severity: critical
+        failure_action: abort
+
+      - id: check_mt_random_state
+        description: "random_state=42 used for all stochastic operations"
+        severity: minor
+        failure_action: warn
+
+      - id: check_mt_convergence
+        description: "Log ConvergenceWarning for LR; do not abort"
+        severity: minor
+        failure_action: log_and_continue
+
+  # --------------------------------------------------------------------------
+  # STAGE 3: Evaluation  (Analyst agent, continues after model_training)
+  # --------------------------------------------------------------------------
+  evaluation:
+    agent: Analyst
+    description: "Evaluate all models on the held-out test set only"
+
+    metrics:
+      classification:
+        primary:
+          name: AUC-ROC
+          function: sklearn.metrics.roc_auc_score
+          higher_is_better: true
+          ci_method: bootstrap
+          ci_iterations: 1000
+          ci_random_state: 42
+        secondary:
+          - name: Accuracy
+            function: sklearn.metrics.accuracy_score
+          - name: Precision
+            function: "sklearn.metrics.precision_score(average='macro')"
+          - name: Recall
+            function: "sklearn.metrics.recall_score(average='macro')"
+          - name: F1
+            function: "sklearn.metrics.f1_score(average='macro')"
+        additional_outputs:
+          - confusion_matrix
+          - roc_curves_all_models    # overlaid, saved as roc_curves.png
+          - calibration_curve        # best model only
+
+      regression:
+        primary:
+          name: RMSE
+          function: "sqrt(sklearn.metrics.mean_squared_error)"
+          higher_is_better: false
+          ci_method: bootstrap
+          ci_iterations: 1000
+          ci_random_state: 42
+        secondary:
+          - name: MAE
+            function: sklearn.metrics.mean_absolute_error
+          - name: R2
+            function: sklearn.metrics.r2_score
+        additional_outputs:
+          - residual_plot            # predicted vs. actual, saved as residual_plot.png
+
+    substeps:
+      - id: ev_01
+        name: predict_test_set
+        description: "Generate predictions on test_X only; never use train_X for final metrics"
+
+      - id: ev_02
+        name: compute_primary_metric
+        description: "Compute AUC (classification) or RMSE (regression) for each model"
+
+      - id: ev_03
+        name: compute_secondary_metrics
+        description: "Compute all secondary metrics for each model"
+
+      - id: ev_04
+        name: bootstrap_ci
+        description: >
+          1000-iteration bootstrap to compute 95% CI on the primary metric
+          for each model. Use random_state=42.
+
+      - id: ev_05
+        name: select_best_model
+        description: >
+          Best model = highest AUC (classification) or lowest RMSE (regression).
+          Determine best individual model first (StackingEnsemble excluded from SHAP selection).
+          In case of tie within CI overlap, prefer simpler model (LR > ElasticNet > RF > XGBoost > MLP).
+          StackingEnsemble is reported in model_comparison.csv but is never selected as the
+          model for SHAP/interpretability outputs.
+
+      - id: ev_06
+        name: generate_figures
+        description: >
+          Save all figures to output_dir with matplotlib (use Agg backend).
+          Minimum 150 dpi.
+
+    checks:
+      - id: check_ev_test_only
+        description: "All reported metrics computed on held-out test set"
+        severity: critical
+        failure_action: abort
+
+      - id: check_ev_ci_present
+        description: "CIs provided for primary metric for all models"
+        severity: major
+        failure_action: warn
+
+      - id: check_ev_auc_suspicious
+        description: >
+          AUC > 0.95 flagged automatically in results.warnings as potential leakage.
+          Critic will investigate.
+        severity: major
+        failure_action: add_warning
+
+  # --------------------------------------------------------------------------
+  # STAGE 4: Interpretation  (Analyst agent, continues after evaluation)
+  # --------------------------------------------------------------------------
+  interpretation:
+    agent: Analyst
+    description: >
+      SHAP interpretability for the best model; PDP for top 3 features;
+      subgroup performance analysis for all protected attributes.
+
+    shap_protocol:
+      best_individual_model_only: true  # StackingEnsemble is always excluded
+      explainer_mapping:
+        RandomForest: TreeExplainer
+        XGBClassifier: TreeExplainer
+        XGBRegressor: TreeExplainer
+        RandomForestClassifier: TreeExplainer
+        RandomForestRegressor: TreeExplainer
+        LogisticRegression: LinearExplainer
+        LinearRegression: LinearExplainer
+        ElasticNet: LinearExplainer
+        SGDClassifier: LinearExplainer
+        MLPClassifier: KernelExplainer
+        MLPRegressor: KernelExplainer
+        StackingClassifier: skip
+        StackingRegressor: skip
+      kernel_explainer_allowed: true
+      kernel_explainer_models_only: [MLPClassifier, MLPRegressor]  # never use for other models
+      kernel_explainer_sample_cap: 1000   # sample from test set if n_test > 1000
+      kernel_explainer_background: "shap.kmeans(train_X, 100)"
+      kernel_explainer_timeout_s: 600
+      kernel_explainer_nsamples: 500
+      kernel_explainer_fallback: "next-best non-MLP individual model"
+      sample_cap: 2000      # general cap for non-KernelExplainer SHAP
+      timeout_s: 600
+
+    substeps:
+      - id: interp_01
+        name: compute_shap_values
+        description: >
+          Determine the best individual model (StackingEnsemble excluded).
+          Instantiate the appropriate explainer per the explainer_mapping above.
+          For MLP: use KernelExplainer with sample_cap=1000, background=shap.kmeans(train_X,100),
+          nsamples=500, timeout=600s. If KernelExplainer times out, fall back to the next-best
+          non-MLP individual model for all SHAP outputs and log the fallback in results.warnings.
+          For all other models: compute SHAP on test set (≤ 2000 rows).
+          Save mean absolute SHAP per feature to feature_importance.csv.
+          Never compute SHAP for StackingClassifier or StackingRegressor.
+        timeout_s: 600
+
+      - id: interp_02
+        name: shap_summary_plot
+        description: >
+          shap.plots.beeswarm or shap.summary_plot.
+          Save as shap_summary.png (150 dpi minimum).
+
+      - id: interp_03
+        name: shap_bar_plot
+        description: >
+          shap.plots.bar or shap.summary_plot(plot_type='bar').
+          Save as shap_importance.png.
+
+      - id: interp_04
+        name: partial_dependence_plots
+        description: >
+          sklearn.inspection.PartialDependenceDisplay for top 3 features
+          by mean |SHAP|. Save as pdp_{feature_name}.png for each.
+
+      - id: interp_05
+        name: subgroup_analysis
+        description: >
+          For each variable in research_spec.subgroup_analyses:
+          - Split test set by unique values of that variable
+          - Compute primary metric (AUC or RMSE) per group
+          - Record n per group
+          - Flag if max_group - min_group > 0.05 (5% gap)
+          Save to subgroup_performance.csv and results.json.subgroup_performance.
+
+      - id: interp_06
+        name: populate_top_features
+        description: >
+          Populate results.json.top_features with the top N features
+          (N = min(10, n_features)) ranked by mean |SHAP|.
+          Include direction (positive if mean SHAP > 0, else negative).
+
+    checks:
+      - id: check_interp_explainer
+        description: "Correct SHAP explainer used for each model type"
+        severity: major
+        failure_action: warn
+
+      - id: check_interp_subgroup
+        description: "Subgroup analysis conducted for all protected attributes in research_spec"
+        severity: major
+        failure_action: warn
+
+      - id: check_interp_gap
+        description: "Subgroup performance gaps > 5% are flagged in results.warnings"
+        severity: major
+        failure_action: add_warning
+
+# ============================================================================
+# OUTPUT SPECIFICATION
+# Complete list of required artifacts. Writer receives these as inputs.
+# ============================================================================
+output_specification:
+
+  json_files:
+    - name: research_spec.json
+      producer: ProblemFormulator
+      required_fields: [research_question, outcome_variable, outcome_type,
+                        predictor_set, subgroup_analyses, novelty_score_self_assessment]
+    - name: literature_context.json
+      producer: ProblemFormulator
+      required_fields: [search_query, papers, novelty_evidence]
+    - name: data_report.json
+      producer: DataEngineer
+      required_fields: [dataset, original_n, analytic_n, n_train, n_test,
+                        outcome_variable, outcome_type, n_predictors_encoded,
+                        missingness_summary, validation_passed, warnings]
+    - name: results.json
+      producer: Analyst
+      required_fields: [best_model, best_metric_value, primary_metric,
+                        all_models, top_features, subgroup_performance,
+                        figures_generated, errors, warnings]
+    - name: review_report.json
+      producer: Critic
+      required_fields: [overall_verdict, overall_quality_score,
+                        problem_formulation_review, data_preparation_review,
+                        analysis_review, substantive_review, revision_instructions]
+
+  csv_files:
+    - name: train_X.csv
+      producer: DataEngineer
+    - name: train_y.csv
+      producer: DataEngineer
+    - name: test_X.csv
+      producer: DataEngineer
+    - name: test_y.csv
+      producer: DataEngineer
+    - name: model_comparison.csv
+      producer: Analyst
+      columns: [model, primary_metric_value, ci_lower, ci_upper]
+    - name: feature_importance.csv
+      producer: Analyst
+      columns: [feature, shap_mean_abs, direction, rank]
+    - name: subgroup_performance.csv
+      producer: Analyst
+      columns: [attribute, group, primary_metric_value, n]
+
+  figures:
+    classification_only:
+      - filename: roc_curves.png
+        description: "ROC curves for all 6 models overlaid on one plot"
+      - filename: calibration_curve.png
+        description: "Calibration curve for best model"
+      - filename: confusion_matrix.png
+        description: "Confusion matrix heatmap for best model"
+    regression_only:
+      - filename: residual_plot.png
+        description: "Predicted vs. actual scatter for best model"
+    all_tasks:
+      - filename: shap_summary.png
+        description: "SHAP beeswarm summary plot (best model)"
+      - filename: shap_importance.png
+        description: "SHAP bar plot of mean |SHAP| values (best model)"
+      - filename: "pdp_{top_feature_1}.png"
+        description: "Partial dependence plot for top feature by mean |SHAP|"
+      - filename: "pdp_{top_feature_2}.png"
+        description: "Partial dependence plot for 2nd top feature"
+      - filename: "pdp_{top_feature_3}.png"
+        description: "Partial dependence plot for 3rd top feature"
+
+  latex_outputs:
+    - name: paper.tex
+      producer: Writer
+      template: "ACM acmart sigconf"
+      sections:
+        - Abstract
+        - "1. Introduction"
+        - "2. Related Work"
+        - "3. Methods"
+        - "4. Results"
+        - "5. Discussion"
+      word_counts:
+        Abstract: {min: 150, max: 250}
+        Introduction: {min: 800, max: 1200}
+        Related_Work: {min: 500, max: 800}
+        Methods: {min: 800, max: 1300}
+        Results: {min: 600, max: 1000}
+        Discussion: {min: 600, max: 1000}
+    - name: references.bib
+      producer: Writer
+      format: BibTeX
+      source: literature_context.papers
+
+  checkpoint:
+    name: checkpoint.json
+    description: "PipelineContext serialized after each completed stage"
+    schema_version: "1.0"
+
+  logs:
+    name: pipeline.log
+    format: "timestamped JSON lines"
+    required_events: [stage_start, stage_complete, agent_call, token_usage, error]
+
+# ============================================================================
+# QUALITY GATES
+# Conditions evaluated by the orchestrator and Critic to determine whether
+# to PASS, REVISE, or ABORT. The Critic has final authority on verdict.
+# ============================================================================
+quality_gates:
+
+  abort_conditions:
+    # Orchestrator checks these BEFORE invoking the Critic
+    - id: qg_abort_01
+      name: validation_failed
+      trigger: "data_report.validation_passed == false"
+      action: ABORT
+      message: "DataEngineer validation failed; pipeline cannot continue"
+
+    - id: qg_abort_02
+      name: analytic_n_too_small
+      trigger: "data_report.analytic_n < 1000"
+      action: ABORT
+      message: "Analytic sample < 1,000; insufficient for reliable ML"
+
+    - id: qg_abort_03
+      name: json_parse_error
+      trigger: "JSONDecodeError raised by parse_llm_json()"
+      action: ABORT
+      message: "Agent output could not be parsed as JSON"
+
+    # Critic-issued ABORT conditions
+    - id: qg_abort_04
+      name: confirmed_leakage
+      trigger: "Critic identifies confirmed temporal or target data leakage"
+      action: ABORT
+      message: "Data leakage confirmed; results are invalid"
+
+    - id: qg_abort_05
+      name: unanswerable_question
+      trigger: "Research question cannot be answered with available data or ML methods"
+      action: ABORT
+      message: "Research question is unanswerable; fundamental redesign required"
+
+  revise_conditions:
+    # Critic issues REVISE when any of these are present and cycles remain
+    - id: qg_revise_01
+      name: critical_issue_present
+      trigger: "review_report contains any issue with severity == critical"
+      action: REVISE
+      cascade: topological    # re-run from lowest targeted agent downward
+
+    - id: qg_revise_02
+      name: too_many_major_issues
+      trigger: "count of major issues in review_report > 2"
+      action: REVISE
+      cascade: topological
+
+    - id: qg_revise_03
+      name: low_quality_score
+      trigger: "review_report.overall_quality_score < 7"
+      action: REVISE
+      cascade: topological
+
+  pass_conditions:
+    - id: qg_pass_01
+      name: clean_pass
+      trigger: >
+        No critical issues AND major_issue_count ≤ 2
+        AND overall_quality_score ≥ 7
+      action: PASS
+
+  unverified_conditions:
+    - id: qg_unverified_01
+      name: max_cycles_exhausted
+      trigger: "revision_cycle >= max_revision_cycles AND verdict would be REVISE"
+      action: "proceed to WRITING with UNVERIFIED flag"
+      message: >
+        Max revision cycles reached without PASS. Writer must prepend UNVERIFIED
+        warning block and append full Critic report as appendix.
+
+  suspicious_flags:
+    # These do not abort but must appear in results.warnings and review_report
+    - id: qg_flag_01
+      name: auc_suspiciously_high
+      trigger: "AUC > 0.95"
+      action: flag_for_critic
+      message: "AUC > 0.95 is suspicious; Critic must check for data leakage"
+
+    - id: qg_flag_02
+      name: subgroup_gap_large
+      trigger: "max(subgroup_primary_metric) - min(subgroup_primary_metric) > 0.05"
+      action: flag_in_results
+      message: "Subgroup performance gap > 5% detected"
+
+    - id: qg_flag_03
+      name: high_missingness_predictor
+      trigger: "any predictor has pct_missing > 20%"
+      action: flag_in_data_report
+      message: "Predictor with > 20% missingness included; noted as limitation"

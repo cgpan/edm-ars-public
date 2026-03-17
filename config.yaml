@@ -1,0 +1,62 @@
+# config.yaml
+# llm_provider: which API to use — "anthropic" or "minimax"
+# Switch to "minimax" for lower-cost runs (MiniMax-M2.5 is Anthropic-SDK-compatible).
+llm_provider: anthropic   # "anthropic" or "minimax"
+
+models:
+  problem_formulator: claude-sonnet-4-6
+  data_engineer: claude-sonnet-4-6
+  analyst: claude-sonnet-4-6
+  critic: claude-opus-4-6
+  writer: claude-sonnet-4-6
+
+# MiniMax model config (used when llm_provider: minimax)
+# Requires MINIMAX_API_KEY in environment (set in .env or set_env.ps1).
+minimax:
+  base_url: https://api.minimax.io/anthropic
+  models:
+    problem_formulator: MiniMax-M2.5
+    data_engineer: MiniMax-M2.5
+    analyst: MiniMax-M2.5
+    critic: MiniMax-M2.5
+    writer: MiniMax-M2.5
+
+pipeline:
+  task_type: prediction     # task type: prediction, causal_inference, etc.
+  max_revision_cycles: 2
+  random_state: 42
+  cost_budget_usd: 5.0     # soft limit; log warning if exceeded, do not abort
+
+sandbox:
+  enabled: true
+  image: "edm-ars-sandbox:latest"
+  memory_limit: "4g"
+  cpu_count: 2
+  network_disabled: true
+  auto_build: true
+
+semantic_scholar:
+  base_url: https://api.semanticscholar.org/graph/v1
+  max_results: 100
+  year_filter: 10          # papers published within last N years
+  request_delay_s: 0.5     # initial delay before first attempt (rate limit courtesy)
+  max_retries: 3           # retry attempts after initial failure (total = max_retries + 1)
+  backoff_base_s: 1.0      # base delay for exponential backoff (seconds)
+  backoff_factor: 2.0      # multiplier per retry: 1s → 2s → 4s
+  backoff_jitter: true     # add ±25% random jitter to prevent thundering herd
+
+arxiv:
+  enabled: true
+  max_results_per_query: 10    # papers per arXiv query (3 queries = up to 30 arXiv papers)
+
+findings_memory:
+  enabled: true                        # opt-in; false = all prior behavior unchanged
+  path: findings_memory/memory.yaml
+  n_candidate_specs: 3                  # number of candidate specs generated before selecting best
+
+paths:
+  data_registry: data_registry/
+  raw_data: data/raw/
+  output_base: output/
+  agent_prompts: agent_prompts/
+  paper_template: templates/paper_template.tex

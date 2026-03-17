@@ -1,0 +1,1832 @@
+name: hsls09_public
+full_name: High School Longitudinal Study of 2009 - Public-Use File (labeled CSV extract)
+source: NCES
+documentation_url: https://nces.ed.gov/surveys/hsls09/
+access: public
+data_structure: multilevel
+levels:
+  student: 23503
+  school: 944
+multilevel_note: Public-use IDs for school linkage fields are suppressed in this extract (e.g., SCH_ID, X1NCESID, X2NCESID).
+  School-context variables are replicated at the student row level. Multilevel modeling and design-based variance estimation
+  require restricted-use identifiers or external design information.
+waves:
+  base_year:
+    year: 2009
+    grade: 9
+    prefix: X1/S1/P1/A1/C1/M1/N1/W1
+    label: 9th grade
+  first_follow_up:
+    year: 2012
+    grade: 11
+    prefix: X2/S2/P2/A2/C2/M2/N2/W2
+    label: 11th grade
+  second_follow_up:
+    year: 2013
+    grade: 12
+    prefix: X3/S3/P3/A3/C3/M3/N3/W3
+    label: 12th grade/update
+  update_panel:
+    year: 2016
+    grade: null
+    prefix: X4/S4/P4/A4/C4/M4/N4/W4
+    label: second follow-up panel
+  postsecondary_records:
+    year: 2017
+    grade: null
+    prefix: X5/S5/P5/A5/C5/M5/N5/W5
+    label: postsecondary records/financial aid follow-up
+temporal_order:
+- base_year
+- first_follow_up
+- second_follow_up
+- update_panel
+- postsecondary_records
+sampling: Two-stage stratified design; this public-use CSV includes labeled values and many suppressed design identifiers.
+  Analyses should document weighting/cluster limitations explicitly.
+prefix_wave_mapping_note: Wave inference is prefix-based across X/S/P/A/C/M/N families; W* variables are weights and excluded
+  by Tier 3 rules.
+tier3_exclusion_rules:
+  prefix_patterns:
+  - ^W[0-9]
+  - ^BRR
+  suffix_patterns:
+  - _IM$
+  - _FLG$
+  - FLAG$
+  - _I$
+  exact_matches:
+  - STU_ID
+  - SCH_ID
+  - STRAT_ID
+  - PSU
+  - psu
+  - X1NCESID
+  - X2NCESID
+  - X1SQSTAT
+  - X1PQSTAT
+  - X1TMQSTAT
+  - X1TSQSTAT
+  - X1AQSTAT
+  - X1CQSTAT
+  - X2SQSTAT
+  - X2PQSTAT
+  - X2AQSTAT
+  - X2CQSTAT
+  - X3SQSTAT
+  - X4SQSTAT
+  category_labels:
+  - administrative
+  - sampling
+  - weight
+  - imputation_flag
+  - processing_flag
+  - interviewer_variable
+  - logical_inference_flag
+tier: 1
+variables:
+  outcomes:
+  - name: X2TXMTSCOR
+    label: X2 Mathematics standardized theta score
+    type: continuous
+    wave: first_follow_up
+    pct_missing: 12.38
+    range:
+    - 22.2383
+    - 84.9051
+    note: Follow-up standardized math score often used as primary near-term achievement outcome.
+  - name: X3TGPAMAT
+    label: 'X3 GPA: mathematics'
+    type: continuous
+    wave: second_follow_up
+    pct_missing: 7.41
+    range:
+    - 0.25
+    - 4.0
+  - name: X3TGPAENG
+    label: 'X3 GPA:  English'
+    type: continuous
+    wave: second_follow_up
+    pct_missing: 7.4
+    range:
+    - 0.25
+    - 4.0
+  - name: X3TGPASCI
+    label: 'X3 GPA:  science'
+    type: continuous
+    wave: second_follow_up
+    pct_missing: 7.76
+    range:
+    - 0.25
+    - 4.0
+  - name: X3TGPASOCST
+    label: 'X3 GPA: social studies'
+    type: continuous
+    wave: second_follow_up
+    pct_missing: 8.21
+    range:
+    - 0.25
+    - 4.0
+  - name: X3TGPAACAD
+    label: X3 GPA for all academic courses
+    type: continuous
+    wave: second_follow_up
+    pct_missing: 7.0
+    range:
+    - 0.25
+    - 4.0
+  - name: X3TGPASTEM
+    label: X3 GPA for STEM courses
+    type: continuous
+    wave: second_follow_up
+    pct_missing: 7.14
+    range:
+    - 0.25
+    - 4.0
+  - name: X4HSCOMPSTAT
+    label: X4 High school credential status and type, February 2016
+    type: categorical
+    wave: update_panel
+    pct_missing: 26.24
+    categories:
+    - Diploma
+    - No HS credential
+    - GED, other HS equivalency, or certificate of attendance
+    codebook_codes:
+      '1': Diploma
+      '2': GED, other HS equivalency, or certificate of attendance
+      '3': No HS credential
+      '-8': Unit non-response
+  - name: dropout_derived
+    label: High school non-completion indicator (derived)
+    type: binary
+    categories:
+    - '0'
+    - '1'
+    wave: update_panel
+    derived: true
+    derivation: 'From X4HSCOMPSTAT labels: ''No HS credential'' -> 1, ''Diploma''/''GED, other HS equivalency, or certificate
+      of attendance'' -> 0, ''Unit non-response'' -> NA.'
+    note: Derived from X4HSCOMPSTAT using observed labels in this CSV extract.
+  - name: X4EVRATNDCLG
+    label: Ever attended college by the end of February 2016
+    type: binary
+    wave: update_panel
+    pct_missing: 26.24
+    categories:
+    - 'Yes'
+    - 'No'
+    codebook_codes:
+      '0': 'No'
+      '1': 'Yes'
+      '-8': Unit non-response
+    note: CSV stores labeled values (Yes/No/Unit non-response).
+  - name: X4EVR2YPUB
+    label: X4 Ever attended 2-year public institution after high school
+    type: binary
+    wave: update_panel
+    pct_missing: 26.72
+    categories:
+    - 'No'
+    - 'Yes'
+    codebook_codes:
+      '0': 'No'
+      '1': 'Yes'
+      '-8': Unit non-response
+      '-9': Missing
+  - name: X4RFDGMJ14Y
+    label: X4 Reference degree major - all and baccalaureate categories
+    type: categorical
+    wave: update_panel
+    pct_missing: 50.81
+    categories:
+    - Other applied
+    - Business
+    - Health care fields
+    - Bio & phys science, sci tech, math, agriculture
+    - Social sciences
+    - Engineering and engineering technology
+    - Humanities
+    - Education
+    - Computer and information sciences
+    - General studies and other
+    codebook_codes:
+      '1': Computer and information sciences
+      '2': Engineering and engineering technology
+      '3': Bio & phys science, sci tech, math, agriculture
+      '4': General studies and other
+      '5': Social sciences
+      '6': Humanities
+      '7': Health care fields
+      '8': Business
+      '9': Education
+      '10': Other applied
+      '-1': Don't know
+      '-7': Item legitimate skip/NA
+      '-8': Unit non-response
+      '-9': Missing
+  - name: X4RFDGMJ12Y
+    label: X4 Reference degree major - subbaccalaureate categories
+    type: categorical
+    wave: update_panel
+    pct_missing: 50.81
+    categories:
+    - Social sciences and humanities
+    - Business
+    - Health care fields
+    - Other applied
+    - Bio & phys science, sci tech, math, agriculture
+    - Engineering and engineering technology
+    - Personal and consumer services
+    - Computer and information sciences
+    - Military technology and protective services
+    - Manufacturing,construction, repair, transportation
+    - General studies and other
+    codebook_codes:
+      '1': Computer and information sciences
+      '2': Engineering and engineering technology
+      '3': Bio & phys science, sci tech, math, agriculture
+      '4': General studies and other
+      '5': Social sciences and humanities
+      '6': Personal and consumer services
+      '7': Manufacturing,construction, repair, transportation
+      '8': Military technology and protective services
+      '9': Health care fields
+      '10': Business
+      '11': Other applied
+      '-1': Don't know
+      '-7': Item legitimate skip/NA
+      '-8': Unit non-response
+      '-9': Missing
+  - name: X4RFDGMJSTEM
+    label: X4 Reference degree's first major is STEM
+    type: binary
+    wave: update_panel
+    pct_missing: 50.81
+    categories:
+    - Not STEM
+    - STEM (if first or second/double major is STEM)
+    codebook_codes:
+      '0': Not STEM
+      '1': STEM (if first or second/double major is STEM)
+      '-1': Don't know
+      '-7': Item legitimate skip/NA
+      '-8': Unit non-response
+      '-9': Missing
+  - name: X4ATPRLVLA
+    label: 'X4 Attainment and persistence at any institution: February 2016'
+    type: categorical
+    wave: update_panel
+    pct_missing: 45.04
+    categories:
+    - No degree, enrolled at a 4-year
+    - No degree, not enrolled
+    - No degree, enrolled at less-than-4-year
+    - Attained associate's degree
+    - Attained certificate
+    - Attained bachelor's degree
+    codebook_codes:
+      '1': Attained bachelor's degree
+      '2': Attained associate's degree
+      '3': Attained certificate
+      '4': No degree, enrolled at a 4-year
+      '5': No degree, enrolled at less-than-4-year
+      '6': No degree, not enrolled
+      '-7': Item legitimate skip/NA
+      '-8': Unit non-response
+      '-9': Missing
+  - name: X4ATPRTFI
+    label: 'X4 Attainment and retention at first institution: February 2016'
+    type: categorical
+    wave: update_panel
+    pct_missing: 44.9
+    categories:
+    - No degree at first institution, still enrolled at first institution
+    - No degree at first institution, not enrolled at any institution
+    - No degree at first institution, enrolled at a different institution
+    - Associate's degree attained at first institution
+    - Certificate attained at first institution
+    - Bachelor's degree attained at the first institution
+    codebook_codes:
+      '1': Bachelor's degree attained at the first institution
+      '2': Associate's degree attained at first institution
+      '3': Certificate attained at first institution
+      '4': No degree at first institution, still enrolled at first institution
+      '5': No degree at first institution, enrolled at a different institution
+      '6': No degree at first institution, not enrolled at any institution
+      '-7': Item legitimate skip/NA
+      '-8': Unit non-response
+      '-9': Missing
+  - name: X5STEMCRED
+    label: 'Postsecondary Transcript: Any known degree received in STEM field (using the SMART grant definition of STEM)'
+    type: binary
+    wave: postsecondary_records
+    pct_missing: 61.57
+    categories:
+    - 'No'
+    - 'Yes'
+    codebook_codes:
+      '0': 'No'
+      '1': 'Yes'
+      '-6': Component not applicable
+      '-7': Item legitimate skip/NA
+      '-8': Nonrespondent
+      '-9': Missing
+  - name: X5STEM1ATT
+    label: 'Postsecondary Transcript: STEM (using SMART grant definition of STEM): known credits attempted'
+    type: continuous
+    wave: postsecondary_records
+    pct_missing: 44.89
+    range:
+    - 0.0
+    - 115.0
+  - name: X5STEM1GPA
+    label: 'Postsecondary Transcript: STEM (using SMART grant definition of STEM): known GPA'
+    type: continuous
+    wave: postsecondary_records
+    pct_missing: 52.44
+    range:
+    - 0.0
+    - 4.0
+  - name: X5STEM3ATT
+    label: 'Postsecondary Transcript: STEM (using NCES grant definition of STEM): known credits attempted'
+    type: continuous
+    wave: postsecondary_records
+    pct_missing: 44.89
+    range:
+    - 0.0
+    - 120.0
+  - name: X5STEM3GPA
+    label: 'Postsecondary Transcript: STEM (using NCES grant definition of STEM): known GPA'
+    type: continuous
+    wave: postsecondary_records
+    pct_missing: 52.05
+    range:
+    - 0.0
+    - 4.0
+  predictors:
+    demographic:
+    - name: X1SEX
+      label: X1 Student's sex
+      type: binary
+      wave: base_year
+      pct_missing: 0.03
+      categories:
+      - Male
+      - Female
+      codebook_codes:
+        '1': Male
+        '2': Female
+        '-9': Missing
+      protected_attribute: true
+    - name: X1RACE
+      label: X1 Student's race/ethnicity-composite
+      type: categorical
+      wave: base_year
+      pct_missing: 4.28
+      categories:
+      - White, non-Hispanic
+      - Hispanic, race specified
+      - Black/African-American, non-Hispanic
+      - Asian, non-Hispanic
+      - More than one race, non-Hispanic
+      - Hispanic, no race specified
+      - Amer. Indian/Alaska Native, non-Hispanic
+      - Native Hawaiian/Pacific Islander, non-Hispanic
+      codebook_codes:
+        '1': Amer. Indian/Alaska Native, non-Hispanic
+        '2': Asian, non-Hispanic
+        '3': Black/African-American, non-Hispanic
+        '4': Hispanic, no race specified
+        '5': Hispanic, race specified
+        '6': More than one race, non-Hispanic
+        '7': Native Hawaiian/Pacific Islander, non-Hispanic
+        '8': White, non-Hispanic
+        '-9': Missing
+      protected_attribute: true
+    - name: X1HISPANIC
+      label: X1 Student is Hispanic/Latino/Latina-composite
+      type: binary
+      wave: base_year
+      pct_missing: 4.28
+      categories:
+      - 'No'
+      - 'Yes'
+      codebook_codes:
+        '0': 'No'
+        '1': 'Yes'
+        '-9': Missing
+    - name: X1WHITE
+      label: X1 Student is White-composite
+      type: binary
+      wave: base_year
+      pct_missing: 2.4
+      categories:
+      - Student is White
+      - Student is not White
+      codebook_codes:
+        '0': Student is not White
+        '1': Student is White
+        '-9': Missing
+    - name: X1BLACK
+      label: X1 Student is Black or African American-composite
+      type: binary
+      wave: base_year
+      pct_missing: 2.4
+      categories:
+      - Student is not Black
+      - Student is Black
+      codebook_codes:
+        '0': Student is not Black
+        '1': Student is Black
+        '-9': Missing
+    - name: X1ASIAN
+      label: X1 Student is Asian-composite
+      type: categorical
+      wave: base_year
+      pct_missing: 100.0
+      codebook_codes:
+        '-5': Data suppressed
+    - name: X1NATIVELANG
+      label: X1 Student's native language
+      type: categorical
+      wave: base_year
+      pct_missing: 100.0
+      codebook_codes:
+        '-5': Data suppressed
+    - name: X1DUALLANG
+      label: X1 Student dual-first language indicator
+      type: categorical
+      wave: base_year
+      pct_missing: 8.87
+      categories:
+      - First language is English only
+      - First language is a non-English language only
+      - First language is English and non-English equally
+      codebook_codes:
+        '1': First language is English only
+        '2': First language is a non-English language only
+        '3': First language is English and non-English equally
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1SES
+      label: X1 Socio-economic status composite
+      type: continuous
+      wave: base_year
+      pct_missing: 8.76
+      range:
+      - -1.9302
+      - 2.8807
+      protected_attribute: true
+    - name: X1SES_U
+      label: X1 Socio-economic status composite derived with locale (urbanicity)
+      type: continuous
+      wave: base_year
+      pct_missing: 8.77
+      range:
+      - -1.9183
+      - 2.9783
+      protected_attribute: true
+    - name: X1SESQ5
+      label: X1 Quintile coding of X1SES composite
+      type: categorical
+      wave: base_year
+      pct_missing: 8.76
+      categories:
+      - Fifth quintile (highest)
+      - Fourth quintile
+      - Third quintile
+      - Second quintile
+      - First quintile (lowest)
+      codebook_codes:
+        '1': First quintile (lowest)
+        '2': Second quintile
+        '3': Third quintile
+        '4': Fourth quintile
+        '5': Fifth quintile (highest)
+        '-8': Unit non-response
+      protected_attribute: true
+    - name: X1FAMINCOME
+      label: X1 Total family income from all sources 2008
+      type: categorical
+      wave: base_year
+      pct_missing: 28.69
+      categories:
+      - Family income > $15,000 and <= $35,000
+      - Family income > $35,000 and <= $55,000
+      - Family income > $55,000 and <= $75,000
+      - Family income > $75,000 and <= $95,000
+      - Family income less than or equal to $15,000
+      - Family income > $95,000 and <= $115,000
+      - Family income > $115,000 and <= $135,000
+      - Family income > $235,000
+      - Family income > $135,000 and <= $155,000
+      - Family income > $155,000 and <=$175,000
+      - Family income > $195,000 and <= $215,000
+      - Family income > $175,000 and <= $195,000
+      - Family income > $215,000 and <= $235,000
+      codebook_codes:
+        '1': Family income less than or equal to $15,000
+        '2': Family income > $15,000 and <= $35,000
+        '3': Family income > $35,000 and <= $55,000
+        '4': Family income > $55,000 and <= $75,000
+        '5': Family income > $75,000 and <= $95,000
+        '6': Family income > $95,000 and <= $115,000
+        '7': Family income > $115,000 and <= $135,000
+        '8': Family income > $135,000 and <= $155,000
+        '9': Family income > $155,000 and <=$175,000
+        '10': Family income > $175,000 and <= $195,000
+        '11': Family income > $195,000 and <= $215,000
+        '12': Family income > $215,000 and <= $235,000
+        '13': Family income > $235,000
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1HHNUMBER
+      label: X1 Number of 2009 household members
+      type: categorical
+      wave: base_year
+      pct_missing: 28.71
+      categories:
+      - 4 Household members
+      - 5 Household members
+      - 3 Household members
+      - 6 Household members
+      - 2 Household members
+      - 7 Household members
+      - 8 Household members
+      - 9 Household members
+      - 10 Household members
+      - 11+ Household members
+      codebook_codes:
+        '2': 2 Household members
+        '3': 3 Household members
+        '4': 4 Household members
+        '5': 5 Household members
+        '6': 6 Household members
+        '7': 7 Household members
+        '8': 8 Household members
+        '9': 9 Household members
+        '10': 10 Household members
+        '11': 11+ Household members
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1POVERTY130
+      label: X1 Poverty indicator (relative to 130% of Census poverty threshold)
+      type: binary
+      wave: base_year
+      pct_missing: 28.8
+      categories:
+      - At or above 130% poverty threshold
+      - Below 130% poverty threshold
+      codebook_codes:
+        '0': At or above 130% poverty threshold
+        '1': Below 130% poverty threshold
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1POVERTY185
+      label: X1 Poverty indicator (relative to 185% of Census poverty threshold)
+      type: binary
+      wave: base_year
+      pct_missing: 28.8
+      categories:
+      - At or above 185% poverty threshold
+      - Below 185% poverty threshold
+      codebook_codes:
+        '0': At or above 185% poverty threshold
+        '1': Below 185% poverty threshold
+        '-8': Unit non-response
+        '-9': Missing
+    family:
+    - name: X1PARRESP
+      label: X1 Whether parent questionnaire respondent is Parent 1
+      type: binary
+      wave: base_year
+      pct_missing: 28.57
+      categories:
+      - Parent questionnaire respondent is P1
+      - Parent questionnaire respondent is neither P1 nor P2
+      codebook_codes:
+        '0': Parent questionnaire respondent is neither P1 nor P2
+        '1': Parent questionnaire respondent is P1
+        '-8': Unit non-response
+    - name: X1PAR1EDU
+      label: 'X1 Parent 1: highest level of education'
+      type: categorical
+      wave: base_year
+      pct_missing: 28.59
+      categories:
+      - High school diploma or GED
+      - Bachelor's degree
+      - Associate's degree
+      - Master's degree
+      - Less than high school
+      - Ph.D/M.D/Law/other high lvl prof degree
+      codebook_codes:
+        '1': Less than high school
+        '2': High school diploma or GED
+        '3': Associate's degree
+        '4': Bachelor's degree
+        '5': Master's degree
+        '7': Ph.D/M.D/Law/other high lvl prof degree
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1PAR2EDU
+      label: 'X1 Parent 2: highest level of education'
+      type: categorical
+      wave: base_year
+      pct_missing: 43.99
+      categories:
+      - High school diploma or GED
+      - Bachelor's degree
+      - Associate's degree
+      - Less than high school
+      - Master's degree
+      - Ph.D/M.D/Law/other high lvl prof degree
+      codebook_codes:
+        '1': Less than high school
+        '2': High school diploma or GED
+        '3': Associate's degree
+        '4': Bachelor's degree
+        '5': Master's degree
+        '7': Ph.D/M.D/Law/other high lvl prof degree
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1PAREDU
+      label: X1 Parents'/guardians' highest level of education
+      type: categorical
+      wave: base_year
+      pct_missing: 28.6
+      categories:
+      - High school diploma or GED
+      - Bachelor's degree
+      - Associate's degree
+      - Master's degree
+      - Ph.D/M.D/Law/other high lvl prof degree
+      - Less than high school
+      codebook_codes:
+        '1': Less than high school
+        '2': High school diploma or GED
+        '3': Associate's degree
+        '4': Bachelor's degree
+        '5': Master's degree
+        '7': Ph.D/M.D/Law/other high lvl prof degree
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1PARPATTERN
+      label: X1 P1-P2 relationship pattern
+      type: categorical
+      wave: base_year
+      pct_missing: 28.66
+      categories:
+      - Two bio/adoptive parents
+      - Bio/adoptive mother only
+      - Bio/adoptive mother and other guardian
+      - Bio/adoptive father and other guardian
+      - Bio/adoptive father only
+      - Two other guardians
+      - Student lives with P1/P2 less than half the time
+      - Other female guardian only
+      - Other male guardian only
+      codebook_codes:
+        '1': Two bio/adoptive parents
+        '2': Bio/adoptive mother and other guardian
+        '4': Bio/adoptive father and other guardian
+        '6': Two other guardians
+        '7': Bio/adoptive mother only
+        '8': Bio/adoptive father only
+        '9': Other female guardian only
+        '10': Other male guardian only
+        '11': Student lives with P1/P2 less than half the time
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1MOMEDU
+      label: X1 Mother's/female guardian's highest level of education
+      type: categorical
+      wave: base_year
+      pct_missing: 28.59
+      categories:
+      - High school diploma or GED
+      - Bachelor's degree
+      - Associate's degree
+      - Master's degree
+      - Less than high school
+      - No bio/adoptive/step-mother in household
+      - Ph.D/M.D/Law/other high lvl prof degree
+      codebook_codes:
+        '0': No bio/adoptive/step-mother in household
+        '1': Less than high school
+        '2': High school diploma or GED
+        '3': Associate's degree
+        '4': Bachelor's degree
+        '5': Master's degree
+        '7': Ph.D/M.D/Law/other high lvl prof degree
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1DADEDU
+      label: X1 Father's/male guardian's highest level of education
+      type: categorical
+      wave: base_year
+      pct_missing: 28.59
+      categories:
+      - High school diploma or GED
+      - No bio/adoptive/step-father in household
+      - Bachelor's degree
+      - Associate's degree
+      - Master's degree
+      - Less than high school
+      - Ph.D/M.D/Law/other high lvl prof degree
+      codebook_codes:
+        '0': No bio/adoptive/step-father in household
+        '1': Less than high school
+        '2': High school diploma or GED
+        '3': Associate's degree
+        '4': Bachelor's degree
+        '5': Master's degree
+        '7': Ph.D/M.D/Law/other high lvl prof degree
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1PAREDEXPCT
+      label: X1 How far in school parent thinks 9th grader will go
+      type: categorical
+      wave: base_year
+      pct_missing: 36.05
+      categories:
+      - Complete a Bachelor's degree
+      - Complete Ph.D/M.D/Law/other prof degree
+      - Complete a Master's degree
+      - High school diploma or GED
+      - Complete an Associate's degree
+      - Start an Associate's degree
+      - Start a Bachelor's degree
+      - Start a Master's degree
+      - Less than high school
+      - Start Ph.D/M.D/Law/other prof degree
+      codebook_codes:
+        '1': Less than high school
+        '2': High school diploma or GED
+        '3': Start an Associate's degree
+        '4': Complete an Associate's degree
+        '5': Start a Bachelor's degree
+        '6': Complete a Bachelor's degree
+        '7': Start a Master's degree
+        '8': Complete a Master's degree
+        '9': Start Ph.D/M.D/Law/other prof degree
+        '10': Complete Ph.D/M.D/Law/other prof degree
+        '11': Don't know
+        '-8': Unit non-response
+        '-9': Missing
+    academic:
+    - name: X1TXMTH
+      label: X1 Mathematics theta score
+      type: continuous
+      wave: base_year
+      pct_missing: 8.76
+      range:
+      - -2.5751
+      - 3.0283
+    - name: X1TXMTSCOR
+      label: X1 Mathematics standardized theta score
+      type: continuous
+      wave: base_year
+      pct_missing: 8.76
+      range:
+      - 24.018
+      - 82.1876
+      note: Baseline standardized math score (T-score) preferred for prediction baselines.
+    - name: X1TXMQUINT
+      label: X1 Mathematics quintile score
+      type: categorical
+      wave: base_year
+      pct_missing: 8.76
+      categories:
+      - Fifth (highest) quintile
+      - Fouth quintile
+      - Third (middle) quintile
+      - Second quintile
+      - First (lowest) quintile
+      codebook_codes:
+        '1': First (lowest) quintile
+        '2': Second quintile
+        '3': Third (middle) quintile
+        '4': Fouth quintile
+        '5': Fifth (highest) quintile
+        '-8': Unit non-response
+    - name: X1STUEDEXPCT
+      label: X1 How far in school 9th grader thinks he/she will get
+      type: categorical
+      wave: base_year
+      pct_missing: 28.46
+      categories:
+      - Complete Ph.D/M.D/Law/other prof degree
+      - Complete a Master's degree
+      - Complete a Bachelor's degree
+      - High school diploma or GED
+      - Complete an Associate's degree
+      - Start a Master's degree
+      - Start Ph.D/M.D/Law/other prof degree
+      - Start an Associate's degree
+      - Start a Bachelor's degree
+      - Less than high school
+      codebook_codes:
+        '1': Less than high school
+        '2': High school diploma or GED
+        '3': Start an Associate's degree
+        '4': Complete an Associate's degree
+        '5': Start a Bachelor's degree
+        '6': Complete a Bachelor's degree
+        '7': Start a Master's degree
+        '8': Complete a Master's degree
+        '9': Start Ph.D/M.D/Law/other prof degree
+        '10': Complete Ph.D/M.D/Law/other prof degree
+        '11': Don't know
+        '-8': Unit non-response
+    - name: X1SCIID
+      label: X1 Scale of student's science identity
+      type: continuous
+      wave: base_year
+      pct_missing: 10.19
+      range:
+      - -1.57
+      - 2.15
+    - name: X1SCIEFF
+      label: X1 Scale of student's science self-efficacy
+      type: continuous
+      wave: base_year
+      pct_missing: 26.58
+      range:
+      - -2.91
+      - 1.83
+    - name: X1SCIINT
+      label: X1 Scale of student's interest in fall 2009 science course
+      type: continuous
+      wave: base_year
+      pct_missing: 29.89
+      range:
+      - -2.59
+      - 2.03
+    - name: X1SCIUTI
+      label: X1 Scale of student's science utility
+      type: continuous
+      wave: base_year
+      pct_missing: 26.38
+      range:
+      - -3.1
+      - 1.69
+    - name: X1SCHOOLBEL
+      label: X1 Scale of student's sense of school belonging
+      type: continuous
+      wave: base_year
+      pct_missing: 12.41
+      range:
+      - -4.35
+      - 1.59
+    - name: X1SCHOOLENG
+      label: X1 Scale of student's school engagement
+      type: continuous
+      wave: base_year
+      pct_missing: 12.14
+      range:
+      - -3.38
+      - 1.39
+    - name: X1IEPFLAG
+      label: X1 Individualized Education Plan
+      type: binary
+      wave: base_year
+      pct_missing: 56.67
+      categories:
+      - Student has no IEP
+      - Student has an IEP
+      codebook_codes:
+        '0': Student has no IEP
+        '1': Student has an IEP
+        '-9': Missing
+    math_attitudes:
+    - name: X1MTHID
+      label: X1 Scale of student's mathematics identity
+      type: continuous
+      wave: base_year
+      pct_missing: 9.97
+      range:
+      - -1.73
+      - 1.76
+    - name: X1MTHEFF
+      label: X1 Scale of student's mathematics self-efficacy
+      type: continuous
+      wave: base_year
+      pct_missing: 20.91
+      range:
+      - -2.92
+      - 1.62
+    - name: X1MTHINT
+      label: X1 Scale of student's interest in fall 2009 math course
+      type: continuous
+      wave: base_year
+      pct_missing: 21.74
+      range:
+      - -2.46
+      - 2.08
+    - name: X1MTHUTI
+      label: X1 Scale of student's mathematics utility
+      type: continuous
+      wave: base_year
+      pct_missing: 20.0
+      range:
+      - -3.51
+      - 1.31
+    academic_followup:
+    - name: X2TXMTH
+      label: X2 Mathematics theta score
+      type: continuous
+      wave: first_follow_up
+      pct_missing: 12.38
+      range:
+      - -2.6019
+      - 4.5046
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X2TXMQUINT
+      label: X2 Mathematics quintile score
+      type: categorical
+      wave: first_follow_up
+      pct_missing: 12.38
+      categories:
+      - Fifth (highest) quintile
+      - Fouth quintile
+      - Third (middle) quintile
+      - Second quintile
+      - First (lowest) quintile
+      codebook_codes:
+        '1': First (lowest) quintile
+        '2': Second quintile
+        '3': Third (middle) quintile
+        '4': Fouth quintile
+        '5': Fifth (highest) quintile
+        '-8': Unit non-response
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X2MTHID
+      label: X2 Scale of student's mathematics identity
+      type: continuous
+      wave: first_follow_up
+      pct_missing: 15.42
+      range:
+      - -1.54
+      - 1.82
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X2MTHEFF
+      label: X2 Scale of student's mathematics self-efficacy
+      type: continuous
+      wave: first_follow_up
+      pct_missing: 15.91
+      range:
+      - -2.5
+      - 1.73
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X2MTHINT_R
+      label: X2 Scale of student's interest in fall 2009 math course (REVISED)
+      type: continuous
+      wave: first_follow_up
+      pct_missing: 29.59
+      range:
+      - -1.89
+      - 2.17
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X2MTHUTI
+      label: X2 Scale of student's mathematics utility
+      type: continuous
+      wave: first_follow_up
+      pct_missing: 15.44
+      range:
+      - -3.94
+      - 1.21
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X2STUEDEXPCT
+      label: X2 How far in school sample member thinks he/she will get
+      type: categorical
+      wave: first_follow_up
+      pct_missing: 21.34
+      categories:
+      - Complete Bachelor's degree
+      - Complete Master's degree
+      - Complete Ph.D./M.D./law degree/other high level professional degree
+      - Complete Associate's degree
+      - Complete HS diploma/GED/alternative HS credential
+      - Complete certificate/diploma from school providing occupational training
+      - Start, but not complete Master's degree
+      - Start, but not complete Bachelor's degree
+      - Start, but not complete Ph.D./M.D./law degree/high level professional degree
+      - Start, but not complete Associate's degree
+      - Less than high school completion
+      - Start, but not complete certificate/diploma from school providing occ training
+      codebook_codes:
+        '1': Less than high school completion
+        '2': Complete HS diploma/GED/alternative HS credential
+        '3': Start, but not complete certificate/diploma from school providing occ training
+        '4': Complete certificate/diploma from school providing occupational training
+        '5': Start, but not complete Associate's degree
+        '6': Complete Associate's degree
+        '7': Start, but not complete Bachelor's degree
+        '8': Complete Bachelor's degree
+        '9': Start, but not complete Master's degree
+        '10': Complete Master's degree
+        '11': Start, but not complete Ph.D./M.D./law degree/high level professional degree
+        '12': Complete Ph.D./M.D./law degree/other high level professional degree
+        '13': Don't know
+        '-8': Unit non-response
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X2SES
+      label: X2 Socio-economic status composite
+      type: continuous
+      wave: first_follow_up
+      pct_missing: 10.99
+      range:
+      - -1.7501
+      - 2.2824
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X2SCHOOLCLI
+      label: X2 Scale of administrator's assessment of school climate
+      type: continuous
+      wave: first_follow_up
+      pct_missing: 27.33
+      range:
+      - -3.36
+      - 2.58
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X2ENROLSTAT
+      label: X2 Student enrollment status
+      type: categorical
+      wave: first_follow_up
+      pct_missing: 0.0
+      categories:
+      - In base year school
+      - Transfer
+      - Dropout
+      - Unknown status
+      - Home school
+      - Out of scope
+      - Early gradute
+      - Not in base year school or reason unknown
+      codebook_codes:
+        '1': In base year school
+        '2': Transfer
+        '3': Home school
+        '4': Early gradute
+        '5': Dropout
+        '6': Not in base year school or reason unknown
+        '7': Unknown status
+        '8': Out of scope
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X2EVERDROP
+      label: X2 Ever dropout
+      type: binary
+      wave: first_follow_up
+      pct_missing: 0.0
+      categories:
+      - 'No'
+      - 'Yes'
+      codebook_codes:
+        '0': 'No'
+        '1': 'Yes'
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    course_taking:
+    - name: S3CLASSES
+      label: S3 B01A Taking postsecondary classes as of Nov 1 2013
+      type: binary
+      wave: second_follow_up
+      pct_missing: 28.19
+      categories:
+      - 'Yes'
+      - 'No'
+      codebook_codes:
+        '1': 'Yes'
+        '2': 'No'
+        '3': Don't know
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X3TCREDENG
+      label: 'X3 Credits earned in: English'
+      type: continuous
+      wave: second_follow_up
+      pct_missing: 6.7
+      range:
+      - 0.0
+      - 9.0
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X3TCREDMAT
+      label: 'X3 Credits earned in: mathematics'
+      type: continuous
+      wave: second_follow_up
+      pct_missing: 6.7
+      range:
+      - 0.0
+      - 8.0
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X3TCREDSCI
+      label: 'X3 Credits earned in: science'
+      type: continuous
+      wave: second_follow_up
+      pct_missing: 6.7
+      range:
+      - 0.0
+      - 8.0
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X3TCREDSOCST
+      label: 'X3 Credits earned in: social studies'
+      type: continuous
+      wave: second_follow_up
+      pct_missing: 6.7
+      range:
+      - 0.0
+      - 8.0
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X3TCREDTOT
+      label: X3 Total credits earned
+      type: continuous
+      wave: second_follow_up
+      pct_missing: 6.7
+      range:
+      - 0.0
+      - 36.0
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X3TCREDAP
+      label: 'X3 Credits earned in: AP courses'
+      type: categorical
+      wave: second_follow_up
+      pct_missing: 100.0
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X3TCREDAPENG
+      label: 'X3 Credits earned in: AP/IB English'
+      type: continuous
+      wave: second_follow_up
+      pct_missing: 6.7
+      range:
+      - 0.0
+      - 3.0
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X3TCREDAPMTH
+      label: 'X3 Credits earned in: AP/IB mathematics courses'
+      type: continuous
+      wave: second_follow_up
+      pct_missing: 6.7
+      range:
+      - 0.0
+      - 3.0
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X3TCREDAPSCI
+      label: 'X3 Credits earned in: AP/IB science courses'
+      type: continuous
+      wave: second_follow_up
+      pct_missing: 6.7
+      range:
+      - 0.0
+      - 4.0
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X3THISCI
+      label: X3 Highest level science course taken
+      type: categorical
+      wave: second_follow_up
+      pct_missing: 6.95
+      categories:
+      - General Science
+      - Specialty science
+      - AP/IB science
+      - Advanced studies
+      - No science
+      codebook_codes:
+        '0': No science
+        '1': General Science
+        '2': Specialty science
+        '3': Advanced studies
+        '5': AP/IB science
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    school_level:
+    - name: X1LOCALE
+      label: X1 School locale (urbanicity)
+      type: categorical
+      wave: base_year
+      pct_missing: 0.0
+      level: school
+      categories:
+      - Suburb
+      - City
+      - Rural
+      - Town
+      codebook_codes:
+        '1': City
+        '2': Suburb
+        '3': Town
+        '4': Rural
+    - name: X1REGION
+      label: X1 School geographic region
+      type: categorical
+      wave: base_year
+      pct_missing: 0.0
+      level: school
+      categories:
+      - South
+      - Midwest
+      - West
+      - Northeast
+      codebook_codes:
+        '1': Northeast
+        '2': Midwest
+        '3': South
+        '4': West
+    - name: X1CONTROL
+      label: X1 School control
+      type: binary
+      wave: base_year
+      pct_missing: 0.0
+      level: school
+      categories:
+      - Public
+      - Catholic or other private
+      codebook_codes:
+        '1': Public
+        '2': Catholic or other private
+    - name: X1SCHOOLCLI
+      label: X1 Scale of administrator's assessment of school climate
+      type: continuous
+      wave: base_year
+      pct_missing: 21.61
+      level: school
+      range:
+      - -4.22
+      - 1.97
+      note: School-level scale replicated across students in public-use extract.
+    - name: X1COUPERTEA
+      label: X1 Scale of counselor's perceptions of teacher expectations
+      type: continuous
+      wave: base_year
+      pct_missing: 12.6
+      level: school
+      range:
+      - -4.92
+      - 1.56
+    - name: X1COUPERCOU
+      label: X1 Scale of counselor's perceptions of counselor expectations
+      type: continuous
+      wave: base_year
+      pct_missing: 11.5
+      level: school
+      range:
+      - -6.43
+      - 1.15
+    - name: X1COUPERPRI
+      label: X1 Scale of counselor's perceptions of principal's expectations
+      type: continuous
+      wave: base_year
+      pct_missing: 13.96
+      level: school
+      range:
+      - -5.51
+      - 1.1
+    - name: X1FREELUNCH
+      label: X1 Grade 9 percent free lunch-categorical
+      type: categorical
+      wave: base_year
+      pct_missing: 100.0
+      level: school
+      codebook_codes:
+        '-5': Data suppressed
+    - name: X1REPEAT9TH
+      label: X1 Percent of 9th graders repeating 9th grade
+      type: categorical
+      wave: base_year
+      pct_missing: 100.0
+      level: school
+      codebook_codes:
+        '-5': Data suppressed
+    teacher:
+    - name: X1TMCERT
+      label: X1 Math teacher's math teaching certification
+      type: categorical
+      wave: base_year
+      pct_missing: 27.66
+      categories:
+      - Regular certification; includes high school
+      - Emergency/temporary/waiver certification; elem thru HS
+      - No math teaching certification
+      - Probationary certification; elem thru HS
+      - Regular certification; elementary or middle school only
+      codebook_codes:
+        '0': No math teaching certification
+        '1': Regular certification; includes high school
+        '2': Regular certification; elementary or middle school only
+        '3': Probationary certification; elem thru HS
+        '5': Emergency/temporary/waiver certification; elem thru HS
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1TMEFF
+      label: X1 Scale of math teacher's self-efficacy
+      type: continuous
+      wave: base_year
+      pct_missing: 36.42
+      range:
+      - -3.26
+      - 3.01
+    - name: X1TMEXP
+      label: X1 Scale of math teacher's perceptions of math teachers' expectations
+      type: continuous
+      wave: base_year
+      pct_missing: 34.38
+      range:
+      - -5.13
+      - 1.29
+    - name: X1TMPRINC
+      label: X1 Scale of math teacher's perceptions of principal support
+      type: continuous
+      wave: base_year
+      pct_missing: 36.16
+      range:
+      - -3.65
+      - 1.48
+    - name: X1TSCERT
+      label: X1 Science teacher's science teaching certification
+      type: categorical
+      wave: base_year
+      pct_missing: 34.31
+      categories:
+      - Regular certification; includes high school
+      - Emergency/temporary/waiver certification; elem thru HS
+      - No science teaching certification
+      - Probationary certification; elem thru HS
+      - Regular certification; elementary or middle school only
+      codebook_codes:
+        '0': No science teaching certification
+        '1': Regular certification; includes high school
+        '2': Regular certification; elementary or middle school only
+        '3': Probationary certification; elem thru HS
+        '5': Emergency/temporary/waiver certification; elem thru HS
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+    - name: X1TSEFF
+      label: X1 Scale of science teacher's self-efficacy
+      type: continuous
+      wave: base_year
+      pct_missing: 41.89
+      range:
+      - -3.07
+      - 3.17
+    - name: X1TSEXP
+      label: X1 Scale of science teacher's perceptions of science teachers expectations
+      type: continuous
+      wave: base_year
+      pct_missing: 40.44
+      range:
+      - -4.94
+      - 1.37
+    behavioral:
+    - name: X3EVERDROP
+      label: X3 Ever dropout
+      type: binary
+      wave: second_follow_up
+      pct_missing: 0.0
+      categories:
+      - No known dropout episode
+      - At least one known dropout episode
+      codebook_codes:
+        '0': No known dropout episode
+        '1': At least one known dropout episode
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4EVERDROP
+      label: X4 Ever dropped out of high school
+      type: binary
+      wave: update_panel
+      pct_missing: 26.26
+      categories:
+      - 'No'
+      - 'Yes'
+      codebook_codes:
+        '0': 'No'
+        '1': 'Yes'
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4HS2PSMOS
+      label: X4 Months between high school and postsecondary education
+      type: continuous
+      wave: update_panel
+      pct_missing: 45.15
+      range:
+      - 0.0
+      - 30.0
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    postsecondary:
+    - name: X4EVRAPPCLG
+      label: X4 Whether applied to or registered at a college
+      type: binary
+      wave: update_panel
+      pct_missing: 28.37
+      categories:
+      - Applied or registered
+      - Never applied or registered
+      codebook_codes:
+        '0': Never applied or registered
+        '1': Applied or registered
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4PS1SECTOR
+      label: X4 First postsecondary institution sector
+      type: categorical
+      wave: update_panel
+      pct_missing: 45.16
+      categories:
+      - Public, 4-year or above, doctorate granting
+      - Public, 2-year
+      - Private nonprofit, 4-year or above, doctorate granting
+      - Private nonprofit, 4-year or above, nondoctorate granting
+      - Public, 4-year or above, nondoctorate granting, primarily baccalaureate
+      - Public, 4-year or above, nondoctorate granting, primarily subbaccalaureate
+      - For-profit, 4-year or above
+      - For-profit, less than 2-year
+      - For-profit, 2-year
+      - Public, less than 2-year
+      - Private nonprofit, 2-year
+      - Private nonprofit, less than 2-year
+      codebook_codes:
+        '1': Public, 4-year or above, doctorate granting
+        '2': Public, 4-year or above, nondoctorate granting, primarily baccalaureate
+        '3': Public, 4-year or above, nondoctorate granting, primarily subbaccalaureate
+        '4': Private nonprofit, 4-year or above, doctorate granting
+        '5': Private nonprofit, 4-year or above, nondoctorate granting
+        '6': For-profit, 4-year or above
+        '7': Public, 2-year
+        '8': Private nonprofit, 2-year
+        '9': For-profit, 2-year
+        '10': Public, less than 2-year
+        '11': Private nonprofit, less than 2-year
+        '12': For-profit, less than 2-year
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4PS1LEVEL
+      label: X4 First postsecondary institution level
+      type: categorical
+      wave: update_panel
+      pct_missing: 44.87
+      categories:
+      - 4-year
+      - 2-year
+      - Less than 2-year
+      codebook_codes:
+        '1': 4-year
+        '2': 2-year
+        '3': Less than 2-year
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4PS1CTRL
+      label: X4 First postsecondary institution control
+      type: categorical
+      wave: update_panel
+      pct_missing: 44.91
+      categories:
+      - Public
+      - Private non-profit
+      - For-profit
+      codebook_codes:
+        '1': Public
+        '2': Private non-profit
+        '3': For-profit
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4PS1SELECT
+      label: X4 First postsecondary institution selectivity
+      type: categorical
+      wave: update_panel
+      pct_missing: 44.87
+      categories:
+      - Selectivity not classified, 2-year institution
+      - Moderately selective, 4-year institution
+      - Highly selective, 4-year institution
+      - Inclusive, 4-year institution
+      - Selectivity not classified, 4-year institution
+      - Selectivity not classified, less than 2-year institution
+      codebook_codes:
+        '1': Highly selective, 4-year institution
+        '2': Moderately selective, 4-year institution
+        '3': Inclusive, 4-year institution
+        '4': Selectivity not classified, 4-year institution
+        '5': Selectivity not classified, 2-year institution
+        '6': Selectivity not classified, less than 2-year institution
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4PS1DEGTYPE1
+      label: X4 First degree or certificate at first institution pursued
+      type: categorical
+      wave: update_panel
+      pct_missing: 44.9
+      categories:
+      - Bachelor's degree
+      - Associate's degree
+      - No degree or certificate program, just undergraduate classes
+      - Certificate or diploma
+      codebook_codes:
+        '1': Bachelor's degree
+        '2': Associate's degree
+        '3': Certificate or diploma
+        '4': No degree or certificate program, just undergraduate classes
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4REFSECTOR
+      label: X4 Sector of reference institution
+      type: categorical
+      wave: update_panel
+      pct_missing: 45.33
+      categories:
+      - Public, 4-year or above, doctorate granting
+      - Public, 2-year
+      - Private nonprofit, 4-year or above, doctorate granting
+      - Private nonprofit, 4-year or above, nondoctorate granting
+      - Public, 4-year or above, nondoctorate granting, primarily baccalaureate
+      - Public, 4-year or above, nondoctorate granting, primarily subbaccalaureate
+      - For-profit, 4-year or above
+      - For-profit, less than 2-year
+      - For-profit, 2-year
+      - Public, less than 2-year
+      - Private nonprofit, less than 2-year
+      - Private nonprofit, 2-year
+      codebook_codes:
+        '1': Public, 4-year or above, doctorate granting
+        '2': Public, 4-year or above, nondoctorate granting, primarily baccalaureate
+        '3': Public, 4-year or above, nondoctorate granting, primarily subbaccalaureate
+        '4': Private nonprofit, 4-year or above, doctorate granting
+        '5': Private nonprofit, 4-year or above, nondoctorate granting
+        '6': For-profit, 4-year or above
+        '7': Public, 2-year
+        '8': Private nonprofit, 2-year
+        '9': For-profit, 2-year
+        '10': Public, less than 2-year
+        '11': Private nonprofit, less than 2-year
+        '12': For-profit, less than 2-year
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4REFLEVEL
+      label: X4 Level of reference institution
+      type: categorical
+      wave: update_panel
+      pct_missing: 44.99
+      categories:
+      - 4-year
+      - 2-year
+      - Less than 2-year
+      codebook_codes:
+        '1': 4-year
+        '2': 2-year
+        '3': Less than 2-year
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4REFCTRL
+      label: X4 Control of reference institution
+      type: categorical
+      wave: update_panel
+      pct_missing: 45.06
+      categories:
+      - Public
+      - Private nonprofit
+      - For-profit
+      codebook_codes:
+        '1': Public
+        '2': Private nonprofit
+        '3': For-profit
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4REFDEG
+      label: X4 Reference degree identifier
+      type: categorical
+      wave: update_panel
+      pct_missing: 100.0
+      codebook_codes:
+        '-5': Data suppressed
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4REFDEGTYPE
+      label: X4 Reference undergraduate degree or certificate program
+      type: categorical
+      wave: update_panel
+      pct_missing: 44.87
+      categories:
+      - Bachelor's degree
+      - Associate's degree
+      - Certificate or diploma
+      - No reference degree
+      codebook_codes:
+        '1': Bachelor's degree
+        '2': Associate's degree
+        '3': Certificate or diploma
+        '4': No reference degree
+        '-7': Item legitimate skip/NA
+        '-8': Unit non-response
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X4RFDGMJ16
+      label: X4 Reference degree major, 6 digit
+      type: categorical
+      wave: update_panel
+      pct_missing: 100.0
+      codebook_codes:
+        '-5': Data suppressed
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    x5_records:
+    - name: X5SRRESP
+      label: 'Student Records: Student Record response status'
+      type: categorical
+      wave: postsecondary_records
+      pct_missing: 0.0
+      categories:
+      - Postsecondary attendance reported post-high school, SR resp
+      - Postsecondary attendance reported post-high school, SR nonresp
+      - Postsecondary attendance post-high school unknown or out of scope
+      - No postsecondary attendance reported post-high school
+      codebook_codes:
+        '0': No postsecondary attendance reported post-high school
+        '1': Postsecondary attendance reported post-high school, SR resp
+        '2': Postsecondary attendance reported post-high school, SR nonresp
+        '3': Postsecondary attendance post-high school unknown or out of scope
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X5TRANRESP
+      label: 'Postsecondary Transcript: Transcript response status'
+      type: categorical
+      wave: postsecondary_records
+      pct_missing: 0.0
+      categories:
+      - Postsecondary attendance reported, transcript respondent
+      - Postsecondary attendance reported, transcript nonrespondent
+      - Postsecondary attendance unknown or out of scope
+      - No postsecondary attendance reported
+      codebook_codes:
+        '0': No postsecondary attendance reported
+        '1': Postsecondary attendance reported, transcript respondent
+        '2': Postsecondary attendance reported, transcript nonrespondent
+        '3': Postsecondary attendance unknown or out of scope
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X5POSTHSAY
+      label: 'Postsecondary Transcript: Academic year of first known postsecondary enrollment after high school completion.'
+      type: categorical
+      wave: postsecondary_records
+      pct_missing: 45.15
+      categories:
+      - 2013-14 academic year
+      - 2012-13 academic year
+      - 2014-15 academic year
+      - 2015-16 academic year
+      - 2016-17 academic year
+      - 2011-12 academic year
+      codebook_codes:
+        '2012': 2011-12 academic year
+        '2013': 2012-13 academic year
+        '2014': 2013-14 academic year
+        '2015': 2014-15 academic year
+        '2016': 2015-16 academic year
+        '2017': 2016-17 academic year
+        '-6': Component not applicable
+        '-7': Item legitimate skip/NA
+        '-8': Nonrespondent
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X5PS1SEC
+      label: 'Postsecondary Transcript: Sector of first known postsecondary institution'
+      type: categorical
+      wave: postsecondary_records
+      pct_missing: 44.57
+      categories:
+      - 2-year public
+      - 4-year public, doctorate granting
+      - 4-year private, nonprofit, doctorate granting
+      - 4-year private, nonprofit, nondoctorate granting
+      - 4-year public, nondoctorate granting, primarily baccalaureate
+      - 4-year public, nondoctorate granting, primarily subbaccalaureate
+      - 4-year private, for-profit
+      - Less than 2-year private, for-profit
+      - 2-year private, for-profit
+      - 2-year private, nonprofit
+      - Less than 2-year public
+      codebook_codes:
+        '1': 4-year public, doctorate granting
+        '2': 4-year public, nondoctorate granting, primarily baccalaureate
+        '3': 4-year public, nondoctorate granting, primarily subbaccalaureate
+        '4': 4-year private, nonprofit, doctorate granting
+        '5': 4-year private, nonprofit, nondoctorate granting
+        '6': 4-year private, for-profit
+        '7': 2-year public
+        '8': 2-year private, nonprofit
+        '9': 2-year private, for-profit
+        '10': Less than 2-year public
+        '12': Less than 2-year private, for-profit
+        '-6': Component not applicable
+        '-8': Nonrespondent
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+    - name: X5ENRATT
+      label: 'Postsecondary Transcript: Combined known enrollment and attainment as of June 2016'
+      type: categorical
+      wave: postsecondary_records
+      pct_missing: 46.02
+      categories:
+      - No attainment, enrolled 4 year
+      - No attainment, not enrolled
+      - No attainment, enrolled less than 4 year
+      - Attained associate's, not enrolled
+      - Attained associate's, enrolled 4 year
+      - Attained certificate, not enrolled
+      - Attained bachelor's, not enrolled
+      - Attained certificate, enrolled less than 4 year
+      - Attained associate's, enrolled less than 4 year
+      - Attained bachelor's, enrolled 4 years or less
+      - Attained certificate, enrolled 4 year
+      codebook_codes:
+        '1': No attainment, not enrolled
+        '2': No attainment, enrolled less than 4 year
+        '3': No attainment, enrolled 4 year
+        '5': Attained certificate, not enrolled
+        '6': Attained certificate, enrolled less than 4 year
+        '7': Attained certificate, enrolled 4 year
+        '9': Attained associate's, not enrolled
+        '10': Attained associate's, enrolled less than 4 year
+        '11': Attained associate's, enrolled 4 year
+        '13': Attained bachelor's, not enrolled
+        '15': Attained bachelor's, enrolled 4 years or less
+        '-6': Component not applicable
+        '-8': Nonrespondent
+        '-9': Missing
+      temporal_warning: Later-wave predictor; do not use to predict earlier-wave outcomes.
+tier2_config:
+  enabled: true
+  auto_generated_file: hsls09_tier2_auto_v2.yaml
+  usage_policy: Tier 2 variables are available after Tier 3 exclusions and require explicit educational rationale, temporal
+    checks, and fairness-risk review before model inclusion.
+missingness:
+  mechanism_assumption: mixed_MAR_MNAR
+  sentinel_codes_or_labels:
+  - '-9'
+  - '-8'
+  - '-7'
+  - '-6'
+  - '-5'
+  - Missing
+  - Unit non-response
+  - Data suppressed
+  - Component not applicable
+  - Item legitimate skip/NA
+  recommended_method: multiple_imputation_or_indicator_plus_sensitivity
+  mnar_candidates:
+  - dropout_derived
+  - X4EVRATNDCLG
+  - X4RFDGMJ14Y
+  - X5STEMCRED
+  note: This public-use extract mixes numeric sentinels and labeled missing categories; workflows must standardize missing
+    parsing before modeling.
+common_pitfalls:
+- id: temporal_leakage
+  description: Using later-wave predictors to model earlier-wave outcomes.
+  check: Ensure predictor wave precedes outcome wave in temporal_order.
+  severity: critical
+- id: same_wave_target_leakage
+  description: Using near-duplicate transcript/composite variables from same wave as target.
+  check: Review same-wave high-correlation predictors and remove proxy targets.
+  severity: critical
+- id: public_use_suppression
+  description: Treating 'Data suppressed' labels as substantive signal.
+  check: Map suppression labels to missing before analysis.
+  severity: major
+- id: school_level_misinterpretation
+  description: Assuming school IDs are available for multilevel random effects in this extract.
+  check: Document suppression and clustering limitations in methods.
+  severity: major
+- id: protected_attribute_misuse
+  description: Using protected attributes without fairness diagnostics.
+  check: If protected predictors are used, require subgroup and disparity reporting.
+  severity: major
+canonical_research_questions:
+  prediction:
+  - Predict first follow-up math achievement (X2TXMTSCOR) from base-year covariates.
+  - Predict transcript-based academic GPA (X3TGPAACAD) from early attitudes, SES, and course signals.
+  - Predict high school completion risk (dropout_derived) from baseline and follow-up indicators.
+  - Predict postsecondary attendance (X4EVRATNDCLG) from transcript and expectation variables.
+  - Predict STEM major orientation outcomes (X4RFDGMJSTEM, X5STEMCRED) from longitudinal math/science pathways.
+  fairness:
+  - Evaluate race and gender subgroup performance disparities in achievement and attainment prediction.
+  - Assess SES-gradient error differences for postsecondary enrollment and STEM outcomes.
+  - Run intersectional checks (race x sex x SES quintile) for calibration and error parity.
+  policy:
+  - Estimate associations between school climate/counseling context and postsecondary pathways.
+  - Model transcript math/science progression as mediators of STEM-related outcomes.

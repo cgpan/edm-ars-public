@@ -1,0 +1,12 @@
+anthropic>=0.40.0
+pandas>=2.0
+numpy>=1.25
+scikit-learn>=1.4
+xgboost>=2.0          # primary gradient boosting library; lightgbm>=4.0 as alternative
+shap>=0.45
+matplotlib>=3.7
+seaborn>=0.13
+PyYAML>=6.0
+requests>=2.31        # Semantic Scholar API calls
+python-dotenv>=1.0    # load .env file for API keys
+docker>=7.0           # Docker SDK for Python (sandbox mode); optional at runtime

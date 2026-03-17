@@ -1,0 +1,480 @@
+# EDM-ARS Methodological Review Checklist
+# Used by the Critic agent (claude-opus-4-6) to evaluate pipeline outputs.
+# Source: SPEC.md §4.4 Review Checklist
+#
+# Each item has:
+#   id          - unique identifier referenced in review_report.json issues
+#   section     - which review section it belongs to
+#   description - human-readable statement of the requirement
+#   severity    - critical | major | minor
+#   check       - instructions for the Critic on how to verify this item
+#   target_agent - which agent is responsible for fixing violations
+#   references  - SPEC section or registry field supporting this check
+
+name: methodological_checklist
+version: "1.0"
+applies_to: prediction
+last_updated: "2026-03-10"
+
+# ============================================================================
+# SECTION 1: PROBLEM FORMULATION
+# Evaluated against: research_spec.json, literature_context.json,
+#                    data_report.json (for feasibility)
+# ============================================================================
+problem_formulation:
+
+  - id: pf_01
+    description: "Research question is specific and answerable"
+    severity: critical
+    check: >
+      Verify the research_question string names a specific outcome variable,
+      a target population, and a prediction approach. Reject vague questions
+      like 'explore factors related to achievement'. It must be answerable
+      with supervised ML on HSLS:09.
+    target_agent: ProblemFormulator
+    references: "SPEC §4.4, SPEC §4.1 required_specifications.research_question"
+
+  - id: pf_02
+    description: "All predictors temporally precede the outcome variable"
+    severity: critical
+    check: >
+      For each entry in research_spec.predictor_set, verify that the predictor's
+      wave appears BEFORE the outcome's wave in the registry temporal_order:
+      [base_year, first_follow_up, second_follow_up, update_panel].
+      Example violations: X2 predictor with X2 outcome (same wave); X3 predictor
+      with X2 outcome (future predictor). Cross-reference the registry waves
+      section and each variable's wave metadata.
+    target_agent: ProblemFormulator
+    references: "SPEC §3.2 validation rules, registry temporal_order, common_pitfalls.temporal_leakage"
+
+  - id: pf_03
+    description: "Predictor rationales are educationally grounded"
+    severity: major
+    check: >
+      For each predictor in research_spec.predictor_set, read the rationale field.
+      Flag any rationale that is generic ('it is available in the dataset'),
+      circular ('it predicts the outcome'), or lacks educational theory.
+      A valid rationale references a theoretical mechanism, prior empirical
+      evidence, or established educational construct.
+    target_agent: ProblemFormulator
+    references: "SPEC §4.1 required_specifications.predictor_set.rationale"
+
+  - id: pf_04
+    description: "Novelty claim is supported by literature_context.novelty_evidence"
+    severity: major
+    check: >
+      Read literature_context.novelty_evidence. Verify it specifically contrasts
+      this study against at least one retrieved paper. If novelty_evidence is
+      empty, null, or generic, flag as major. If papers list is empty (S2 failure),
+      downgrade to minor and note the API failure.
+    target_agent: ProblemFormulator
+    references: "SPEC §4.1 literature_context schema, SPEC §6 ProblemFormulator output"
+
+  - id: pf_05
+    description: "Target population is well-defined"
+    severity: minor
+    check: >
+      research_spec.target_population must be a non-empty string that describes
+      the analytic sample (e.g., 'full HSLS:09 public-use sample',
+      'STEM-interested students with complete 9th-grade data').
+      Generic strings like 'students' are borderline; require specificity.
+    target_agent: ProblemFormulator
+    references: "SPEC §4.1 required_specifications.target_population"
+
+  - id: pf_06
+    description: "Feasibility verified: analytic_n ≥ 10,000"
+    severity: critical
+    check: >
+      Read data_report.analytic_n. If < 10,000, this is a critical feasibility
+      failure. Note: if data_report is not yet available (Critic reviewing only
+      research_spec), use registry pct_missing values to estimate retention
+      and flag if estimated analytic_n < 10,000.
+    target_agent: DataEngineer
+    references: "SPEC §3.2 validation rules, SPEC §4.4 problem formulation checklist"
+
+  - id: pf_07
+    description: "novelty_score_self_assessment ≥ 3"
+    severity: major
+    check: >
+      Read research_spec.novelty_score_self_assessment. If < 3, flag as major
+      and instruct ProblemFormulator to redesign with a more novel angle.
+      Scores of 1–2 indicate the study merely replicates a known finding.
+    target_agent: ProblemFormulator
+    references: "SPEC §3.2 validation rules"
+
+  - id: pf_08
+    description: "Research question is novel relative to prior runs in findings memory (if available)"
+    severity: minor
+    applies_when: findings_memory_enabled
+    check: >
+      Only evaluated when ## Findings Memory Summary is present in the user message.
+      If the outcome variable and substantially similar predictor set have already been
+      studied in a prior run (as listed in studied_outcomes), flag as minor unless the
+      research question offers a meaningfully different framing or predictor combination.
+      Use novelty_review.score (if provided by the Critic) as supporting evidence.
+    target_agent: ProblemFormulator
+    references: "Phase 2 findings memory design"
+
+  - id: pf_09
+    description: "Contribution explicitly builds on or extends findings from prior runs"
+    severity: minor
+    applies_when: findings_memory_enabled
+    check: >
+      Only evaluated when ## Findings Memory Summary is present in the user message.
+      Verify that the research question or expected_contribution references open questions
+      or strong predictors from the findings memory, when relevant. If prior runs surfaced
+      systematic patterns (e.g., SES was the dominant predictor across 3 runs), a study
+      investigating moderation or mediation builds on that knowledge.
+      This is aspirational — minor, not blocking.
+    target_agent: ProblemFormulator
+    references: "Phase 2 findings memory design"
+
+# ============================================================================
+# SECTION 2: DATA PREPARATION
+# Evaluated against: data_report.json
+# ============================================================================
+data_preparation:
+
+  - id: dp_01
+    description: "No data leakage: temporal or target"
+    severity: critical
+    check: >
+      (a) Temporal leakage: confirm no predictor wave is at or after the
+      outcome wave. Cross-reference each predictor's wave (from research_spec)
+      against the outcome wave using the registry temporal_order.
+      (b) Target leakage: confirm the outcome variable does NOT appear in
+      train_X.csv column names. Check data_report for any warning about this.
+      (c) Imputation leakage: confirm scalers and imputers were fit on training
+      data only (data_report should document this).
+    target_agent: DataEngineer
+    references: "SPEC §4.2 critical rules, registry common_pitfalls.temporal_leakage"
+
+  - id: dp_02
+    description: "Missing data handling is appropriate and documented"
+    severity: major
+    check: >
+      For each variable in data_report.missingness_summary, verify the
+      imputation_method matches the protocol:
+        pct_missing < 5%  → 'median' or 'mode'
+        5% ≤ pct_missing ≤ 20% → 'IterativeImputer'
+        pct_missing > 20% → 'IterativeImputer' AND a warning in data_report.warnings
+      Flag mismatches as major issues.
+    target_agent: DataEngineer
+    references: "SPEC §4.2 Missing Data Protocol"
+
+  - id: dp_03
+    description: "analytic_n ≥ 10× number of predictors (10p rule)"
+    severity: major
+    check: >
+      Compute: data_report.analytic_n / data_report.n_predictors_raw.
+      If ratio < 10, flag as major. Note: n_predictors_encoded may be larger
+      due to one-hot encoding; use n_predictors_raw for this ratio check.
+    target_agent: DataEngineer
+    references: "SPEC §4.4 data preparation checklist"
+
+  - id: dp_04
+    description: "Class balance is reported and extreme imbalance addressed"
+    severity: major
+    check: >
+      For binary outcomes: read data_report.class_balance. If majority/minority
+      ratio > 9:1 (i.e., minority class < 10% of sample) and no mitigation is
+      described in warnings, flag as major. For continuous outcomes, skip.
+    target_agent: DataEngineer
+    references: "SPEC §4.2 validation checklist"
+
+  - id: dp_05
+    description: "No constant (zero-variance) predictors remain"
+    severity: major
+    check: >
+      data_report.validation_passed must be true. Check data_report.variables_flagged
+      for any note about constant columns being dropped. If validation_passed is
+      false due to constant predictors, this is a critical failure.
+    target_agent: DataEngineer
+    references: "SPEC §4.2 validation checklist"
+
+  - id: dp_06
+    description: "Train/test split is properly stratified for classification"
+    severity: major
+    check: >
+      For binary/categorical outcomes (outcome_type == 'binary'):
+      data_report must indicate stratified splitting. If not documented or if
+      class_balance shows extreme skew suggesting unstratified split, flag.
+      For continuous outcomes: skip.
+    target_agent: DataEngineer
+    references: "SPEC §4.2 validation checklist, SPEC CLAUDE.md"
+
+  - id: dp_07
+    description: "Multilevel limitation acknowledged in data_report.warnings"
+    severity: major
+    check: >
+      data_report.warnings must contain the string:
+      'Multilevel structure (students nested in schools) is not modeled. This is a limitation.'
+      Exact match not required; semantic match is sufficient. Flag as major if absent.
+    target_agent: DataEngineer
+    references: "SPEC §4.2 validation checklist, registry multilevel_note"
+
+# ============================================================================
+# SECTION 3: ANALYSIS
+# Evaluated against: results.json, data_report.json
+# ============================================================================
+analysis:
+
+  - id: an_01
+    description: "At least 5 individual model families present plus StackingEnsemble"
+    severity: major
+    check: >
+      results.json.all_models must contain entries for at least 5 individual model
+      families: LogisticRegression (or LinearRegression), RandomForest, XGBoost,
+      ElasticNet (or SGDClassifier), and MLP. StackingEnsemble should also be present.
+      Flag as major if fewer than 4 individual models are present (StackingEnsemble
+      does not count toward this minimum). Note which families are missing.
+    target_agent: Analyst
+    references: "SPEC §4.3 model battery, SPEC §4.4 analysis checklist"
+
+  - id: an_02
+    description: "Hyperparameters tuned via inner cross-validation on training data only"
+    severity: critical
+    check: >
+      Verify from results metadata or warnings that tuning used only training
+      data. If results.json.warnings or results.json.errors mention test-set
+      leakage during tuning, flag as critical. If no tuning information is
+      present for RF or XGBoost, flag as major (tuning should be documented).
+    target_agent: Analyst
+    references: "SPEC §4.3 critical rules, SPEC §4.3 evaluation protocol"
+
+  - id: an_03
+    description: "All evaluation metrics computed from held-out test set"
+    severity: critical
+    check: >
+      Verify results.json metrics are from test data. Red flags: if metric
+      values are unusually high (e.g., R² close to 1.0 for a complex outcome),
+      suspect training-set evaluation. Analyst code should be checked if
+      available.
+    target_agent: Analyst
+    references: "SPEC §4.3 critical rules"
+
+  - id: an_04
+    description: "Confidence intervals provided for primary metric"
+    severity: major
+    check: >
+      For classification: results.json.all_models[*].auc_ci_lower and
+      auc_ci_upper must be non-null for all models.
+      For regression: rmse_ci_lower and rmse_ci_upper must be non-null.
+      Flag missing CIs as major.
+    target_agent: Analyst
+    references: "SPEC §4.3 evaluation protocol, SPEC §4.3 critical rules"
+
+  - id: an_05
+    description: "SHAP analysis present for best individual model and uses appropriate explainer"
+    severity: major
+    check: >
+      results.json.top_features must be non-empty and results.json.figures_generated
+      must include 'shap_summary.png' and 'shap_importance.png'.
+      Verify the explainer type is appropriate for the model that produced the SHAP outputs:
+        - TreeExplainer for RF/XGBoost
+        - LinearExplainer for LR/LinReg/ElasticNet/SGDClassifier
+        - KernelExplainer for MLP (acceptable if sample_cap ≤ 1000 and nsamples ≤ 500)
+      StackingEnsemble must NOT appear as the source of SHAP outputs.
+      If SHAP is absent due to timeout, verify it is documented in warnings
+      and downgrade to minor.
+    target_agent: Analyst
+    references: "SPEC §4.3 SHAP protocol, SPEC §4.3 interpretability outputs"
+
+  - id: an_06
+    description: "Subgroup analysis conducted for all protected attributes"
+    severity: major
+    check: >
+      research_spec.subgroup_analyses lists the required protected attributes.
+      results.json.subgroup_performance must contain an entry for each.
+      If any listed attribute is absent from subgroup_performance, flag as major.
+    target_agent: Analyst
+    references: "SPEC §4.3 interpretability outputs, SPEC §4.4 analysis checklist"
+
+  - id: an_07
+    description: "Subgroup performance gaps > 5% are flagged"
+    severity: major
+    check: >
+      For each attribute in results.json.subgroup_performance, compute
+      max(metric) - min(metric) across groups. If > 0.05 and no warning
+      exists in results.json.warnings about this gap, flag as major.
+    target_agent: Analyst
+    references: "SPEC §4.4 analysis checklist"
+
+  - id: an_08
+    description: "StackingEnsemble in model_comparison but SHAP not computed for it"
+    severity: major
+    check: >
+      Verify that StackingEnsemble (StackingClassifier or StackingRegressor) appears in
+      results.json.all_models (i.e., it is evaluated and reported), but does NOT appear
+      as the source model for SHAP outputs. Specifically:
+        (a) The model identified in results.json as the source of top_features should NOT
+            be StackingEnsemble.
+        (b) If any indication exists that SHAP was computed for StackingEnsemble, flag
+            as major (SHAP for stacking is not supported in the pilot).
+      If StackingEnsemble is absent from all_models entirely, flag as major per an_01.
+    target_agent: Analyst
+    references: "SPEC §4.3 SHAP protocol (stacking exclusion)"
+
+  - id: an_09
+    description: "KernelExplainer used only for MLP with appropriate constraints"
+    severity: major
+    check: >
+      If KernelExplainer was used (indicated by results.json.warnings or the best model
+      being MLP), verify:
+        (a) It was applied only for an MLP model, not for RF, XGBoost, ElasticNet, or LR.
+        (b) Sample cap was ≤ 1,000 rows (check results.warnings for confirmation).
+        (c) nsamples was ≤ 500.
+      If KernelExplainer was used for a non-MLP model, flag as major.
+      If constraints were not applied (cap > 1000 or nsamples > 500), flag as minor.
+    target_agent: Analyst
+    references: "SPEC §4.3 SHAP protocol (KernelExplainer constraints)"
+
+  - id: an_10
+    description: "MLP KernelExplainer timeout fallback properly documented"
+    severity: major
+    check: >
+      If the best individual model is MLP and KernelExplainer timed out
+      (indicated by a fallback warning in results.json.warnings):
+        (a) The SHAP outputs (shap_summary.png, shap_importance.png, pdp_*.png,
+            feature_importance.csv) must be based on the next-best non-MLP individual model.
+        (b) The fallback must be documented in results.json.warnings with the name of
+            the fallback model used.
+      If the fallback is undocumented or if SHAP outputs are simply absent with no warning,
+      flag as major. If properly documented fallback exists, this is acceptable (minor note only).
+    target_agent: Analyst
+    references: "SPEC §4.3 SHAP protocol (MLP fallback rule), SPEC §8 error handling"
+
+# ============================================================================
+# SECTION 4: SUBSTANTIVE VALIDITY
+# The Critic uses domain judgment here; these are not purely mechanical checks.
+# ============================================================================
+substantive_validity:
+
+  - id: sv_01
+    description: "Top SHAP features make educational sense"
+    severity: major
+    check: >
+      Read results.json.top_features (top 3–5 by shap_mean_abs). For each,
+      assess whether its direction and importance magnitude are plausible given:
+      (a) the educational literature on this outcome, and
+      (b) the registry's educational rationale for that variable.
+      Flag as major if a top feature is theoretically implausible (e.g., a
+      school ID or a processing flag appearing as a top predictor would indicate
+      leakage; a trivially correlated same-wave variable would indicate leakage).
+    target_agent: Analyst
+    references: "SPEC §4.4 substantive validity checklist"
+
+  - id: sv_02
+    description: "Findings are not trivially obvious"
+    severity: minor
+    check: >
+      Assess whether the research makes a non-trivial contribution. For example,
+      simply finding that prior math score (X1TXMTSC) predicts future math score
+      with high AUC is known and uninteresting unless the study adds novel
+      predictors, a novel population slice, or novel methodology. Flag as minor
+      if the contribution is purely confirmatory of well-established findings
+      without novel elements.
+    target_agent: ProblemFormulator
+    references: "SPEC §4.4 substantive validity checklist"
+
+  - id: sv_03
+    description: "AUC > 0.95 flagged as suspicious potential leakage"
+    severity: major
+    check: >
+      If results.json.best_metric_value > 0.95 AND primary_metric == 'AUC':
+      This MUST be flagged regardless of other quality indicators.
+      Investigate which features dominate SHAP values. If the top feature is
+      a strong proxy for the outcome (e.g., a transcript-based variable when
+      predicting transcript-based GPA), flag as critical (confirmed leakage).
+      If no obvious leakage mechanism is found, flag as major with a note that
+      the high performance is unverified.
+    target_agent: Analyst
+    references: "SPEC §4.4 substantive validity checklist, SPEC §8 error handling"
+
+  - id: sv_04
+    description: "Limitations are honestly and specifically acknowledged"
+    severity: minor
+    check: >
+      Review research_spec.potential_limitations and data_report.warnings.
+      The following must appear as acknowledged limitations (exact wording
+      not required, semantic match sufficient):
+        (1) Multilevel structure not modeled
+        (2) Survey weights not applied
+        (3) Missing data mechanism assumed MAR
+      Flag as minor if any are missing. The Writer will incorporate these.
+    target_agent: Writer
+    references: "SPEC §4.4 substantive validity checklist, registry ignoring_survey_design"
+
+  - id: sv_05
+    description: "Unexpected or counterintuitive findings flagged for Writer interpretation"
+    severity: minor
+    check: >
+      If any top SHAP feature has an unexpected direction (e.g., a measure of
+      engagement with a negative SHAP direction for an achievement outcome),
+      note this in the revision_instructions for the Writer. This is not a
+      failure — it may be a genuine finding — but the Writer must interpret it
+      explicitly rather than ignore it.
+    target_agent: Writer
+    references: "SPEC §4.4 substantive validity checklist"
+
+# ============================================================================
+# VERDICT DECISION RULES
+# The Critic applies these rules after completing all checklist sections.
+# ============================================================================
+verdict_rules:
+
+  ABORT:
+    conditions:
+      - "Any item with severity == critical is confirmed as violated AND the violation
+         is not fixable within the current pipeline run (e.g., unanswerable question,
+         confirmed leakage, analytic_n < 1000)"
+    override: "ABORT supersedes all other verdicts"
+
+  REVISE:
+    conditions:
+      - "Any critical issue that IS fixable (e.g., temporal leakage can be fixed by
+         removing the offending predictor)"
+      - "More than 2 major issues confirmed"
+      - "overall_quality_score < 7"
+    prerequisite: "revision_cycle < max_revision_cycles"
+    note: "If max cycles reached, escalate to PASS with UNVERIFIED flag instead"
+
+  PASS:
+    conditions:
+      - "No critical issues"
+      - "major_issue_count ≤ 2"
+      - "overall_quality_score ≥ 7"
+
+  scoring:
+    scale: 1_to_10
+    section_weights:
+      problem_formulation: 0.25
+      data_preparation: 0.25
+      analysis: 0.30
+      substantive_validity: 0.20
+    overall: "weighted mean of section scores, rounded to nearest integer"
+
+# ============================================================================
+# SEVERITY REFERENCE
+# ============================================================================
+severity_definitions:
+  critical:
+    description: >
+      Invalidates the study or makes results uninterpretable.
+      Examples: data leakage, unanswerable question, analytic_n < 1000,
+      training-set evaluation reported as test-set performance.
+    verdict_impact: "Triggers REVISE (if fixable) or ABORT (if not fixable)"
+
+  major:
+    description: >
+      Significantly weakens validity, credibility, or reproducibility.
+      Examples: missing CIs, no subgroup analysis, extreme class imbalance
+      unaddressed, wrong SHAP explainer, > 20% missingness predictor unlabeled.
+    verdict_impact: "Each counts toward the >2 major issues threshold for REVISE"
+
+  minor:
+    description: >
+      Worth noting but does not threaten validity. Examples: vague target
+      population, generic boilerplate limitation, missing a secondary figure,
+      slightly generic novelty claim.
+    verdict_impact: "Does not affect PASS/REVISE threshold; noted for Writer"
