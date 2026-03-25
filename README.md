@@ -199,7 +199,7 @@ The repair prompt uses the **last 3,000 characters of stderr** for maximum conte
 | Docker Engine | 24.0+ | Required for sandboxed code execution (optional — see below) |
 | MiniMax API key | — | Default provider (`MiniMax-M2.7`); set `MINIMAX_API_KEY` env var |
 | Anthropic API key | — | Alternative provider; set `ANTHROPIC_API_KEY` env var |
-| HSLS:09 public-use CSV | — | Obtainable from NCES; see [Data Setup](#data-setup) |
+| HSLS:09 public-use CSV | — | [Click here to download](https://drive.google.com/file/d/1d1wZtaVOKNBlSNWMmBSCMecoV02tHXc-/view?usp=sharing); see [Data Setup](#data-setup) |
 
 ---
 
@@ -239,7 +239,7 @@ export MINIMAX_API_KEY="your-minimax-key"
 
 ## Data Setup
 
-Download the HSLS:09 public-use labeled CSV from NCES and place it at:
+Download the [HSLS:09 public-use](https://drive.google.com/file/d/1d1wZtaVOKNBlSNWMmBSCMecoV02tHXc-/view?usp=sharing) labeled CSV from NCES and place it at:
 
 ```
 data/raw/hsls_17_student_pets_sr_v1_0.csv
