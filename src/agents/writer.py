@@ -108,6 +108,7 @@ class Writer(BaseAgent):
         data_report: dict | None = None,
         results_object: dict | None = None,
         review_report: dict | None = None,
+        outline: dict | None = None,
         **kwargs: Any,
     ) -> str:
         """
@@ -117,6 +118,7 @@ class Writer(BaseAgent):
             data_report: DataEngineer output (falls back to ctx).
             results_object: Analyst output (falls back to ctx).
             review_report: Critic output (falls back to ctx).
+            outline: OutlineAgent output (None → v1 placeholder-filling path).
 
         Returns:
             The full LaTeX paper text (also written to ``paper.tex``).
@@ -127,28 +129,49 @@ class Writer(BaseAgent):
         results = results_object if results_object is not None else self.ctx.results_object
         review = review_report if review_report is not None else self.ctx.review_report
 
+        # Fall back to ctx outline if not provided directly
+        if outline is None:
+            outline = getattr(self.ctx, "paper_outline", None)
+
         # Sanitize paper IDs for BibTeX compatibility (: → _ in keys)
         lit = self._sanitize_paper_ids(lit)
 
         # Build BibTeX pre-populated from S2 metadata (LLM may refine/override)
         fallback_bibtex = self._build_bibtex(lit)
 
-        # Load the LaTeX template skeleton
-        template_text = self._load_template()
-
-        user_message = self._build_user_message(
-            research_spec=spec,
-            literature_context=lit,
-            data_report=report,
-            results_object=results,
-            review_report=review,
-            template_text=template_text,
-        )
+        # Choose template and message builder based on outline availability
+        if outline is not None:
+            template_text = self._load_template(version="v2")
+            user_message = self._build_user_message_with_outline(
+                outline=outline,
+                research_spec=spec,
+                literature_context=lit,
+                data_report=report,
+                results_object=results,
+                review_report=review,
+                template_text=template_text,
+            )
+        else:
+            template_text = self._load_template()
+            user_message = self._build_user_message(
+                research_spec=spec,
+                literature_context=lit,
+                data_report=report,
+                results_object=results,
+                review_report=review,
+                template_text=template_text,
+            )
 
         llm_response = self.call_llm(user_message, max_tokens=self.max_tokens)
 
         paper_tex = self._extract_latex(llm_response)
         bibtex = self._extract_bibtex(llm_response) or fallback_bibtex
+
+        # v2 path: reassemble from clean template to prevent preamble corruption.
+        # The LLM often modifies \makeatletter / \renewcommand\@copyrightpermission
+        # blocks, causing broken first pages in the compiled PDF.
+        if outline is not None and paper_tex not in (_MINIMAL_STUB_TEX,):
+            paper_tex = self._reassemble_from_template(paper_tex, template_text)
 
         # Validate template structure and log any warnings
         if paper_tex not in (_MINIMAL_STUB_TEX, template_text):
@@ -206,14 +229,100 @@ class Writer(BaseAgent):
         return paper_tex
 
     # ------------------------------------------------------------------
+    # Template reassembly (v2 preamble protection)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_braced_arg(latex: str, command: str) -> str | None:
+        """Extract the braced argument of a LaTeX command, handling nested braces.
+
+        Example: ``_extract_braced_arg(text, r"\\title")`` on
+        ``\\title{Predicting \\textbf{STEM} Achievement}`` returns
+        ``Predicting \\textbf{STEM} Achievement``.
+        """
+        pattern = re.escape(command) + r"(?:\[[^\]]*\])?\s*\{"
+        match = re.search(pattern, latex)
+        if not match:
+            return None
+        start = match.end()
+        depth = 1
+        i = start
+        while i < len(latex) and depth > 0:
+            if latex[i] == "{":
+                depth += 1
+            elif latex[i] == "}":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            return None
+        return latex[start : i - 1]
+
+    def _reassemble_from_template(self, llm_latex: str, template: str) -> str:
+        """Extract content from the LLM's LaTeX and insert it into the clean template.
+
+        The LLM frequently corrupts the ACM preamble (e.g. dropping a backslash from
+        ``\\renewcommand\\@copyrightpermission``).  By extracting only the *content*
+        sections and substituting them into the pristine template, the preamble is
+        guaranteed to remain intact.
+        """
+        # --- Title ---
+        title = self._extract_braced_arg(llm_latex, r"\title") or "Untitled"
+
+        # --- Abstract ---
+        abstract_match = re.search(
+            r"\\begin\{abstract\}(.*?)\\end\{abstract\}", llm_latex, re.DOTALL
+        )
+        abstract = abstract_match.group(1).strip() if abstract_match else ""
+
+        # --- Keywords ---
+        keywords = self._extract_braced_arg(llm_latex, r"\keywords") or ""
+
+        # --- Body (between \maketitle and the first structural boundary) ---
+        body_match = re.search(
+            r"\\maketitle\s*(.*?)"
+            r"(?=\\begin\{acks\}|\\appendix\b|\\bibliographystyle|\\end\{document\})",
+            llm_latex,
+            re.DOTALL,
+        )
+        body = body_match.group(1).strip() if body_match else ""
+
+        # --- Appendix (optional) ---
+        appendix = ""
+        appendix_match = re.search(
+            r"(\\appendix\b.*?)(?=\\end\{document\})", llm_latex, re.DOTALL
+        )
+        if appendix_match:
+            appendix = appendix_match.group(1).strip()
+
+        # --- Substitute into clean template ---
+        result = template
+        result = result.replace("%%PLACEHOLDER:TITLE%%", title)
+        result = result.replace("%%PLACEHOLDER:ABSTRACT%%", abstract)
+        result = result.replace("%%PLACEHOLDER:KEYWORDS%%", keywords)
+        result = result.replace("%%PLACEHOLDER:PAPER_BODY%%", body)
+        result = result.replace("%%PLACEHOLDER:APPENDIX%%", appendix)
+
+        return result
+
+    # ------------------------------------------------------------------
     # Template loading
     # ------------------------------------------------------------------
 
-    def _load_template(self) -> str:
-        """Load the LaTeX paper template from templates/paper_template.tex."""
+    def _load_template(self, version: str = "v1") -> str:
+        """Load the LaTeX paper template.
+
+        Args:
+            version: ``"v1"`` for the original placeholder template,
+                     ``"v2"`` for the outline-first single-body template.
+        """
+        if version == "v2":
+            default_path = "templates/paper_template_v2.tex"
+        else:
+            default_path = "templates/paper_template.tex"
         # Try config-specified path first (relative to cwd / project root)
         template_path = self.config.get("paths", {}).get(
-            "paper_template", "templates/paper_template.tex"
+            "paper_template" if version == "v1" else "paper_template_v2",
+            default_path,
         )
         # If relative, resolve from project root (two levels up from this file)
         if not os.path.isabs(template_path):
@@ -281,6 +390,23 @@ class Writer(BaseAgent):
             warnings.append("Missing \\bibliographystyle{ACM-Reference-Format}")
         if "Chenguang Pan" not in latex:
             warnings.append("Fixed author block appears to have been removed or modified")
+
+        # AI-generated paper disclaimer and copyright suppression
+        if r"\setcopyright{none}" not in latex:
+            warnings.append("Missing \\setcopyright{none} — ACM copyright text will appear")
+        if r"\settopmatter{printacmref=false}" not in latex:
+            warnings.append(
+                "Missing \\settopmatter{printacmref=false} — "
+                "'ACM Reference Format:' block will appear"
+            )
+        if "AI-Generated Research Paper" not in latex:
+            warnings.append(
+                "AI-generated paper disclaimer was removed or modified"
+            )
+        if "Anonymous Conference" not in latex:
+            warnings.append(
+                "\\acmConference was modified — must remain 'Anonymous Conference'"
+            )
 
         # Check for unfilled placeholders
         remaining = re.findall(r"%%PLACEHOLDER:\w+%%", latex)
@@ -483,6 +609,82 @@ class Writer(BaseAgent):
                 "Also output the references.bib content in a ```bibtex code block. "
                 "Follow all requirements in the system prompt exactly. "
                 "Do NOT modify the template structure — only replace the placeholder markers."
+            ),
+        ]
+        return "\n".join(parts)
+
+    def _build_user_message_with_outline(
+        self,
+        outline: dict,
+        research_spec: dict | None,
+        literature_context: dict | None,
+        data_report: dict | None,
+        results_object: dict | None,
+        review_report: dict | None,
+        template_text: str = "",
+    ) -> str:
+        """Build the user message for outline-first paper generation."""
+        figures = (results_object or {}).get("figures_generated") or []
+        parts = [
+            "## research_spec.json",
+            "```json",
+            json.dumps(research_spec or {}, indent=2),
+            "```",
+            "",
+            "## literature_context.json",
+            "```json",
+            json.dumps(literature_context or {}, indent=2),
+            "```",
+            "",
+            "## data_report.json",
+            "```json",
+            json.dumps(data_report or {}, indent=2),
+            "```",
+            "",
+            "## results.json",
+            "```json",
+            json.dumps(results_object or {}, indent=2),
+            "```",
+            "",
+            "## review_report.json",
+            "```json",
+            json.dumps(review_report or {}, indent=2),
+            "```",
+            "",
+            "## Paper Outline",
+            "```json",
+            json.dumps(outline, indent=2),
+            "```",
+            "",
+            "## Available Figures",
+            "\n".join(f"- {fig}" for fig in figures) if figures else "(none)",
+            "",
+        ]
+        if template_text:
+            parts += [
+                "--- TEMPLATE START ---",
+                template_text,
+                "--- TEMPLATE END ---",
+                "",
+            ]
+        parts += [
+            "## Task",
+            (
+                "Generate the paper following the outline above. "
+                "Fill %%PLACEHOLDER:TITLE%%, %%PLACEHOLDER:ABSTRACT%%, and "
+                "%%PLACEHOLDER:KEYWORDS%% in the template. "
+                "For %%PLACEHOLDER:PAPER_BODY%%, generate ALL sections and subsections "
+                "following the outline structure — use the section titles, emphasis levels, "
+                "and word targets from the outline. Use \\section{} and \\subsection{} commands. "
+                "Output the COMPLETE filled-in template in a ```latex code block. "
+                "Also output the references.bib content in a ```bibtex code block. "
+                "Follow all requirements in the system prompt exactly. "
+                "Do NOT add sections not in the outline. "
+                "The narrative_hook should inform the opening of the Introduction. "
+                "CRITICAL: Do NOT modify the document preamble (everything before "
+                "\\begin{document}). Copy it EXACTLY as-is from the template, including "
+                "the \\makeatletter / \\renewcommand\\@copyrightpermission block. "
+                "Do NOT change the author block, \\shortauthors, or CCS concepts."
             ),
         ]
         return "\n".join(parts)

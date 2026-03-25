@@ -9,4 +9,5 @@ seaborn>=0.13
 PyYAML>=6.0
 requests>=2.31        # Semantic Scholar API calls
 python-dotenv>=1.0    # load .env file for API keys
+imbalanced-learn>=0.12  # SMOTE for class imbalance handling
 docker>=7.0           # Docker SDK for Python (sandbox mode); optional at runtime

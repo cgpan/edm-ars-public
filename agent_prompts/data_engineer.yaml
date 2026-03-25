@@ -32,12 +32,28 @@ system_prompt: |
     "outcome_variable": "string",
     "outcome_type": "binary|continuous|categorical",
     "class_balance": {"class_0": 0.0, "class_1": 0.0},
+    "is_imbalanced": false,
     "n_predictors_raw": 0,
     "n_predictors_encoded": 0,
     "missingness_summary": {
       "variable_name": {"pct_missing": 0.0, "imputation_method": "string"}
     },
     "variables_flagged": [],
+    "school_reconstruction": {
+      "n_clusters": 890,
+      "expected_n_schools": 944,
+      "cluster_size_mean": 19.5,
+      "cluster_size_median": 20,
+      "validation_passed": true,
+      "validation_warnings": []
+    },
+    "split_info": {
+      "split_method": "StratifiedGroupKFold|GroupShuffleSplit",
+      "group_aware": true,
+      "n_groups_train": 0,
+      "n_groups_test": 0,
+      "group_overlap": 0
+    },
     "validation_passed": true,
     "warnings": []
   }
@@ -108,6 +124,9 @@ system_prompt: |
      the outcome variable. Also select the subgroup analysis columns from
      `research_spec.subgroup_analyses` (e.g. X1SEX, X1RACE) even if they are already in
      predictor_set — they are needed for step 7 below.
+     **Also keep the school fingerprint columns** for step 11 (school reconstruction):
+     `X1SCHOOLCLI, X1COUPERTEA, X1COUPERCOU, X1COUPERPRI, X1CONTROL, X1LOCALE, X1REGION`.
+     These will be dropped after reconstruction — do NOT include them as predictors.
 
   3. Drop rows where the outcome variable is missing or coded as negative (NCES uses
      negative codes such as -4, -7, -8, -9 for skip patterns and non-response). Also treat
@@ -134,14 +153,81 @@ system_prompt: |
        (≥ 5%) applied after label-encoding the categoricals temporarily.
      - Do NOT impute the outcome variable.
 
-  6. Split into train (80%) and test (20%) sets BEFORE one-hot encoding:
-     - Classification: stratified on the outcome (`stratify=y`)
-     - Regression: random split
-     - Always use `random_state=42`
+  6. **School Cluster Reconstruction (MANDATORY — use the provided helper, do NOT reimplement)**
 
-  7. Save `test_protected.csv` — the subgroup analysis file:
+      HSLS:09 suppresses the school identifier (SCH_ID) in the public-use file, but
+      school-level variables (X1SCHOOLCLI, X1COUPERTEA, X1COUPERCOU, X1COUPERPRI, X1CONTROL,
+      X1LOCALE, X1REGION) are continuous scales identical for all students within the same
+      school. These serve as a school "fingerprint."
+
+      You MUST call `analysis_helpers.reconstruct_school_ids()` — do NOT write your own
+      reconstruction code. The helper is pre-installed in the execution environment.
+
+      Run this NOW, while the analytic DataFrame still contains the school fingerprint
+      columns (kept in step 2). This MUST happen BEFORE the train/test split (step 7):
+
+      ```python
+      import analysis_helpers
+
+      school_ids, school_meta = analysis_helpers.reconstruct_school_ids(
+          df=analytic_df,  # must still contain X1SCHOOLCLI, X1COUPERTEA, etc.
+          validate=True,
+      )
+      analytic_df['pseudo_school_id'] = school_ids
+
+      # Now drop the fingerprint columns — they are NOT predictors
+      fingerprint_cols = ['X1SCHOOLCLI', 'X1COUPERTEA', 'X1COUPERCOU', 'X1COUPERPRI',
+                          'X1CONTROL', 'X1LOCALE', 'X1REGION']
+      analytic_df.drop(columns=[c for c in fingerprint_cols if c in analytic_df.columns
+                                and c not in predictor_set], inplace=True)
+      ```
+
+      Add `school_reconstruction` metadata to `data_report.json` (see schema below).
+
+      Do NOT include `pseudo_school_id` as a predictor in train_X/test_X — it is used ONLY
+      for clustered standard errors and ICC computation by the Analyst.
+
+      If reconstruction validation fails (n_clusters far from 944), log a warning in
+      data_report.warnings but continue — the clusters are still usable for approximate
+      clustering correction even if imperfect.
+
+  7. Split into train (80%) and test (20%) sets BEFORE one-hot encoding using
+     **school-aware splitting** to prevent information leakage through shared school-level
+     features. You MUST call `analysis_helpers.grouped_train_test_split()` — do NOT use
+     `sklearn.model_selection.train_test_split()` directly.
+
+     ```python
+     import analysis_helpers
+
+     train_idx, test_idx, split_meta = analysis_helpers.grouped_train_test_split(
+         df=analytic_df,
+         y=analytic_df[outcome_variable],
+         groups=analytic_df['pseudo_school_id'],
+         test_size=0.2,
+         stratify=(outcome_type in ['binary', 'categorical']),
+         random_state=42,
+     )
+
+     train_df = analytic_df.iloc[train_idx]
+     test_df = analytic_df.iloc[test_idx]
+     ```
+
+     This ensures NO school appears in both train and test sets. For classification,
+     it also preserves approximate class balance via `StratifiedGroupKFold`.
+
+     After the split, save school IDs for each partition:
+     ```python
+     train_school_ids = analytic_df.iloc[train_idx]['pseudo_school_id']
+     test_school_ids = analytic_df.iloc[test_idx]['pseudo_school_id']
+     train_school_ids.to_csv('train_school_ids.csv', index=False, header=['pseudo_school_id'])
+     test_school_ids.to_csv('test_school_ids.csv', index=False, header=['pseudo_school_id'])
+     ```
+
+     Add `split_meta` to `data_report.json` under key `"split_info"`.
+
+  8. Save `test_protected.csv` — the subgroup analysis file:
      Use the `subgroup_snapshot` captured in step 5 (original text labels), aligned to the
-     test set indices from step 6. This ensures labels like "Male"/"Female" and race/ethnicity
+     test set indices from step 7. This ensures labels like "Male"/"Female" and race/ethnicity
      names are preserved, not numeric codes:
      ```python
      # Use original-label snapshot; align to test indices
@@ -149,7 +235,7 @@ system_prompt: |
      test_protected.to_csv('test_protected.csv', index=True)
      ```
 
-  8. One-hot encode categorical variables on the TRAINING set; apply the same encoding to
+  9. One-hot encode categorical variables on the TRAINING set; apply the same encoding to
      the test set (drop_first=True to avoid multicollinearity). Keep continuous and
      already-numeric variables as-is. Use `pd.get_dummies(drop_first=True)`:
      ```python
@@ -159,26 +245,31 @@ system_prompt: |
      Using `reindex` on the test set ensures it has exactly the same columns as the training
      set (handles rare categories that may appear in one split but not the other).
 
-  9. Drop constant (zero-variance) columns after encoding:
+  10. Drop constant (zero-variance) columns after encoding:
      ```python
      constant_cols = [c for c in train_X.columns if train_X[c].nunique() <= 1]
      train_X.drop(columns=constant_cols, inplace=True)
      test_X.drop(columns=constant_cols, inplace=True, errors='ignore')
      ```
 
-  10. Validate and report class balance (binary outcomes only): majority/minority proportion.
+  11. Validate and report class balance (binary outcomes only): majority/minority proportion.
+      Also set `is_imbalanced: true` in data_report.json if the minority class proportion is
+      less than 20% (0.20). If imbalanced, add this warning to `data_report.warnings`:
+      "Class imbalance detected: minority class is [X.X]% of the analytic sample. SMOTE will
+      be applied by the Analyst agent on the training set only."
 
-  11. Save the five output files to the output directory:
+  12. Save the output files to the output directory:
       ```python
       train_X.to_csv('train_X.csv', index=False)
       train_y.to_csv('train_y.csv', index=False)
       test_X.to_csv('test_X.csv', index=False)
       test_y.to_csv('test_y.csv', index=False)
-      # test_protected.csv already saved in step 7
+      # test_protected.csv already saved in step 8
+      # train_school_ids.csv and test_school_ids.csv saved in step 7
       ```
       Use absolute paths if running outside sandbox.
 
-  12. Print a JSON-serializable summary dict at the end (stdout) for orchestrator capture.
+  13. Print a JSON-serializable summary dict at the end (stdout) for orchestrator capture.
 
   ## Validation Checklist
 
@@ -187,12 +278,15 @@ system_prompt: |
   - [ ] No NaN values remain in train_X, train_y, test_X, or test_y
   - [ ] Outcome variable has the expected type and range (per registry)
   - [ ] No constant (zero-variance) predictors remain after encoding
-  - [ ] Train/test split is stratified for classification outcomes
+  - [ ] Train/test split is school-aware (no school in both train and test)
+  - [ ] Train/test split is stratified for classification outcomes (via StratifiedGroupKFold)
   - [ ] Class balance is reported for binary outcomes
   - [ ] Feature count after encoding is reported in `n_predictors_encoded`
   - [ ] Sample sizes n_train and n_test are reported
   - [ ] This warning is added to `data_report.warnings` verbatim:
-        "Multilevel structure (students nested in schools) is not modeled. This is a limitation."
+        "Multilevel structure (students nested in schools) is partially addressed: train/test
+        split is school-aware (no school in both sets) and clustered bootstrap CIs account for
+        within-school correlation. However, models do not include school-level random effects."
 
   If any check fails (except the school clustering warning, which is always added), set
   `validation_passed: false` and describe the failure in `warnings`.

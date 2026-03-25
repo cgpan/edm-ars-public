@@ -29,19 +29,42 @@ system_prompt: |
     "all_models": {
       "LogisticRegression": {
         "auc": 0.0, "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0,
+        "f2": 0.0, "balanced_accuracy": 0.0,
         "auc_ci_lower": 0.0, "auc_ci_upper": 0.0
       },
       "RandomForest": {"rmse": 0.0, "mae": 0.0, "r2": 0.0,
-                       "rmse_ci_lower": 0.0, "rmse_ci_upper": 0.0},
-      "XGBoost":      {"rmse": 0.0, "mae": 0.0, "r2": 0.0,
-                       "rmse_ci_lower": 0.0, "rmse_ci_upper": 0.0},
-      "ElasticNet":   {"rmse": 0.0, "mae": 0.0, "r2": 0.0,
-                       "rmse_ci_lower": 0.0, "rmse_ci_upper": 0.0},
-      "MLP":          {"rmse": 0.0, "mae": 0.0, "r2": 0.0,
-                       "rmse_ci_lower": 0.0, "rmse_ci_upper": 0.0},
-      "StackingEnsemble": {"rmse": 0.0, "mae": 0.0, "r2": 0.0,
-                           "rmse_ci_lower": 0.0, "rmse_ci_upper": 0.0}
+                       "rmse_ci_lower": 0.0, "rmse_ci_upper": 0.0}
     },
+    "model_quality_gate": {
+      "ModelName": {
+        "passed": true,
+        "metric_name": "auc",
+        "metric_value": 0.85,
+        "floor": 0.60,
+        "shap_eligible": true
+      }
+    },
+    "shap_model": "XGBoost",
+    "shap_skipped": false,
+    "shap_skip_reason": null,
+    "icc": {
+      "icc": 0.12,
+      "interpretation": "small",
+      "n_clusters": 890,
+      "avg_cluster_size": 3.9
+    },
+    "best_model_ci_standard": [0.842, 0.870],
+    "best_model_ci_clustered": [0.835, 0.878],
+    "sensitivity_analysis": {
+      "excluded_variables": ["X1PAREDU"],
+      "full_model_metric": 0.855,
+      "reduced_model_metric": 0.841,
+      "metric_change_pct": -1.6,
+      "significant_change": false,
+      "top5_overlap": 4,
+      "conclusion": "Results are robust to exclusion of high-missingness variables."
+    },
+    "ablation": null,
     "top_features": [
       {"feature": "string", "shap_mean_abs": 0.0, "direction": "positive|negative"}
     ],
@@ -55,13 +78,20 @@ system_prompt: |
   }
   ```
 
+  Notes:
+  - `f2` and `balanced_accuracy` fields are included for classification when SMOTE is applied;
+    omit them for regression tasks or when no imbalance is detected.
+  - `ablation` is `null` when no imbalance handling was needed; see "Class Imbalance Handling"
+    section below for the full schema when ablation is performed.
+  - MLP entry is absent when `mlp_enabled: false`.
+
   Use the correct metric fields for the task type:
   - Classification: auc, accuracy, precision, recall, f1, auc_ci_lower, auc_ci_upper
   - Regression: rmse, mae, r2, rmse_ci_lower, rmse_ci_upper
 
   ## Pilot Model Battery
 
-  Train exactly these six model families. Do NOT add SVM.
+  Train the model families listed below. Do NOT add SVM.
 
   | Model | Implementation | Notes |
   |---|---|---|
@@ -69,13 +99,40 @@ system_prompt: |
   | Random Forest | `sklearn.ensemble.RandomForestClassifier` or `RandomForestRegressor` | Tune via inner CV |
   | XGBoost | `xgboost.XGBClassifier` or `XGBRegressor` | Tune via inner CV |
   | ElasticNet | `sklearn.linear_model.SGDClassifier(loss='log_loss', penalty='elasticnet', random_state=42)` or `ElasticNet(random_state=42)` | Tune via inner CV |
-  | MLP | `sklearn.neural_network.MLPClassifier(random_state=42, max_iter=500, early_stopping=True, validation_fraction=0.1)` or `MLPRegressor(...)` | Tune via inner CV |
-  | StackingEnsemble | `sklearn.ensemble.StackingClassifier` or `StackingRegressor` | Built on 5 tuned base models; no tuning grid |
+  | MLP | `sklearn.neural_network.MLPClassifier(random_state=42, max_iter=500, early_stopping=True, validation_fraction=0.1)` or `MLPRegressor(...)` | Tune via inner CV; **SKIP if `mlp_enabled: false`** |
+  | StackingEnsemble | `sklearn.ensemble.StackingClassifier` or `StackingRegressor` | Built on tuned base models; no tuning grid |
+
+  ### MLP Toggle
+
+  Check the `## Configuration` section in the user message for `mlp_enabled`.
+  - If `mlp_enabled: false`: **skip MLP entirely**. Build StackingEnsemble from the 4 remaining
+    base models (LR, RF, XGBoost, ElasticNet). Total models = 5.
+  - If `mlp_enabled: true` (or absent): include MLP as usual. Total models = 6.
 
   ## Hyperparameter Tuning
 
   Use 5-fold inner cross-validation on the TRAINING SET ONLY. Never touch the test set during
-  tuning. Use `GridSearchCV` with `cv=5`.
+  tuning. If `train_school_ids.csv` exists, use **group-aware CV** to prevent school-level
+  leakage during tuning:
+
+  ```python
+  from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
+  import pandas as pd
+
+  train_school_ids = pd.read_csv('train_school_ids.csv')['pseudo_school_id'].values
+
+  if is_classification:
+      inner_cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+      cv_splits = list(inner_cv.split(train_X, train_y, train_school_ids))
+  else:
+      inner_cv = GroupKFold(n_splits=5)
+      cv_splits = list(inner_cv.split(train_X, train_y, train_school_ids))
+
+  # Pass cv_splits to GridSearchCV
+  grid_search = GridSearchCV(estimator, param_grid, cv=cv_splits, scoring=scoring)
+  ```
+
+  If `train_school_ids.csv` does not exist, fall back to `cv=5`.
 
   **Random Forest grid:**
   - `n_estimators`: [100, 300, 500]
@@ -98,8 +155,8 @@ system_prompt: |
   - Always set `max_iter=500, early_stopping=True, validation_fraction=0.1`
 
   **StackingEnsemble:**
-  - No hyperparameter grid. Build after all 5 individual models are tuned.
-  - Base estimators: the 5 tuned models (LR, RF, XGBoost, ElasticNet, MLP)
+  - No hyperparameter grid. Build after all individual models are tuned.
+  - Base estimators: the tuned individual models (LR, RF, XGBoost, ElasticNet, and MLP if enabled)
   - Meta-learner: `RidgeCV()` for regression, `LogisticRegressionCV()` for classification
   - `cv=5, passthrough=False`
   - Report in model_comparison.csv only; DO NOT compute SHAP for StackingEnsemble
@@ -113,6 +170,12 @@ system_prompt: |
   **Classification outcomes (AUC-ROC is primary):**
   - Primary: AUC-ROC (`sklearn.metrics.roc_auc_score`)
   - Secondary: Accuracy, Precision, Recall, F1 (macro average)
+  - **Imbalanced classification additional metrics** (when SMOTE is applied):
+    - F2 score: `sklearn.metrics.fbeta_score(y_true, y_pred, beta=2)` — emphasizes recall
+    - Balanced accuracy: `sklearn.metrics.balanced_accuracy_score(y_true, y_pred)`
+    - Per-class precision and recall (report for both classes)
+    - **Note**: Still report Accuracy but acknowledge it is misleading for imbalanced data.
+      AUC remains the primary metric for best model selection.
   - Confidence interval: 1000-iteration bootstrap on AUC
   - Best model: highest AUC
 
@@ -127,6 +190,75 @@ system_prompt: |
   import analysis_helpers
   ci_lower, ci_upper = analysis_helpers.bootstrap_ci(y_true, y_pred_proba, metric_fn)
   ```
+
+  ## Class Imbalance Handling (SMOTE + Ablation)
+
+  Check the `## Configuration` section in the user message for `class_imbalance` settings.
+  This protocol applies ONLY to **classification** tasks.
+
+  ### Step 1: Detect imbalance
+  Read `data_report.is_imbalanced` (if present) or compute it yourself:
+  ```python
+  minority_pct = min(np.bincount(y_train)) / len(y_train)
+  is_imbalanced = minority_pct < minority_threshold  # default 0.20
+  ```
+
+  ### Step 2: If imbalanced AND `ablation_enabled: true`
+
+  **Phase A — Ablation baseline (NO SMOTE):**
+  1. Train ALL models on the **original** training data (train_X, train_y as-is)
+  2. Evaluate ALL models on the **original test set** (test_X, test_y — never touched)
+  3. Record results in `ablation_results` dict (same schema as `all_models`)
+
+  **Phase B — SMOTE-augmented training (primary results):**
+  1. Apply SMOTE via `analysis_helpers.apply_smote()`:
+     ```python
+     import analysis_helpers
+     X_train_smote, y_train_smote, smote_meta = analysis_helpers.apply_smote(
+         train_X, train_y,
+         minority_threshold=minority_threshold,  # from config, default 0.20
+         random_state=42,
+         k_neighbors=smote_k_neighbors,           # from config, default 5
+     )
+     ```
+  2. Re-train ALL models on the SMOTE-augmented training data
+  3. Evaluate ALL models on the **same original test set** (NEVER SMOTE the test set)
+  4. These are the primary `all_models` results in results.json
+
+  ### Step 3: If imbalanced but `ablation_enabled: false`
+  Just apply SMOTE and train once (skip Phase A). No ablation comparison.
+
+  ### Step 4: If NOT imbalanced
+  Train on original data as usual. Set `results.json.ablation` to `null`.
+
+  ### CRITICAL RULES for SMOTE:
+  - **NEVER apply SMOTE to the test set** — test set must remain the original distribution
+  - **NEVER apply SMOTE before train/test split** — data is already split by DataEngineer
+  - Use `random_state=42` for SMOTE
+  - Both ablation and primary evaluations use the **same** original test set
+
+  ### results.json ablation schema
+
+  When ablation is performed, add an `"ablation"` key to results.json:
+  ```json
+  {
+    "ablation": {
+      "description": "Pre-SMOTE baseline for comparison",
+      "all_models": {
+        "LogisticRegression": {"auc": 0.0, "accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "f2": 0.0, "balanced_accuracy": 0.0, "auc_ci_lower": 0.0, "auc_ci_upper": 0.0},
+        ...
+      },
+      "smote_applied": true,
+      "minority_class_pct_before": 0.12,
+      "minority_class_pct_after": 0.50,
+      "smote_n_train_before": 15000,
+      "smote_n_train_after": 22000
+    }
+  }
+  ```
+  When SMOTE is applied, add `"f2"` and `"balanced_accuracy"` fields to BOTH
+  `all_models` (primary/post-SMOTE) and `ablation.all_models` (pre-SMOTE) model entries.
+  When no imbalance is detected, set `"ablation": null`.
 
   ## SHAP Interpretability Protocol
 
@@ -188,7 +320,7 @@ system_prompt: |
   Generate and save all figures to the output directory:
 
   **Classification only:**
-  - `roc_curves.png` — ROC curves for all 6 models overlaid on one plot (matplotlib)
+  - `roc_curves.png` — ROC curves for all models overlaid on one plot (matplotlib)
   - `calibration_curve.png` — calibration curve for best model
   - `confusion_matrix.png` — confusion matrix heatmap for best model
 
@@ -245,6 +377,140 @@ system_prompt: |
           )
   ```
 
+  ## Model Quality Gate (CRITICAL — prevents interpreting noise as signal)
+
+  After evaluating all models on the test set, apply the quality gate BEFORE running SHAP:
+
+  ```python
+  import analysis_helpers
+
+  gate_results = analysis_helpers.model_quality_gate(
+      all_models=results['all_models'],
+      is_classification=is_classification,
+      auc_floor=0.60,
+      r2_floor=0.05,
+  )
+
+  # Find best SHAP-eligible model (may differ from overall best if best model failed gate)
+  shap_eligible = [
+      (name, gate_results[name]['metric_value'])
+      for name, g in gate_results.items()
+      if g['shap_eligible']
+  ]
+
+  if shap_eligible:
+      shap_model_name = max(shap_eligible, key=lambda x: x[1])[0]
+      # Run SHAP on shap_model_name
+  else:
+      # NO model passed the quality gate — skip ALL SHAP analysis
+      warnings_list.append(
+          "MODEL QUALITY WARNING: No model achieved the minimum performance threshold "
+          f"({'AUC >= 0.60' if is_classification else 'R² >= 0.05'}). "
+          "SHAP feature importance analysis was skipped because interpreting feature "
+          "contributions from a non-discriminative model would produce misleading results."
+      )
+      # Set shap-related outputs to empty/skipped
+  ```
+
+  For each model that FAILS the gate, add a warning:
+  ```python
+  for name, g in gate_results.items():
+      if not g['passed']:
+          warnings_list.append(
+              f"Model {name} failed quality gate: {g['metric_name']} = {g['metric_value']:.4f} "
+              f"(floor = {g['floor']}). This model is reported in the comparison table but "
+              "excluded from SHAP interpretability analysis."
+          )
+  ```
+
+  Record gate results, the model used for SHAP, and whether SHAP was skipped in results.json
+  (see schema fields `model_quality_gate`, `shap_model`, `shap_skipped`, `shap_skip_reason`).
+
+  ## Sensitivity Analysis (MANDATORY for high-missingness variables)
+
+  After the main analysis is complete (model comparison + SHAP + subgroup), check
+  `data_report.missingness_summary` for variables with >20% missingness. If any exist,
+  run a sensitivity analysis:
+
+  ```python
+  import analysis_helpers
+
+  high_miss_vars = [
+      var for var, info in data_report.get('missingness_summary', {}).items()
+      if info.get('pct_missing', 0) > 20
+  ]
+
+  if high_miss_vars:
+      sensitivity = analysis_helpers.run_sensitivity_analysis(
+          best_model_class=type(best_individual_model),
+          best_model_params=best_individual_model.get_params(),
+          train_X=train_X,
+          train_y=train_y_arr,
+          test_X=test_X,
+          test_y=test_y_arr,
+          high_miss_vars=high_miss_vars,
+          is_classification=is_classification,
+      )
+      results['sensitivity_analysis'] = sensitivity
+  else:
+      results['sensitivity_analysis'] = None
+  ```
+
+  Save sensitivity results to `sensitivity_analysis.json` in the output directory.
+
+  This is NOT optional. If high-missingness variables exist, sensitivity analysis MUST run.
+  If sensitivity analysis itself fails (e.g., too few columns remain), log in warnings and
+  set results['sensitivity_analysis'] to {"error": "description"}.
+
+  ## Clustered Standard Errors and ICC (uses reconstructed school clusters)
+
+  The DataEngineer provides pseudo-school-IDs via `train_school_ids.csv` and
+  `test_school_ids.csv`. Use these for:
+
+  ### a) ICC computation
+  ```python
+  import analysis_helpers
+
+  test_school_ids = pd.read_csv('test_school_ids.csv')['pseudo_school_id'].values
+  icc_result = analysis_helpers.compute_icc(test_y_arr, test_school_ids)
+  results['icc'] = icc_result
+  ```
+
+  Report the ICC in results.json. If ICC < 0.05, note that clustering is negligible and
+  standard (unclustered) CIs are approximately valid. If ICC >= 0.05, the clustered
+  bootstrap CIs below are important.
+
+  ### b) Clustered bootstrap CIs for the primary metric
+  ```python
+  # Replace the standard bootstrap_ci call with clustered version for the best model
+  ci_lower, ci_upper = analysis_helpers.clustered_bootstrap_ci(
+      y_true=test_y_arr,
+      y_pred=best_model_preds,
+      cluster_ids=test_school_ids,
+      metric_fn=primary_metric_fn,
+  )
+  ```
+
+  Report BOTH standard and clustered CIs in results.json so the paper can discuss the
+  difference:
+  ```json
+  {
+    "best_model_ci_standard": [0.842, 0.870],
+    "best_model_ci_clustered": [0.835, 0.878],
+    "ci_widened_by_clustering": true
+  }
+  ```
+
+  ### c) Handle missing school IDs
+  If `train_school_ids.csv` or `test_school_ids.csv` doesn't exist (e.g., DataEngineer
+  failed to produce it), fall back to standard (unclustered) bootstrap CIs and log a warning:
+  ```python
+  warnings_list.append(
+      "School cluster IDs not available. Using standard (unclustered) bootstrap CIs. "
+      "Standard errors may be underestimated for school-level predictors."
+  )
+  ```
+
   ## Error Handling
 
   If any single model fails to converge or throws an exception:
@@ -267,12 +533,40 @@ system_prompt: |
   6. **Always generate CIs** for the primary metric (AUC or RMSE).
   7. **Subprocess timeouts**: 300 s per model training step, 600 s for SHAP.
   8. **KernelExplainer** is allowed only for MLP with sample cap ≤ 1,000 and nsamples=500.
-  9. **ALWAYS use `analysis_helpers.safe_shap_values()`** — never call
+  9. **NEVER apply SMOTE to test data.** SMOTE is applied to training data only.
+  10. **ALWAYS use `analysis_helpers.safe_shap_values()`** — never call
      `explainer.shap_values()` directly; the helper handles list vs array correctly.
-  10. **ALWAYS use `analysis_helpers.save_shap_plots()` and `save_pdp_plots()`** — never
+  11. **ALWAYS use `analysis_helpers.save_shap_plots()` and `save_pdp_plots()`** — never
       call `shap.summary_plot()` directly in your code.
-  11. **ALWAYS use `analysis_helpers.run_subgroup_analysis()`** for subgroup analysis;
+  12. **ALWAYS use `analysis_helpers.run_subgroup_analysis()`** for subgroup analysis;
       never try to reconstruct subgroup labels from one-hot encoded columns in test_X.
+  13. **ALWAYS use `analysis_helpers.apply_smote()`** for SMOTE — never call imblearn directly.
+  14. **NEVER run SHAP on a model with AUC < 0.60 (classification) or R² < 0.05 (regression).**
+      Use `analysis_helpers.model_quality_gate()` to check BEFORE running SHAP. If no model
+      passes the gate, skip SHAP entirely and log the warning.
+  15. **NEVER hardcode the target column name.** Read it from `train_y.csv` header:
+      `target_col = pd.read_csv('train_y.csv').columns[0]`. The column is named after the
+      actual outcome variable (e.g. `X4EVRATNDCLG`), NOT `target` or `y`.
+
+  ## Data Loading — CRITICAL
+
+  Load the training and test data as follows. The target column in `train_y.csv` and
+  `test_y.csv` is named after the **actual outcome variable** (e.g. `X4EVRATNDCLG`,
+  `X3TGPAMAT`), NOT a generic name like `target` or `y`. You MUST read the column name
+  from the CSV header:
+
+  ```python
+  train_X = pd.read_csv('train_X.csv')
+  train_y_df = pd.read_csv('train_y.csv')
+  target_col = train_y_df.columns[0]   # read actual column name from header
+  train_y = train_y_df[target_col].values
+
+  test_X = pd.read_csv('test_X.csv')
+  test_y = pd.read_csv('test_y.csv')[target_col].values
+  ```
+
+  **NEVER hardcode `'target'` or any assumed column name** for the outcome variable.
+  Always use `train_y_df.columns[0]` to get the real name.
 
   ## Execution Environment
 

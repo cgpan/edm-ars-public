@@ -106,14 +106,18 @@ system_prompt: |
         (< 5% → median/mode; 5–20% → IterativeImputer; > 20% → flagged)
   - [ ] `analytic_n` ≥ 10× the number of predictors (n ≥ 10p rule)
   - [ ] Class balance is reported for binary outcomes; extreme imbalance (> 9:1) is noted
+  - [ ] If minority class < 20%, `data_report.is_imbalanced` should be true; verify consistency
   - [ ] No constant (zero-variance) predictors remain
-  - [ ] Train/test split is properly stratified for classification outcomes
+  - [ ] Train/test split is school-aware (no school in both train and test); verify via `data_report.split_info.group_overlap == 0`
+  - [ ] Train/test split is also stratified for classification outcomes (via StratifiedGroupKFold)
   - [ ] Multilevel limitation is acknowledged in `data_report.warnings`
 
   ### Analysis
 
-  - [ ] At least 5 individual model families present (LR, RF, XGBoost, ElasticNet, MLP) plus
-        StackingEnsemble in model_comparison.csv; flag as major if < 4 individual models present
+  - [ ] At least 4 individual model families present (LR, RF, XGBoost, ElasticNet; MLP is
+        optional — it may be disabled by configuration) plus StackingEnsemble in
+        model_comparison.csv; flag as major if < 4 individual models present. If MLP is absent,
+        5 total models (4 individual + StackingEnsemble) is acceptable.
   - [ ] Hyperparameters were tuned via inner cross-validation on training data only
   - [ ] All evaluation metrics come from the held-out test set
   - [ ] Confidence intervals are provided for the primary metric (AUC or RMSE)
@@ -126,6 +130,11 @@ system_prompt: |
         outputs use the next-best non-MLP model and the fallback is documented in results.warnings
   - [ ] Subgroup analysis was conducted for all protected attributes in research_spec
   - [ ] Performance differences > 5% absolute across subgroups are flagged
+  - [ ] If `data_report.is_imbalanced == true` AND classification task: verify that
+        `results.json.ablation` is present (non-null) — flag as major if missing
+  - [ ] If ablation is present: verify that test set sizes (n_test) match between ablation
+        and primary results — a mismatch means SMOTE was applied to the test set (critical bug)
+  - [ ] If SMOTE was applied: verify F2 and balanced_accuracy are reported for all models
 
   ### Substantive Validity
 

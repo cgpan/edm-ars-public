@@ -21,9 +21,6 @@ __pycache__/
 *.env
 set_env.ps1
 
-# Local dev tools
-CLAUDE.md
-
 # LaTeX build artifacts
 *.aux
 *.log

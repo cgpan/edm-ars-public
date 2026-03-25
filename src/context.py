@@ -14,6 +14,7 @@ class PipelineState(str, Enum):
     CRITIQUING = "CRITIQUING"
     REVISING = "REVISING"
     WRITING = "WRITING"
+    REVIEWING = "REVIEWING"
     COMPLETED = "COMPLETED"
     ABORTED = "ABORTED"
 
@@ -34,6 +35,8 @@ class PipelineContext:
     results_object: Optional[dict] = None
     review_report: Optional[dict] = None
     paper_text: Optional[str] = None
+    paper_outline: Optional[dict] = None
+    review_gate_result: Optional[dict] = None
 
     # Pipeline metadata
     current_state: str = PipelineState.INITIALIZED
@@ -61,6 +64,8 @@ class PipelineContext:
             "results_object": self.results_object,
             "review_report": self.review_report,
             "paper_text": self.paper_text,
+            "paper_outline": self.paper_outline,
+            "review_gate_result": self.review_gate_result,
             "errors": self.errors,
             "log": self.log,
             "run_start_time": self.run_start_time,
@@ -84,6 +89,8 @@ class PipelineContext:
         ctx.results_object = data.get("results_object")
         ctx.review_report = data.get("review_report")
         ctx.paper_text = data.get("paper_text")
+        ctx.paper_outline = data.get("paper_outline")
+        ctx.review_gate_result = data.get("review_gate_result")
         ctx.errors = data.get("errors", [])
         ctx.log = data.get("log", [])
         ctx.run_start_time = data.get("run_start_time", "")

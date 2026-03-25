@@ -1,7 +1,7 @@
 # config.yaml
 # llm_provider: which API to use — "anthropic" or "minimax"
 # Switch to "minimax" for lower-cost runs (MiniMax-M2.5 is Anthropic-SDK-compatible).
-llm_provider: anthropic   # "anthropic" or "minimax"
+llm_provider: minimax   # anthropic or minimax
 
 models:
   problem_formulator: claude-sonnet-4-6
@@ -15,17 +15,26 @@ models:
 minimax:
   base_url: https://api.minimax.io/anthropic
   models:
-    problem_formulator: MiniMax-M2.5
-    data_engineer: MiniMax-M2.5
-    analyst: MiniMax-M2.5
-    critic: MiniMax-M2.5
-    writer: MiniMax-M2.5
+    problem_formulator: MiniMax-M2.7
+    data_engineer: MiniMax-M2.7
+    analyst: MiniMax-M2.7
+    critic: MiniMax-M2.7
+    writer: MiniMax-M2.7
+    revision_writer: MiniMax-M2.7
 
 pipeline:
   task_type: prediction     # task type: prediction, causal_inference, etc.
   max_revision_cycles: 2
   random_state: 42
   cost_budget_usd: 5.0     # soft limit; log warning if exceeded, do not abort
+  mlp_enabled: false        # MLP disabled by default (KernelExplainer timeout risk)
+
+class_imbalance:
+  minority_threshold: 0.20   # minority < 20% triggers SMOTE
+  smote_random_state: 42
+  smote_k_neighbors: 5
+  fbeta_beta: 2              # F2 emphasizes recall (at-risk detection)
+  ablation_enabled: true     # train once without SMOTE for comparison
 
 sandbox:
   enabled: true
@@ -53,6 +62,20 @@ findings_memory:
   enabled: true                        # opt-in; false = all prior behavior unchanged
   path: findings_memory/memory.yaml
   n_candidate_specs: 3                  # number of candidate specs generated before selecting best
+
+review_gate:
+  enabled: true
+  lsar_project_path: "H:\\My Drive\\LSAR"
+  lsar_config_path: "H:\\My Drive\\LSAR\\config.yaml"
+  venue: "EDM"
+  max_cycles: 2
+  pass_threshold: 5.5        # minimum overall score to pass
+  dimension_floor: 3          # minimum score for any individual dimension
+  revision_model: "MiniMax-M2.7"   #MiniMax-M2.7 claude-sonnet-4-6
+  revision_max_tokens: 16000
+
+writer:
+  outline_first: true
 
 paths:
   data_registry: data_registry/

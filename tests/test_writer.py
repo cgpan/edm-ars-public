@@ -543,6 +543,10 @@ class TestValidateTemplateStructure:
     def test_valid_latex_returns_no_warnings(self) -> None:
         valid = (
             r"\documentclass[sigconf]{acmart}" + "\n"
+            r"\setcopyright{none}" + "\n"
+            r"\settopmatter{printacmref=false}" + "\n"
+            r"\acmConference[]{Anonymous Conference}{}{}" + "\n"
+            "AI-Generated Research Paper\n"
             r"\begin{document}" + "\n"
             r"\begin{abstract}text\end{abstract}" + "\n"
             r"\maketitle" + "\n"
