@@ -328,10 +328,11 @@ def test_findings_memory_updated_on_complete(tmp_path) -> None:
 
 def test_findings_memory_not_updated_when_disabled(tmp_path) -> None:
     """When disabled, no memory file should be written."""
-    import tempfile
-
     config = load_config(CONFIG_PATH)
     config["findings_memory"]["enabled"] = False
+    # Use an isolated path so a leftover file from prior runs doesn't cause a false failure
+    isolated_mem_path = str(tmp_path / "findings_memory" / "memory.yaml")
+    config["findings_memory"]["path"] = isolated_mem_path
 
     ctx = _make_ctx(tmp_path)
     orch = Orchestrator(ctx, config, config_path=CONFIG_PATH)
@@ -358,8 +359,6 @@ def test_findings_memory_not_updated_when_disabled(tmp_path) -> None:
     orch.writer.run = _stub_writer_run
     orch.run()
 
-    # Default memory path should NOT exist
-    default_path = config["findings_memory"]["path"]
-    assert not Path(default_path).exists(), (
-        f"Memory file should not be created when disabled: {default_path}"
+    assert not Path(isolated_mem_path).exists(), (
+        f"Memory file should not be created when disabled: {isolated_mem_path}"
     )

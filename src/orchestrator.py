@@ -15,6 +15,7 @@ from src.context import PipelineContext, PipelineState
 from src.dataset_adapter import create_dataset_adapter
 from src.findings_memory import FindingsMemory, RunEntry
 from src.pre_critic_checks import CheckFailure, PreCriticResult, run_pre_critic_checks
+from src.review_gate import ReviewGate
 from src.sandbox import compile_latex, create_executor
 from src.task_template import create_task_template
 
@@ -99,6 +100,8 @@ class Orchestrator:
                 self._run_revising()
             elif state == PipelineState.WRITING:
                 self._run_writing()
+            elif state == PipelineState.REVIEWING:
+                self._run_reviewing()
             elif state in (PipelineState.COMPLETED, PipelineState.ABORTED):
                 break
             else:
@@ -295,11 +298,41 @@ class Orchestrator:
 
     def _run_writing(self) -> None:
         if "WRITING" in self.ctx.completed_stages:
-            self.ctx.current_state = PipelineState.COMPLETED
+            rg_enabled = self.config.get("review_gate", {}).get("enabled", False)
+            if rg_enabled and "REVIEWING" not in self.ctx.completed_stages:
+                self.ctx.current_state = PipelineState.REVIEWING
+            else:
+                self.ctx.current_state = PipelineState.COMPLETED
             return
         self._log("Orchestrator", "Starting WRITING stage")
         try:
-            result = self.writer.run()
+            # Phase 1: generate outline if outline_first is enabled
+            outline = None
+            if self.config.get("writer", {}).get("outline_first", True):
+                self._log("Orchestrator", "Running OutlineAgent (outline-first mode)")
+                try:
+                    from src.agents.outline_agent import OutlineAgent
+
+                    agent_kwargs = dict(
+                        executor=self._executor,
+                        task_template=self.task_template,
+                        dataset_adapter=self.dataset_adapter,
+                    )
+                    outline_agent = OutlineAgent(
+                        self.ctx, "outline_agent", self.config, **agent_kwargs
+                    )
+                    outline = outline_agent.run()
+                    self.ctx.paper_outline = outline
+                    self._log("Orchestrator", "OutlineAgent complete")
+                except Exception as e:
+                    self._log(
+                        "Orchestrator",
+                        f"OutlineAgent failed (non-fatal, falling back to v1): {e}",
+                    )
+                    outline = None
+
+            # Phase 2: generate prose
+            result = self.writer.run(outline=outline)
             self.ctx.paper_text = result if isinstance(result, str) else result.get("paper_text", "")
 
             # Compile LaTeX: pdflatex → bibtex → pdflatex → pdflatex
@@ -314,13 +347,62 @@ class Orchestrator:
                 self._log("Orchestrator", "LaTeX compilation had errors — check pipeline.log for details")
 
             self.ctx.completed_stages.append("WRITING")
-            self.ctx.current_state = PipelineState.COMPLETED
-            self._log("Orchestrator", "WRITING stage complete → COMPLETED")
+
+            # Transition to REVIEWING if the review gate is enabled, else COMPLETED
+            rg_enabled = self.config.get("review_gate", {}).get("enabled", False)
+            if rg_enabled:
+                self.ctx.current_state = PipelineState.REVIEWING
+                self._log("Orchestrator", "WRITING stage complete → REVIEWING")
+            else:
+                self.ctx.current_state = PipelineState.COMPLETED
+                self._log("Orchestrator", "WRITING stage complete → COMPLETED")
             self._save_checkpoint()
             self._check_cost()
-            self._update_findings_memory()
+            if not rg_enabled:
+                self._update_findings_memory()
         except Exception as e:
             self._abort(f"WRITING failed: {e}")
+
+    def _run_reviewing(self) -> None:
+        if "REVIEWING" in self.ctx.completed_stages:
+            self.ctx.current_state = PipelineState.COMPLETED
+            return
+        self._log("Orchestrator", "Starting REVIEWING stage (LSAR quality gate)")
+        try:
+            from pathlib import Path
+
+            rg_cfg = self.config.get("review_gate", {})
+            gate = ReviewGate(
+                config=self.config,
+                output_dir=Path(self.ctx.output_dir),
+                log_fn=self._log,
+            )
+            summary = gate.run_gate()
+            self.ctx.review_gate_result = summary
+
+            # Log summary
+            self._log(
+                "Orchestrator",
+                f"LSAR review gate: passed={summary['passed']}, "
+                f"cycles={summary['cycles_used']}, "
+                f"score={summary['final_score']:.2f}, "
+                f"rec={summary['final_recommendation']}",
+            )
+        except Exception as e:
+            self._log("Orchestrator", f"REVIEWING failed (non-fatal): {e}")
+            self.ctx.review_gate_result = {
+                "error": str(e),
+                "passed": False,
+                "cycles_used": 0,
+            }
+
+        # Always proceed to COMPLETED — the gate is diagnostic, not blocking
+        self.ctx.completed_stages.append("REVIEWING")
+        self.ctx.current_state = PipelineState.COMPLETED
+        self._log("Orchestrator", "REVIEWING stage complete → COMPLETED")
+        self._save_checkpoint()
+        self._check_cost()
+        self._update_findings_memory()
 
     # ------------------------------------------------------------------
     # Revision cascade (SPEC §5.3)
@@ -441,6 +523,7 @@ class Orchestrator:
         self.ctx.results_object = loaded.results_object
         self.ctx.review_report = loaded.review_report
         self.ctx.paper_text = loaded.paper_text
+        self.ctx.review_gate_result = loaded.review_gate_result
         self.ctx.errors = loaded.errors
         self.ctx.log = loaded.log
         self._log("Orchestrator", f"Resumed from checkpoint (state={loaded.current_state})")

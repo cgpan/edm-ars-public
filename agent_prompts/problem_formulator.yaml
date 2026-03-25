@@ -32,7 +32,7 @@ system_prompt: |
     ],
     "target_population": "Description of the analytic sample",
     "subgroup_analyses": ["X1SEX", "X1RACE"],
-    "expected_contribution": "What this study adds to the literature",
+    "expected_contribution": "A 2-3 sentence statement identifying (1) the specific gap in prior work, (2) what this study does differently, and (3) why the answer is not obvious. Generic statements like 'this study applies ML to HSLS:09' are not acceptable.",
     "potential_limitations": ["list of known methodological limitations"],
     "novelty_score_self_assessment": 4
   }
@@ -104,6 +104,53 @@ system_prompt: |
 
   8. **Feasibility**: The research question must be answerable with machine learning prediction
      methods using the HSLS:09 dataset. Do not propose causal or experimental designs.
+
+  9. **Gap-driven framing (CRITICAL)**: Your research question must identify a SPECIFIC GAP
+     in the existing literature, not just ask "Can we predict X?" Every EDM prediction study
+     can predict X — the question is what NEW KNOWLEDGE does this particular study produce.
+
+     REJECTED patterns (too generic):
+     - "Can ML models predict college attendance from 9th-grade factors?"
+     - "Can we predict dropout using HSLS:09 data?"
+     - "What predicts science GPA in high school?"
+
+     ACCEPTED patterns (gap-driven):
+     - "Do non-cognitive factors (math identity, school belonging) predict college attendance
+       BEYOND what academic achievement and SES explain?" (gap: prior work controls for
+       achievement/SES but omits identity constructs)
+     - "Is the relative importance of academic vs. motivational predictors for STEM enrollment
+       stable between 9th and 11th grade, or does it shift?" (gap: longitudinal shift in
+       predictor importance is unstudied)
+     - "Do models trained on the full HSLS:09 sample show differential predictive validity
+       for first-generation college students vs. continuing-generation students?" (gap:
+       fairness evaluation specifically for first-generation status)
+
+     The `expected_contribution` field must state the gap explicitly. "This study adds to the
+     literature by applying ML to HSLS:09" is NOT an acceptable contribution statement.
+
+  10. **Contrast framing**: The research question should imply a CONTRAST or COMPARISON that
+      makes the answer non-obvious. "What predicts X?" has an obvious answer (prior achievement
+      + SES). "Does school belonging predict X ABOVE AND BEYOND achievement and SES?" does not.
+
+  11. **Surprising predictor emphasis**: If you include attitudinal/non-cognitive predictors
+      (math identity, science identity, school belonging, self-efficacy), the research question
+      should center them as the interesting component, not bury them in a generic predictor
+      list. These constructs are what differentiate HSLS:09 from other datasets.
+
+  12. **Predictor set rationale coherence**: The predictors should form a theoretically
+      coherent set, not a kitchen-sink selection. If the question is about non-cognitive
+      predictors, the predictor set should include specific non-cognitive constructs with
+      achievement/SES as controls — not 20 variables of every type.
+
+  13. **Novelty self-assessment calibration**: A score of 3 means "applies known methods to
+      a known dataset with a slightly different variable set" — this is the MINIMUM. A score
+      of 4 requires a genuine gap or contrast. A score of 5 requires a question that would
+      surprise a reviewer. If you cannot justify a score of 4, redesign the question.
+
+  14. **If Findings Memory is available**: Your question MUST build on prior findings. If prior
+      runs found that "SES is consistently the top predictor," do NOT produce another study
+      confirming this. Instead, ask: "In what subpopulations does SES lose its predictive
+      dominance?" or "Does SES predict through different pathways for different outcomes?"
 
   ## Canonical Research Questions (for inspiration — do not copy verbatim)
 

@@ -182,13 +182,15 @@ standard_workflow:
         action: "df = df.loc[:, df.var() > 0]"
 
       - id: dp_09
-        name: train_test_split
+        name: grouped_train_test_split
         description: >
-          Split into 80% train / 20% test.
-          Classification: stratify=y (stratified on outcome class).
-          Regression: random split.
-          Use random_state=42. Test set must be ≥ 20% of analytic_n.
-        action: "train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)"
+          Split into ~80% train / ~20% test using school-aware splitting.
+          No school (pseudo_school_id) should appear in both train and test sets.
+          Classification: StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42),
+          take fold 0 as test.
+          Regression: GroupShuffleSplit(n_splits=1, test_size=0.2, random_state=42).
+          Use analysis_helpers.grouped_train_test_split().
+        action: "analysis_helpers.grouped_train_test_split(df, y, groups, stratify=is_classification)"
 
       - id: dp_10
         name: report_class_balance
@@ -205,7 +207,9 @@ standard_workflow:
         name: add_multilevel_warning
         description: >
           Always append this exact string to data_report.warnings:
-          'Multilevel structure (students nested in schools) is not modeled. This is a limitation.'
+          'Multilevel structure (students nested in schools) is partially addressed: train/test
+          split is school-aware (no school in both sets) and clustered bootstrap CIs account for
+          within-school correlation. However, models do not include school-level random effects.'
 
     checks:
       - id: check_dp_no_nan
@@ -223,8 +227,8 @@ standard_workflow:
         severity: major
         failure_action: drop_and_warn
 
-      - id: check_dp_stratified_split
-        description: "Train/test split is stratified for classification outcomes"
+      - id: check_dp_grouped_split
+        description: "Train/test split is school-aware (no group overlap) and stratified for classification"
         severity: major
         failure_action: set_validation_passed_false
 
@@ -451,6 +455,12 @@ standard_workflow:
             function: "sklearn.metrics.recall_score(average='macro')"
           - name: F1
             function: "sklearn.metrics.f1_score(average='macro')"
+          - name: F2
+            function: "sklearn.metrics.fbeta_score(y_true, y_pred, beta=2)"
+            note: "Only reported when SMOTE is applied (imbalanced classification)"
+          - name: Balanced_Accuracy
+            function: sklearn.metrics.balanced_accuracy_score
+            note: "Only reported when SMOTE is applied (imbalanced classification)"
         additional_outputs:
           - confusion_matrix
           - roc_curves_all_models    # overlaid, saved as roc_curves.png
@@ -642,12 +652,14 @@ output_specification:
       producer: DataEngineer
       required_fields: [dataset, original_n, analytic_n, n_train, n_test,
                         outcome_variable, outcome_type, n_predictors_encoded,
-                        missingness_summary, validation_passed, warnings]
+                        missingness_summary, validation_passed, warnings,
+                        is_imbalanced]
     - name: results.json
       producer: Analyst
       required_fields: [best_model, best_metric_value, primary_metric,
                         all_models, top_features, subgroup_performance,
                         figures_generated, errors, warnings]
+      optional_fields: [ablation]
     - name: review_report.json
       producer: Critic
       required_fields: [overall_verdict, overall_quality_score,
@@ -672,6 +684,10 @@ output_specification:
     - name: subgroup_performance.csv
       producer: Analyst
       columns: [attribute, group, primary_metric_value, n]
+    - name: ablation_comparison.csv
+      producer: Analyst
+      columns: [model, auc_no_smote, auc_smote, delta]
+      note: "Only produced when SMOTE is applied (imbalanced classification)"
 
   figures:
     classification_only:
@@ -708,12 +724,12 @@ output_specification:
         - "4. Results"
         - "5. Discussion"
       word_counts:
-        Abstract: {min: 150, max: 250}
-        Introduction: {min: 800, max: 1200}
-        Related_Work: {min: 500, max: 800}
-        Methods: {min: 800, max: 1300}
-        Results: {min: 600, max: 1000}
-        Discussion: {min: 600, max: 1000}
+        Abstract: {min: 200, max: 300}
+        Introduction: {min: 1200, max: 1800}
+        Related_Work: {min: 800, max: 1200}
+        Methods: {min: 1200, max: 2000}
+        Results: {min: 1000, max: 1600}
+        Discussion: {min: 1000, max: 1600}
     - name: references.bib
       producer: Writer
       format: BibTeX

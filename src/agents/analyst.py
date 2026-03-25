@@ -57,6 +57,13 @@ _REPAIR_HINTS: dict[str, str] = {
         "All file paths MUST be ABSOLUTE. "
         "Use the paths from the ## Data File Paths section in the original prompt exactly."
     ),
+    "KeyError": (
+        "The error is a KeyError, likely because the target column name was hardcoded as "
+        "'target' or 'y'. The target column in train_y.csv is named after the ACTUAL outcome "
+        "variable (e.g. 'X4EVRATNDCLG', 'X3TGPAMAT'). Read it dynamically: "
+        "target_col = pd.read_csv('train_y.csv').columns[0]; "
+        "train_y = pd.read_csv('train_y.csv')[target_col].values"
+    ),
     "SHAPTimeout": (
         "SHAP computation timed out. Apply the fallback rule: "
         "skip SHAP for MLP and use the next-best non-MLP individual model for all SHAP outputs. "
@@ -95,6 +102,8 @@ def _classify_error(stderr: str) -> str:
         return "FileNotFoundError"
     if "shap" in s and ("timeout" in s or "timeouterror" in s or "timed out" in s):
         return "SHAPTimeout"
+    if "keyerror" in s:
+        return "KeyError"
     if "valueerror" in s:
         return "ValueError"
     if "typeerror" in s:
@@ -199,7 +208,19 @@ class Analyst(BaseAgent):
         revision_instructions: str | None,
     ) -> str:
         output_dir = self.ctx.output_dir
+        # Inject pipeline configuration (MLP toggle, class imbalance settings)
+        mlp_enabled = self.config.get("pipeline", {}).get("mlp_enabled", True)
+        imbalance_cfg = self.config.get("class_imbalance", {})
+
         parts = [
+            "## Configuration",
+            f"- mlp_enabled: {str(mlp_enabled).lower()}",
+            f"- minority_threshold: {imbalance_cfg.get('minority_threshold', 0.20)}",
+            f"- smote_random_state: {imbalance_cfg.get('smote_random_state', 42)}",
+            f"- smote_k_neighbors: {imbalance_cfg.get('smote_k_neighbors', 5)}",
+            f"- fbeta_beta: {imbalance_cfg.get('fbeta_beta', 2)}",
+            f"- ablation_enabled: {str(imbalance_cfg.get('ablation_enabled', True)).lower()}",
+            "",
             "## Data Report",
             "```json",
             json.dumps(data_report, indent=2),
@@ -217,6 +238,15 @@ class Analyst(BaseAgent):
             f"- test_y:  `{os.path.join(output_dir, 'test_y.csv')}`",
             f"- test_protected (subgroup labels, pre-encoding): "
             f"`{os.path.join(output_dir, 'test_protected.csv')}`",
+            "",
+            "**CRITICAL: The target column in train_y.csv/test_y.csv is named after the "
+            f"actual outcome variable (`{research_spec.get('outcome_variable', 'UNKNOWN')}`), "
+            "NOT 'target'. Load it as:**",
+            "```python",
+            "train_y_df = pd.read_csv(train_y_path)",
+            "target_col = train_y_df.columns[0]  # actual variable name",
+            "train_y_arr = train_y_df[target_col].values",
+            "```",
             "",
             "## Analysis Helpers (REQUIRED — import and use these, do NOT reimplement)",
             "`analysis_helpers.py` is pre-installed in your working directory.",
@@ -247,14 +277,15 @@ class Analyst(BaseAgent):
             "",
             "## Task",
             (
-                "Generate Python analysis code that trains the six-model battery "
-                "(Logistic/Linear Regression, Random Forest, XGBoost, ElasticNet, MLP, "
-                "StackingEnsemble), tunes hyperparameters via 5-fold inner CV on the training "
-                "set only for RF/XGBoost/ElasticNet/MLP, builds StackingEnsemble from the 5 "
-                "tuned base models, evaluates all 6 models on the held-out test set, computes "
-                "SHAP interpretability outputs for the best individual model (StackingEnsemble "
-                "excluded from SHAP), generates all required figures and CSVs, and writes "
-                "results.json to the Output Directory above. "
+                "Generate Python analysis code that trains the model battery "
+                "(see Configuration section above for mlp_enabled and class_imbalance settings), "
+                "tunes hyperparameters via 5-fold inner CV on the training set only, "
+                "builds StackingEnsemble from the tuned base models, evaluates all models "
+                "on the held-out test set, applies SMOTE if class imbalance is detected "
+                "(with ablation comparison if enabled), computes SHAP interpretability "
+                "outputs for the best individual model (StackingEnsemble excluded from SHAP), "
+                "generates all required figures and CSVs, and writes results.json to the "
+                "Output Directory above. "
                 "Use absolute paths for all file writes — do NOT rely on the working directory."
             ),
         ]
@@ -314,9 +345,9 @@ class Analyst(BaseAgent):
         parts += [
             "",
             "Output a corrected ```python code block. "
-            "Apply all the same analysis requirements: "
-            "six models (LR, RF, XGBoost, ElasticNet, MLP, StackingEnsemble); "
-            "inner CV tuning; test-set evaluation only; "
+            "Apply all the same analysis requirements from the original prompt: "
+            "model battery per Configuration (check mlp_enabled); "
+            "inner CV tuning; test-set evaluation only; SMOTE if imbalanced; "
             "SHAP for best individual model; all figures and CSVs; results.json.",
         ]
         return "\n".join(parts)
@@ -440,5 +471,16 @@ class Analyst(BaseAgent):
         if not isinstance(results.get("top_features"), list):
             results["warnings"].append("top_features is missing or not a list; defaulting to []")
             results["top_features"] = []
+
+        # Validate ablation presence for imbalanced classification
+        data_report = getattr(self.ctx, "data_report", None) or {}
+        is_imbalanced = data_report.get("is_imbalanced", False)
+        ablation_enabled = self.config.get("class_imbalance", {}).get("ablation_enabled", True)
+        if is_imbalanced and ablation_enabled and results.get("ablation") is None:
+            results["warnings"].append(
+                "data_report.is_imbalanced is true and ablation_enabled is true, "
+                "but results.json contains no 'ablation' key. "
+                "The Analyst may not have performed the SMOTE ablation comparison."
+            )
 
         return results

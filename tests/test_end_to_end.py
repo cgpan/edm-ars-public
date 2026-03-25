@@ -291,10 +291,11 @@ def test_happy_path_completes(tmp_path: Path) -> None:
     for fname in required:
         assert (tmp_path / fname).exists(), f"Missing required output file: {fname}"
 
-    # Correct completed_stages sequence
-    assert result.completed_stages == [
-        "FORMULATING", "ENGINEERING", "ANALYZING", "CRITIQUING", "WRITING"
-    ]
+    # Correct completed_stages sequence (REVIEWING appended when review_gate enabled)
+    core_stages = ["FORMULATING", "ENGINEERING", "ANALYZING", "CRITIQUING", "WRITING"]
+    assert result.completed_stages[:5] == core_stages
+    if len(result.completed_stages) > 5:
+        assert result.completed_stages[5] == "REVIEWING"
 
     # research_spec.json has correct content
     spec = json.loads((tmp_path / "research_spec.json").read_text())

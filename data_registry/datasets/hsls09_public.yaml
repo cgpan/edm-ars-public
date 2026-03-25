@@ -1782,8 +1782,10 @@ missingness:
   - '-7'
   - '-6'
   - '-5'
+  - '-1'
   - Missing
   - Unit non-response
+  - "Don't know"
   - Data suppressed
   - Component not applicable
   - Item legitimate skip/NA

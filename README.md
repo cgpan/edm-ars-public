@@ -1,25 +1,26 @@
 # EDM-ARS: Educational Data Mining Automated Research System
 
-A multi-agent pipeline that automates end-to-end EDM research, with the goal of supporting a broad range of topics, including prediction, causal inference, transfer learning, and psychometrics. We begin with prediction tasks using a single dataset and plan to expand the system to support additional datasets and broader research themes. In current version, given the HSLS:09 dataset and an optional research prompt, it produces a complete, reviewer-ready LaTeX paper with real citations, validated methodology, and interpretable results. See website for a brief introduction: [edmars.ai](https://edmars.ai/).
+A multi-agent pipeline that automates end-to-end prediction-focused EDM research. Given the HSLS:09 dataset and an optional research prompt, it produces a complete, reviewer-ready LaTeX paper with real citations, validated methodology, and interpretable results.
 
-> **Current version: v1.1.3** — See [What's New in v1.1](#whats-new-in-v11) for AutoResearchClaw-inspired improvements.
+> **Current version: v1.2.0** — See [What's New in v1.2](#whats-new-in-v12) for LSAR-driven quality improvements.
 
 ---
 
 ## Table of Contents
 
 1. [How It Works](#how-it-works)
-2. [What's New in v1.1](#whats-new-in-v11)
-3. [Prerequisites](#prerequisites)
-4. [Installation](#installation)
-5. [Data Setup](#data-setup)
-6. [Configuration](#configuration)
-7. [Running the Pipeline](#running-the-pipeline)
-8. [Docker Sandbox](#docker-sandbox)
-9. [Resuming an Interrupted Run](#resuming-an-interrupted-run)
-10. [Output Structure](#output-structure)
-11. [Development](#development)
-12. [Troubleshooting](#troubleshooting)
+2. [What's New in v1.2](#whats-new-in-v12)
+3. [What's New in v1.1](#whats-new-in-v11)
+4. [Prerequisites](#prerequisites)
+5. [Installation](#installation)
+6. [Data Setup](#data-setup)
+7. [Configuration](#configuration)
+8. [Running the Pipeline](#running-the-pipeline)
+9. [Docker Sandbox](#docker-sandbox)
+10. [Resuming an Interrupted Run](#resuming-an-interrupted-run)
+11. [Output Structure](#output-structure)
+12. [Development](#development)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -37,9 +38,74 @@ ProblemFormulator → DataEngineer → Analyst → Critic → Writer
 | **DataEngineer** | Generates and executes data-cleaning / feature-engineering code; produces train/test splits |
 | **Analyst** | Trains 6 model families (LR, RF, XGBoost, ElasticNet, MLP, Stacking), runs SHAP, subgroup analysis |
 | **Critic** | Reviews all outputs for methodological correctness; issues PASS / REVISE / ABORT verdict (uses Opus model) |
-| **Writer** | Assembles the final ACM `acmart` LaTeX paper and BibTeX reference file |
+| **OutlineAgent** | Generates a data-driven paper outline with adaptive section structure (v1.2) |
+| **Writer** | Assembles the final ACM `acmart` LaTeX paper (outline-first) and BibTeX reference file |
 
 The Critic can trigger revision cycles (up to `max_revision_cycles` in `config.yaml`). If the pipeline exceeds the cycle limit without a PASS verdict, the paper is marked UNVERIFIED but still produced.
+
+---
+
+## What's New in v1.2
+
+Six improvements driven by LSAR review aggregation findings, targeting the weakest dimensions: methodological rigor, novelty, and clarity of communication.
+
+### 1. Outline-First Paper Generation (`src/agents/outline_agent.py`)
+
+A new **OutlineAgent** generates a data-driven paper outline before the Writer produces prose. The outline adapts to the actual results:
+
+| Emphasis trigger | Condition | Effect |
+|---|---|---|
+| Model convergence | Top-3 models within 0.02 AUC/RMSE | Adds "Why Models Converge" subsection |
+| Surprising predictors | Top-3 SHAP features are non-obvious | Expands Discussion interpretation |
+| Subgroup gaps | Any gap > 5% across protected attributes | Adds equity-focused subsection |
+| Sensitivity significance | Drop-one metric change > 2% | Adds robustness discussion |
+| ICC ≥ 0.05 | Non-trivial school clustering | Adds multilevel limitation analysis |
+
+Controlled by `writer.outline_first: true` (default). Falls back to the v1 placeholder template if outline generation fails. Uses `templates/paper_template_v2.tex` with a single `%%PLACEHOLDER:PAPER_BODY%%` marker.
+
+### 2. Template Preamble Protection (`src/agents/writer.py`)
+
+`_reassemble_from_template()` extracts title, abstract, keywords, and body from the LLM output and inserts them into the **clean template**. This prevents the LLM from corrupting the ACM `\makeatletter` / `\renewcommand\@copyrightpermission` block, which previously caused broken first-page rendering in compiled PDFs.
+
+### 3. Model Quality Gate (`src/analysis_helpers.py`)
+
+`model_quality_gate()` prevents SHAP interpretation on non-discriminative models:
+
+| Task | Floor metric | Threshold |
+|---|---|---|
+| Classification | AUC | 0.60 |
+| Regression | R² | 0.05 |
+
+Models below the threshold are marked `shap_eligible: false`. SHAP is computed only for eligible models and the fallback is documented in `results.warnings`.
+
+### 4. Multilevel Analysis Support (`src/analysis_helpers.py`)
+
+New helpers for HSLS:09's nested structure (students within schools):
+
+- `reconstruct_school_ids()` — recovers pseudo-school-IDs from 7 school-level fingerprint variables (X1SCHOOLCLI, X1COUPERTEA, X1COUPERCOU, X1COUPERPRI, X1CONTROL, X1LOCALE, X1REGION). Recovers ~948 clusters matching the expected 944 schools.
+- `compute_icc()` — intraclass correlation coefficient for outcome clustering.
+- `clustered_bootstrap_ci()` — cluster-aware confidence intervals.
+
+School reconstruction now runs as step 6 in the DataEngineer prompt (before train/test split), ensuring the fingerprint columns are available.
+
+### 5. Gap-Driven Research Questions (`agent_prompts/problem_formulator.yaml`)
+
+Rules 9–14 enforce stronger novelty and framing:
+
+- **Contrast framing**: Research questions must identify a specific gap, not just "Can we predict X?"
+- **Surprising predictor emphasis**: At least one predictor must be non-obvious.
+- **Predictor set coherence**: Variables must form a theoretically motivated group.
+- **Novelty calibration**: 3 = minimum bar, 4 = genuine gap, 5 = surprising.
+- `expected_contribution` now requires a 3-part statement: (1) gap in prior work, (2) what this study does differently, (3) why the answer is not obvious.
+
+### 6. Sensitivity Analysis (`agent_prompts/analyst.yaml`)
+
+High-missingness variables (> 15% missing) are tested via a drop-and-retrain protocol:
+
+1. Identify variables with > 15% missingness.
+2. Drop each one, retrain the best model, measure metric change.
+3. Flag variables where metric change > 2% as sensitivity-significant.
+4. Results saved to `results.json` under `sensitivity_analysis`.
 
 ---
 
@@ -130,10 +196,9 @@ The repair prompt uses the **last 3,000 characters of stderr** for maximum conte
 |---|---|---|
 | Python | 3.11+ | |
 | Docker Engine | 24.0+ | Required for sandboxed code execution (optional — see below) |
-| Anthropic API key | — | Primary provider: `claude-sonnet-4-6` + `claude-opus-4-6` |
-| *or* MiniMax API key | — | Alternative provider: `MiniMax-M2.5` (see [LLM Provider](#llm-provider)) |
-| Semantic Scholar API key | — | — |
-| HSLS:09 public-use CSV | — | Obtainable from NCES; [CSV is available here.](https://drive.google.com/drive/folders/1bKc8_nNTqOIE0xWycMxzKfr7SrnWdQGe?usp=sharing) |
+| MiniMax API key | — | Default provider (`MiniMax-M2.7`); set `MINIMAX_API_KEY` env var |
+| Anthropic API key | — | Alternative provider; set `ANTHROPIC_API_KEY` env var |
+| HSLS:09 public-use CSV | — | Obtainable from NCES; see [Data Setup](#data-setup) |
 
 ---
 
@@ -156,29 +221,18 @@ source .venv/bin/activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Set your API keys
-
-# --- Option A: Anthropic (default) ---
-# Windows (PowerShell)
-$env:ANTHROPIC_API_KEY = "sk-ant-..."
-# macOS / Linux
-export ANTHROPIC_API_KEY="sk-ant-..."
-
-# --- Option B: MiniMax (alternative) ---
+# 4. Set your API key (MiniMax is the default provider)
 # Windows (PowerShell)
 $env:MINIMAX_API_KEY = "your-minimax-key"
+
 # macOS / Linux
 export MINIMAX_API_KEY="your-minimax-key"
-# Then set llm_provider: minimax in config.yaml
 
-# --- Semantic Scholar API Key ---
-# Windows (PowerShell)
-$env:SEMANTIC_SCHOLAR_API_KEY = "your-s2-api-key"
-# macOS / Linux
-export SEMANTIC_SCHOLAR_API_KEY="your-s2-api-key"
+# Alternative: use Anthropic (set llm_provider: anthropic in config.yaml)
+# export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-> **Never put your API key in code or config files.** The pipeline reads keys exclusively from environment variables (`ANTHROPIC_API_KEY` or `MINIMAX_API_KEY`).
+> **Never put your API key in code or config files.** The pipeline reads keys exclusively from environment variables (`MINIMAX_API_KEY` or `ANTHROPIC_API_KEY`).
 
 ---
 
@@ -199,6 +253,9 @@ The `data/raw/` directory is gitignored. The file is expected to contain labeled
 All pipeline behaviour is controlled by `config.yaml` in the project root. Key settings:
 
 ```yaml
+llm_provider: minimax          # "minimax" (default) or "anthropic"
+
+# Anthropic model IDs (used when llm_provider: anthropic)
 models:
   problem_formulator: claude-sonnet-4-6
   data_engineer:      claude-sonnet-4-6
@@ -206,10 +263,23 @@ models:
   critic:             claude-opus-4-6    # always Opus; do not change
   writer:             claude-sonnet-4-6
 
+# MiniMax model IDs (used when llm_provider: minimax)
+minimax:
+  base_url: https://api.minimax.io/anthropic
+  models:
+    problem_formulator: MiniMax-M2.7
+    data_engineer:      MiniMax-M2.7
+    analyst:            MiniMax-M2.7
+    critic:             MiniMax-M2.7
+    writer:             MiniMax-M2.7
+
 pipeline:
   max_revision_cycles: 2       # Critic can trigger up to 2 revision loops
   random_state: 42
   cost_budget_usd: 5.0         # Soft limit — logs a warning if exceeded, does not abort
+
+writer:
+  outline_first: true          # v1.2: OutlineAgent generates adaptive outline before Writer
 
 sandbox:
   enabled: true                # Set false to skip Docker and use subprocess
@@ -220,25 +290,7 @@ sandbox:
   auto_build: true             # Builds the image automatically if not found
 ```
 
-> **Typical run cost is ~$7–8 USD** (above the default `$5` soft limit). Consider raising `cost_budget_usd` to avoid repeated log warnings.
-
-### LLM Provider
-
-The pipeline supports two LLM providers. Set `llm_provider` in `config.yaml`:
-
-| Provider | Value | Models used | Notes |
-|---|---|---|---|
-| **Anthropic** (default) | `anthropic` | Sonnet for 4 agents, Opus for Critic | Higher quality; recommended for final runs |
-| **MiniMax M2.5** | `minimax` | `MiniMax-M2.5` for all 5 agents | Lower cost alternative; uses Anthropic SDK-compatible endpoint |
-
-To switch to MiniMax:
-
-```yaml
-# config.yaml
-llm_provider: minimax
-```
-
-MiniMax M2.5 uses a single model for all agents (including Critic), whereas Anthropic uses the more capable Opus model specifically for the Critic agent. The MiniMax endpoint (`https://api.minimax.io/anthropic`) is Anthropic SDK-compatible, so no code changes are needed — only the config switch and the `MINIMAX_API_KEY` environment variable.
+> **Typical run cost:** ~$5–7 USD with MiniMax (default), ~$7–8 USD with Anthropic. MiniMax is 2–3x faster.
 
 ---
 
@@ -351,6 +403,8 @@ output/run_YYYYMMDD_HHMMSS/
 ├── train_y.csv                 # DataEngineer: training labels
 ├── test_X.csv                  # DataEngineer: test features (never seen during tuning)
 ├── test_y.csv                  # DataEngineer: test labels
+├── train_school_ids.csv        # DataEngineer: pseudo-school IDs for train set (v1.2)
+├── test_school_ids.csv         # DataEngineer: pseudo-school IDs for test set (v1.2)
 │
 ├── results.json                # Analyst: model comparison, top features, subgroup results
 ├── model_comparison.csv        # Analyst: metrics for all 6 models
@@ -364,8 +418,14 @@ output/run_YYYYMMDD_HHMMSS/
 ├── review_report.json          # Critic: PASS / REVISE / ABORT verdict + issue list
 ├── critic_reasoning.txt        # Critic: LENS A/B/C scratchpad (v1.1; omitted if no preamble)
 │
+├── paper_outline.json          # OutlineAgent: adaptive outline with emphasis triggers (v1.2)
 ├── paper.tex                   # Writer: full ACM acmart LaTeX paper
-└── references.bib              # Writer: BibTeX entries from Semantic Scholar
+├── references.bib              # Writer: BibTeX entries from Semantic Scholar
+│
+└── lsar_review/                # LSAR review artifacts (if review_gate enabled)
+    └── cycle_N/
+        ├── scores.json         # Dimensional scores (8 dimensions)
+        └── review.md           # Full review text
 ```
 
 ### Compiling the paper
@@ -410,23 +470,32 @@ src/
 ├── context.py               # PipelineContext dataclass + checkpoint serialization
 ├── config.py                # Config loader
 ├── sandbox.py               # DockerSandbox + SubprocessExecutor
+├── execution.py             # Executor factory (Docker / subprocess)
 ├── registry.py              # Data registry loader
-├── analysis_helpers.py      # Shared ML utilities
+├── analysis_helpers.py      # v1.2: SHAP quality gate, ICC, clustered CIs, school reconstruction
 ├── pre_critic_checks.py     # v1.1: Deterministic pre-Critic guard (6 checks, zero LLM)
 ├── latex_quality.py         # v1.1: LaTeX crutch-phrase quality gate (12 patterns)
+├── review_gate.py           # LSAR review gate integration
+├── findings_memory.py       # Cross-run findings memory (persistent learning)
+├── dataset_adapter.py       # Dataset adapter pattern for multi-dataset support
+├── task_template.py         # Task template loader
 └── agents/
     ├── base.py               # BaseAgent (call_llm, execute_code, load_registry)
-    ├── problem_formulator.py # v1.1: 3-layer citation verification
+    ├── problem_formulator.py # v1.1: 3-layer citation verification; v1.2: gap-driven framing
     ├── data_engineer.py
-    ├── analyst.py            # v1.1: error classification + targeted repair prompts
+    ├── analyst.py            # v1.1: error classification; v1.2: quality gate + sensitivity
     ├── critic.py             # v1.1: multi-persona JSON extraction + pre-critic integration
-    └── writer.py             # v1.1: LaTeX quality scan + repair loop
+    ├── outline_agent.py      # v1.2: data-driven paper outline with emphasis triggers
+    └── writer.py             # v1.1: LaTeX quality scan; v1.2: template preamble protection
 
 agent_prompts/               # YAML system prompts for each agent (never hardcoded in Python)
   critic.yaml                # v1.1: 3-lens structured reasoning protocol
+  outline_agent.yaml         # v1.2: outline design rules + emphasis allocation
 data_registry/               # Variable registries, task templates, evaluation rubrics
-templates/                   # ACM acmart LaTeX skeleton
-tests/                       # pytest test suite (319 unit tests)
+templates/
+  paper_template.tex         # v1 placeholder-based template
+  paper_template_v2.tex      # v1.2: outline-first single-body template
+tests/                       # pytest test suite (380 unit tests)
 ```
 
 ---
@@ -441,13 +510,13 @@ Ensure the HSLS:09 file is at the exact path `data/raw/hsls_17_student_pets_sr_v
 
 The pipeline will emit a `RuntimeWarning` and automatically fall back to subprocess execution. No action required unless you specifically need the sandbox isolation.
 
-### `ANTHROPIC_API_KEY` not set
+### API key not set
 
 ```
 anthropic.AuthenticationError: No API key provided.
 ```
 
-Set the environment variable before running (see [Installation](#installation)).
+Set `MINIMAX_API_KEY` (default provider) or `ANTHROPIC_API_KEY` (if using `llm_provider: anthropic`) before running (see [Installation](#installation)).
 
 ### Run aborted by Critic
 
@@ -455,7 +524,7 @@ Check `output/<run>/review_report.json` for the `overall_verdict` and the `issue
 
 ### High API cost / budget warning
 
-Raise `cost_budget_usd` in `config.yaml`. The budget is a soft limit — the pipeline logs a warning but does not abort. A full run with 2 revision cycles typically costs ~$7–8 USD.
+Raise `cost_budget_usd` in `config.yaml`. The budget is a soft limit — the pipeline logs a warning but does not abort. A full run with 2 revision cycles typically costs ~$5–7 USD (MiniMax) or ~$7–8 USD (Anthropic).
 
 ### Resuming into wrong stage
 
@@ -465,12 +534,14 @@ Edit `checkpoint.json` in the output directory: set `current_state` to the desir
 
 ## Notes
 
-- The Critic agent always uses `claude-opus-4-6`; all other agents use `claude-sonnet-4-6`.
+- **Default provider**: MiniMax-M2.7 (`llm_provider: minimax`). Set `llm_provider: anthropic` to use Claude instead.
+- When using Anthropic: the Critic agent uses `claude-opus-4-6`; all others use `claude-sonnet-4-6`.
 - Test set is always 20% of the analytic sample, stratified for classification tasks.
 - The outcome variable is never imputed — rows with missing outcomes are dropped.
 - All random operations use `random_state: 42`.
 - The pre-Critic guard (`src/pre_critic_checks.py`) short-circuits on critical failures before any Opus call.
 - LaTeX quality warnings appear in `pipeline.log` under the key `"LaTeX quality warning: …"`.
 - `critic_reasoning.txt` contains the Critic's LENS A/B/C scratchpad when present.
+- The OutlineAgent (v1.2) adapts paper structure based on results. Disable with `writer.outline_first: false`.
+- The LSAR review gate (`review_gate.enabled: true`) provides external quality scoring after the Writer.
 - See [SPEC.md](SPEC.md) for the full system specification and inter-agent message schemas.
-
