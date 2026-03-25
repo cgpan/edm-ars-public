@@ -18,9 +18,10 @@ A multi-agent pipeline that automates end-to-end prediction-focused EDM research
 8. [Running the Pipeline](#running-the-pipeline)
 9. [Docker Sandbox](#docker-sandbox)
 10. [Resuming an Interrupted Run](#resuming-an-interrupted-run)
-11. [Output Structure](#output-structure)
-12. [Development](#development)
-13. [Troubleshooting](#troubleshooting)
+11. [Using LSAR with EDM-ARS](#using-lsar-with-edm-ars)
+12. [Output Structure](#output-structure)
+13. [Development](#development)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -381,6 +382,87 @@ python -m src.main \
 Without `--resume`, any existing checkpoint in the target directory is deleted and the run starts fresh.
 
 > **Tip:** If a run was aborted and you need to re-run from a specific stage, open the `checkpoint.json` in the output directory, set `current_state` to the desired stage (e.g., `"ANALYZING"`), and remove that stage from `completed_stages` before resuming.
+
+---
+
+## Using LSAR with EDM-ARS
+
+[LSAR (Learning Science Auto-Reviewer)](https://github.com/cgpan/LSAR-public) is a companion tool that provides automated peer-review-style scoring of generated papers. EDM-ARS integrates LSAR as a post-writing quality gate: after the Writer produces a paper, LSAR scores it across 8 review dimensions and can trigger LLM-driven revisions to improve quality.
+
+### Setup
+
+1. Clone the LSAR repository:
+
+```bash
+git clone https://github.com/cgpan/LSAR-public.git
+```
+
+2. Install LSAR's dependencies (refer to the [LSAR README](https://github.com/cgpan/LSAR-public) for details).
+
+3. Enable the review gate in EDM-ARS's `config.yaml`:
+
+```yaml
+review_gate:
+  enabled: true
+  lsar_project_path: "/path/to/LSAR-public"      # Path to your cloned LSAR repo
+  lsar_config_path: "/path/to/LSAR-public/config.yaml"
+  venue: "EDM"                # Review rubric: EDM, AIED, L@S, or LAK
+  max_cycles: 2               # Max revision iterations
+  pass_threshold: 5.5         # Minimum overall score (1-10) to pass
+  dimension_floor: 3          # Minimum score for any single dimension
+  revision_model: "MiniMax-M2.7"
+```
+
+### Automatic pipeline integration
+
+When `review_gate.enabled: true`, the LSAR review gate runs automatically after the Writer stage:
+
+1. The generated `paper.tex` is compiled to PDF.
+2. LSAR scores the PDF across 8 dimensions (Relevance, Novelty, Methodological Rigor, etc.).
+3. If the overall score is below `pass_threshold` or any dimension is below `dimension_floor`, the paper fails the gate.
+4. On failure, the pipeline uses LLM-driven revision to improve the paper based on LSAR's feedback (strengths, weaknesses, suggestions), then re-scores.
+5. This repeats for up to `max_cycles` iterations or until the paper passes.
+
+The gate is diagnostic — even if the paper does not pass after all cycles, the pipeline still completes and produces all outputs. The pass/fail result is recorded in `lsar_review/gate_summary.json`.
+
+```bash
+# Standard run with LSAR enabled (ensure review_gate.enabled: true in config.yaml)
+python -m src.main --dataset hsls09_public
+```
+
+### Standalone review scripts
+
+You can also run LSAR reviews independently on existing EDM-ARS outputs:
+
+```bash
+# Prepare a clean PDF for review (fixes placeholder citations)
+python scripts/prepare_for_review.py --run-dir output/run_YYYYMMDD_HHMMSS
+
+# Run LSAR on an existing PDF
+python scripts/run_lsar_review.py --pdf output/run_YYYYMMDD_HHMMSS/paper.pdf --venue EDM
+
+# Aggregate LSAR reviews across multiple runs for cross-run analysis
+python scripts/aggregate_reviews.py --save-report
+```
+
+### LSAR output
+
+LSAR artifacts are saved in the `lsar_review/` subdirectory of each run:
+
+```
+output/run_YYYYMMDD_HHMMSS/lsar_review/
+├── gate_summary.json       # Final pass/fail decision, per-cycle scores
+├── cycle_1/
+│   ├── lsar_report.json    # Dimension scores, recommendation, review details
+│   ├── lsar_report.md      # Human-readable review
+│   └── paper_for_review.pdf
+└── cycle_2/                # Only if cycle 1 failed and max_cycles >= 2
+    ├── lsar_report.json
+    ├── lsar_report.md
+    └── paper_for_review.pdf
+```
+
+The `gate_summary.json` includes the final score, recommendation, pass/fail status, and per-cycle score history.
 
 ---
 
