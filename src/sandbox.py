@@ -332,9 +332,21 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
 
     pdflatex_cmd = ["pdflatex", "-interaction=nonstopmode", tex_file]
 
+    # V4 wave-2: apa7 journal manuscripts use biblatex/biber
+    # (\addbibresource + \printbibliography); ACM conference papers use
+    # bibtex. Pick the bibliography engine from the tex source.
+    bib_engine = ["bibtex", base]
+    try:
+        with open(os.path.join(output_dir, tex_file), encoding="utf-8") as f:
+            _tex_src = f.read()
+        if "biblatex" in _tex_src or "\\addbibresource" in _tex_src:
+            bib_engine = ["biber", base]
+    except OSError:
+        pass
+
     for cmd in [
         pdflatex_cmd,
-        ["bibtex", base],
+        bib_engine,
         pdflatex_cmd,
         pdflatex_cmd,
     ]:

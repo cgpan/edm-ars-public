@@ -147,8 +147,12 @@ class OutlineAgent(BaseAgent):
         )
 
         # --- ICC non-negligible ---
-        icc = results.get("icc", {})
-        triggers["icc_nonnegligible"] = icc.get("icc", 0) >= 0.05
+        # icc.get("icc", 0) is None-unsafe: the key exists with a null
+        # value when ICC was not computable (1 school cluster), and
+        # None >= 0.05 raised TypeError, killing the whole outline
+        # (F-A3-OUTLINE-NONE-ICC, Phase A attempt 3).
+        icc = results.get("icc") or {}
+        triggers["icc_nonnegligible"] = (icc.get("icc") or 0) >= 0.05
 
         return triggers
 

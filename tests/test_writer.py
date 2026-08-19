@@ -213,7 +213,17 @@ class TestBuildBibtex:
         bibtex = agent._build_bibtex({"search_query": "test", "papers": [], "novelty_evidence": ""})
         assert _S2_FAILURE_BIB_COMMENT.strip() in bibtex
 
-    def test_missing_venue_falls_back_to_default(self, tmp_path: Path) -> None:
+    def test_missing_venue_is_declared_not_fabricated(self, tmp_path: Path) -> None:
+        """Arc P3 contract change (2026-07-11).
+
+        This test previously asserted that a paper with no venue metadata
+        was stamped 'Proceedings of the Educational Data Mining
+        Conference'. That is a fabricated citation: `venue` was never
+        requested from Semantic Scholar, so EVERY non-arXiv entry got
+        that booktitle -- 29 such entries across already-shipped papers.
+        Depth work (12 -> ~60 references) would have mass-produced them.
+        The honest behavior is @misc with an explicit note.
+        """
         agent = self._agent(tmp_path)
         lit_no_venue = {
             "papers": [
@@ -228,7 +238,29 @@ class TestBuildBibtex:
             ]
         }
         bibtex = agent._build_bibtex(lit_no_venue)
-        assert "Educational Data Mining" in bibtex
+        assert "Educational Data Mining" not in bibtex, (
+            "must not invent a venue for a paper that has none"
+        )
+        assert "@misc{no_venue_paper" in bibtex
+        assert "Venue metadata unavailable" in bibtex
+
+    def test_real_venue_is_preserved(self, tmp_path: Path) -> None:
+        agent = self._agent(tmp_path)
+        lit = {
+            "papers": [
+                {
+                    "paperId": "p1",
+                    "title": "T",
+                    "authors": ["A, B"],
+                    "year": 2024,
+                    "venue": "Proceedings of the 17th International Conference "
+                             "on Educational Data Mining",
+                }
+            ]
+        }
+        bibtex = agent._build_bibtex(lit)
+        assert "@inproceedings{p1" in bibtex
+        assert "17th International Conference" in bibtex
 
     def test_empty_authors_list(self, tmp_path: Path) -> None:
         agent = self._agent(tmp_path)
@@ -474,13 +506,27 @@ class TestUnverifiedFlag:
 
 
 class TestTemplateFile:
-    """Tests that verify the LaTeX template file structure."""
+    """Tests that verify the LaTeX template file structure.
 
-    _TEMPLATE_PATH = Path(__file__).parent.parent / "templates" / "paper_template.tex"
+    V4 Arc H / 3b.24 rewrite: these tests previously asserted
+    ``templates/paper_template.tex`` — the V1 per-section-slot template
+    that was DELIBERATELY deleted in V2.0 Phase 2c closure (commit
+    9dbb987, "delete v1 LaTeX template"). The tests were left behind
+    and failed ever since. The production contract is the V2
+    outline-first template (single PAPER_BODY slot), asserted here.
+    The v1 fallback path in writer._load_template degrades to the
+    minimal stub by design when the deleted file is absent.
+    """
+
+    _TEMPLATE_PATH = (
+        Path(__file__).parent.parent / "templates" / "paper_template_v2.tex"
+    )
 
     def test_template_file_exists(self) -> None:
-        """The LaTeX template file must exist at the expected path."""
-        assert self._TEMPLATE_PATH.exists(), "templates/paper_template.tex not found"
+        """The V2 LaTeX template file must exist at the expected path."""
+        assert self._TEMPLATE_PATH.exists(), (
+            "templates/paper_template_v2.tex not found"
+        )
 
     def test_template_has_required_structure(self) -> None:
         """Template contains all required ACM sigconf structural elements."""
@@ -489,15 +535,12 @@ class TestTemplateFile:
         assert r"\begin{document}" in content
         assert r"\begin{abstract}" in content
         assert r"\maketitle" in content
-        assert r"\begin{acks}" in content
         assert r"\bibliographystyle{ACM-Reference-Format}" in content
         assert r"\bibliography{references}" in content
         assert r"\end{document}" in content
-        # Fixed authors
+        # Fixed authors (per CLAUDE.md: never modified by agents)
         assert "EDM-ARS" in content
-        assert "Claude AI" in content
         assert "Chenguang Pan" in content
-        assert "cp3280@tc.columbia.edu" in content
         # Abstract must be inside \begin{document} and before \maketitle
         doc_start = content.index(r"\begin{document}")
         abstract_start = content.index(r"\begin{abstract}")
@@ -506,32 +549,20 @@ class TestTemplateFile:
         assert abstract_start < maketitle_pos, r"\begin{abstract} must precede \maketitle"
 
     def test_template_has_all_placeholders(self) -> None:
-        """Template contains all expected placeholder markers."""
+        """The V2 template's outline-first slot set (single PAPER_BODY
+        replaces the V1 per-section slots)."""
         content = self._TEMPLATE_PATH.read_text(encoding="utf-8")
         expected_placeholders = [
             "%%PLACEHOLDER:TITLE%%",
             "%%PLACEHOLDER:ABSTRACT%%",
             "%%PLACEHOLDER:KEYWORDS%%",
-            "%%PLACEHOLDER:INTRODUCTION%%",
-            "%%PLACEHOLDER:RELATED_WORK%%",
-            "%%PLACEHOLDER:METHODS_DATA%%",
-            "%%PLACEHOLDER:METHODS_VARIABLES%%",
-            "%%PLACEHOLDER:METHODS_MISSING_DATA%%",
-            "%%PLACEHOLDER:METHODS_MODELS%%",
-            "%%PLACEHOLDER:METHODS_TUNING%%",
-            "%%PLACEHOLDER:METHODS_EVALUATION%%",
-            "%%PLACEHOLDER:METHODS_INTERPRETABILITY%%",
-            "%%PLACEHOLDER:RESULTS_MODEL_COMPARISON%%",
-            "%%PLACEHOLDER:RESULTS_FEATURE_IMPORTANCE%%",
-            "%%PLACEHOLDER:RESULTS_SUBGROUP%%",
-            "%%PLACEHOLDER:DISCUSSION_SUMMARY%%",
-            "%%PLACEHOLDER:DISCUSSION_IMPLICATIONS%%",
-            "%%PLACEHOLDER:DISCUSSION_LIMITATIONS%%",
-            "%%PLACEHOLDER:DISCUSSION_FUTURE%%",
+            "%%PLACEHOLDER:PAPER_BODY%%",
             "%%PLACEHOLDER:APPENDIX%%",
         ]
         for ph in expected_placeholders:
             assert ph in content, f"Missing placeholder: {ph}"
+        # The V1 per-section slots must NOT resurface in the v2 template.
+        assert "%%PLACEHOLDER:METHODS_DATA%%" not in content
 
 
 # ---------------------------------------------------------------------------

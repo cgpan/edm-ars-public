@@ -433,7 +433,14 @@ class TestFindingsMemoryIntegration:
         agent.run(findings_memory_summary="")
 
         user_message = agent.call_llm.call_args[0][0]
-        assert "Findings Memory Summary" not in user_message
+        # The section is emitted as a real H2 surrounded by newlines (see
+        # critic.py — joins parts with "\n").  The methodological_checklist
+        # YAML legitimately mentions "## Findings Memory Summary" as inline
+        # prose inside `check:` descriptions for items pf_08/pf_09; that
+        # inline mention has spaces around it, not newlines, so the
+        # newline-bounded check distinguishes the actual section from the
+        # YAML's own self-references.
+        assert "\n## Findings Memory Summary\n" not in user_message
 
     def test_novelty_review_optional_in_validate(self, tmp_path: Path) -> None:
         """review_report without novelty_review key must pass validation without error."""

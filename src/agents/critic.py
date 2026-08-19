@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime
 from typing import Any
 
 import yaml
@@ -81,7 +82,31 @@ class Critic(BaseAgent):
         # Extract the LAST ```json block — response may have reasoning preamble
         # (LENS A/B/C sections) before the final JSON deliverable
         json_text = self._extract_last_json_block(llm_response)
-        review_report = parse_llm_json(json_text)
+        try:
+            review_report = parse_llm_json(json_text)
+        except json.JSONDecodeError as first_err:
+            # F-B2-CRITIC-MALFORMED-JSON (Phase B first live run): the LLM
+            # occasionally emits an unterminated string / truncated JSON.
+            # One targeted re-prompt before the SPEC §8 abort — same
+            # philosophy as the DE/Analyst fix loops.
+            self.ctx.log.append({
+                "timestamp": datetime.utcnow().isoformat(),
+                "agent": self.agent_name,
+                "message": (
+                    f"Critic response JSON malformed ({first_err}); "
+                    "one re-prompt retry before abort."
+                ),
+            })
+            retry_response = self.call_llm(
+                user_message
+                + "\n\nIMPORTANT: Your previous response's JSON was malformed "
+                f"({first_err}). Re-emit the COMPLETE review_report as a single "
+                "valid ```json code block. Escape all quotes and newlines "
+                "inside strings; do not truncate."
+            )
+            json_text = self._extract_last_json_block(retry_response)
+            review_report = parse_llm_json(json_text)  # 2nd failure aborts per SPEC §8
+            llm_response = retry_response
         review_report = self._validate_review_report(review_report)
 
         # Persist reasoning scratchpad for debugging (everything before the last ```json)
@@ -121,7 +146,7 @@ class Critic(BaseAgent):
     def _load_checklist(self) -> dict:
         """Load the methodological checklist YAML used during review."""
         checklist_path = self.task_template.get_critic_checklist_path()
-        with open(checklist_path) as f:
+        with open(checklist_path, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
 
     # ------------------------------------------------------------------

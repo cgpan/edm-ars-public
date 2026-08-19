@@ -1,0 +1,67 @@
+# Skill-Flow Verification
+
+Skills root: H:\My Drive\edm-ars\.claude\worktrees\upbeat-liskov-c05277\skills
+Total skills loaded: 41
+Mandatory total: 15
+Default context: 'Predict 11th-grade math achievement from 9th-grade factors with SHAP and subgroup fairness'
+Default task_type: prediction
+Default dataset: hsls09_public
+Per-layer caps: {'task-type': 3, 'dataset': 4, 'methodology': 5, 'writing': 5}
+
+## Per-skill flow
+
+| Skill | Severity | Declared Stages | Reaches Stage? |
+|---|---|---|---|
+| `hsls09-csv-format-quirks` | `mandatory` | DataEngineer | all declared stages: YES |
+| `hsls09-missing-codes` | `mandatory` | DataEngineer | all declared stages: YES |
+| `hsls09-school-fingerprints` | `mandatory` | DataEngineer | all declared stages: YES |
+| `hsls09-structural-mnar-outcomes` | `recommended` | DataEngineer, Critic | DataEngineer: NO (per-layer cap (dataset ties; rank 5/6; cap = 4; score 0.40 vs survivor cutoff 0.45; deficit 0.05)); Critic: YES |
+| `hsls09-temporal-ordering` | `recommended` | ProblemFormulator, Critic | all declared stages: YES |
+| `hsls09-tier3-exclusions` | `mandatory` | ProblemFormulator, DataEngineer | all declared stages: YES |
+| `hsls09-variable-registry` | `recommended` | ProblemFormulator, DataEngineer, Analyst, Critic, Writer | all declared stages: YES |
+| `bootstrap-confidence-intervals` | `recommended` | Analyst | all declared stages: YES |
+| `cluster-id-reconstruction-from-fingerprints` | `recommended` | DataEngineer | all declared stages: YES |
+| `clustered-bootstrap-ci-and-icc` | `recommended` | Analyst | all declared stages: YES |
+| `findings-memory-novelty-cross-run` | `recommended` | ProblemFormulator, Critic | all declared stages: YES |
+| `inner-cv-tuning-discipline` | `mandatory` | Analyst, Critic | all declared stages: YES |
+| `literature-search-s2-arxiv` | `recommended` | ProblemFormulator | all declared stages: YES |
+| `missingness-tiered-protocol` | `mandatory` | DataEngineer, Critic | all declared stages: YES |
+| `school-aware-train-test-split` | `mandatory` | DataEngineer | all declared stages: YES |
+| `sensitivity-analysis-high-missingness` | `mandatory` | Analyst, Writer | all declared stages: YES |
+| `shap-explainer-selection` | `recommended` | Analyst, Critic | all declared stages: YES |
+| `subgroup-fairness-analysis` | `mandatory` | Analyst, Critic | all declared stages: YES |
+| `model-elasticnet` | `recommended` | Analyst | all declared stages: YES |
+| `model-logistic-regression` | `recommended` | Analyst | all declared stages: YES |
+| `model-mlp` | `recommended` | Analyst | all declared stages: YES |
+| `model-random-forest` | `recommended` | Analyst | all declared stages: YES |
+| `model-stacking-ensemble` | `recommended` | Analyst | all declared stages: YES |
+| `model-xgboost` | `recommended` | Analyst | all declared stages: YES |
+| `prediction-critic-checklist` | `recommended` | Critic | all declared stages: YES |
+| `prediction-evaluation-classification` | `recommended` | Analyst | all declared stages: YES |
+| `prediction-evaluation-regression` | `recommended` | Analyst | all declared stages: YES |
+| `prediction-model-battery` | `recommended` | Analyst | all declared stages: YES |
+| `prediction-quality-gate` | `mandatory` | Analyst, Critic | all declared stages: YES |
+| `prediction-research-question-design` | `mandatory` | ProblemFormulator | all declared stages: YES |
+| `prediction-workflow-overview` | `recommended` | DataEngineer, Analyst | DataEngineer: YES; Analyst: NO (per-layer cap (task-type ties; rank 5/12; cap = 3; score 0.45 vs survivor cutoff 0.45; deficit 0.00)) |
+| `smote-imbalance-handling` | `mandatory` | Analyst | all declared stages: YES |
+| `acm-acmart-sigconf-template` | `recommended` | Writer | all declared stages: YES |
+| `bibtex-from-literature-context` | `recommended` | Writer | all declared stages: YES |
+| `hsls09-multilevel-limitations-paragraph` | `recommended` | Writer | all declared stages: YES |
+| `hsls09-survey-weights-limitations-paragraph` | `recommended` | Writer | all declared stages: YES |
+| `latex-figure-discipline` | `recommended` | Writer | all declared stages: YES |
+| `latex-table-discipline` | `mandatory` | Writer | all declared stages: YES |
+| `paper-narrative-outline` | `recommended` | OutlineAgent, Writer | OutlineAgent: YES; Writer: NO (per-layer cap (writing ties; rank 8/9; cap = 5; score 0.40 vs survivor cutoff 0.45; deficit 0.05)) |
+| `paper-writing-style-rules` | `mandatory` | Writer | all declared stages: YES |
+| `unverified-flag-and-appendix` | `mandatory` | Writer | all declared stages: YES |
+
+## Summary
+Total skills audited: 41
+Total misfires: 3
+
+## Misfires (skill declares stage but is not matched)
+
+| Skill | Stage | Reason |
+|---|---|---|
+| `hsls09-structural-mnar-outcomes` | DataEngineer | per-layer cap (dataset ties; rank 5/6; cap = 4; score 0.40 vs survivor cutoff 0.45; deficit 0.05) |
+| `prediction-workflow-overview` | Analyst | per-layer cap (task-type ties; rank 5/12; cap = 3; score 0.45 vs survivor cutoff 0.45; deficit 0.00) |
+| `paper-narrative-outline` | Writer | per-layer cap (writing ties; rank 8/9; cap = 5; score 0.40 vs survivor cutoff 0.45; deficit 0.05) |

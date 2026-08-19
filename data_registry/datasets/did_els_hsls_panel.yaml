@@ -1,0 +1,45 @@
+name: did_els_hsls_panel
+full_name: Harmonized ELS:2002 x HSLS:09 cross-cohort panel (deterministic, scripts/harmonize_els_hsls.py)
+source: derived (NCES public-use ELS:2002 + HSLS:09)
+access: public-derived
+data_structure: student-level 2x2 panel
+levels: {student: 16862}
+harmonization_note: 'v2 adds harmonized covariates (race5/pared3/expect_ba/ses_std) for M9 composition adjustment + M10 ML heterogeneity. Outcome = WITHIN-COHORT-WAVE percentile rank of the math score
+  (instrument-invariant); tests are NOT equated across cohorts, so only GROUP-GAP
+  CHANGES are estimable - never absolute achievement changes. Grade offset (ELS
+  base=g10, HSLS base=g9) and the 7-year cohort gap are recorded limitations; no
+  single-policy identification is claimed.'
+temporal_order: [base_wave, follow_wave]
+tier: 1
+tier3_exclusion_rules: {prefix_patterns: [], suffix_patterns: [], exact_matches: [], category_labels: []}
+missingness:
+  mechanism_assumption: MAR-within-cohort
+  sentinel_codes_or_labels: []
+  note: sentinels resolved upstream by the harmonizer; only NaN remains (rank_follow
+    missing where the follow-wave score is absent).
+variables:
+  outcomes:
+  - {name: rank_base, label: within-cohort percentile rank of base-wave math score, type: continuous, wave: base_wave, pct_missing: 0.0, range: [0.0, 100.0]}
+  - {name: rank_follow, label: within-cohort percentile rank of follow-wave math score, type: continuous, wave: follow_wave, pct_missing: 12.5, range: [0.0, 100.0]}
+  predictors:
+    design:
+    - {name: cohort, label: 'cohort indicator (0=ELS 2002, 1=HSLS 2009) - the DiD post variable', type: binary, wave: base_wave, pct_missing: 0.0, protected_attribute: false}
+    - {name: low_ses, label: 'bottom vs top SES band (1=lowest quartile/quintile) - the DiD group variable', type: binary, wave: base_wave, pct_missing: 0.0, protected_attribute: true}
+    - {name: female, label: female indicator (harmonized), type: binary, wave: base_wave, pct_missing: 0.0, protected_attribute: true}
+    covariates_v2:
+    - {name: race5, label: 'harmonized race/ethnicity: White/Black/Hispanic/AsianPI/Other', type: categorical, wave: base_wave, pct_missing: 0.0, protected_attribute: true}
+    - {name: pared3, label: 'harmonized parent education: HS_or_less/some_college/BA_plus (HSLS lacks some-college-no-degree; coarseness recorded)', type: categorical, wave: base_wave, pct_missing: 7.2}
+    - {name: expect_ba, label: student expects to complete BA or higher (harmonized; dont-know -> missing), type: binary, wave: base_wave, pct_missing: 15.0}
+    - {name: ses_std, label: within-cohort z-score of the SES composite, type: continuous, wave: base_wave, pct_missing: 0.0, protected_attribute: true}
+design_feasibility:
+  running_variables: []
+  candidate_instruments: []
+  policy_timing_variables: [cohort]
+  multi_cohort_partner: 'built-in (this IS the harmonized two-cohort panel)'
+  itr_ready: false
+canonical_research_questions:
+  causal:
+  - Did the SES gap in math achievement rank change between the 2002 and 2009 sophomore cohorts (gap-in-gaps DiD)?
+common_pitfalls:
+- {id: non_equated_tests, description: claiming absolute achievement changes across cohorts, check: only rank-gap changes are estimable, severity: critical}
+- {id: single_policy_attribution, description: attributing the cohort contrast to one named policy, check: the 7-year gap bundles many changes; the paper must say so, severity: critical}

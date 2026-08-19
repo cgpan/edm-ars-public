@@ -1,0 +1,70 @@
+name: assistments_0910
+full_name: ASSISTments 2009-2010 Skill Builder (problem-attempt log data)
+source: ASSISTments / Worcester Polytechnic Institute (public research release)
+access: public
+data_structure: interaction_log
+levels: {student: 4217, problem: 26688, skill: 123, template: 816}
+log_note: 'One row per PROBLEM ATTEMPT (525,534 rows), NOT one row per
+  student. This is log data - the survey-style curation model does not
+  apply. original==1 marks main problems (85.5%); original==0 are
+  tutoring/scaffolding steps and are EXCLUDED from correctness analyses.
+  correct is binary first-attempt correctness on main problems.'
+waves: {single_year: {year: 2009, label: "2009-10 school year"}}
+temporal_order: [single_year]
+tier: 1
+tier3_exclusion_rules:
+  prefix_patterns: []
+  suffix_patterns: []
+  exact_matches: [order_id, assignment_id, assistment_id, sequence_id,
+                  student_class_id, base_sequence_id, teacher_id, school_id,
+                  answer_id, answer_text]
+  category_labels: [administrative]
+variables:
+  outcomes:
+  - {name: correct, label: first-attempt correctness (main problems only), type: binary, wave: single_year, pct_missing: 0.0}
+  predictors:
+    interaction:
+    - {name: user_id, label: student identifier (unit of analysis; cluster ID), type: id, wave: single_year, pct_missing: 0.0}
+    - {name: problem_id, label: problem identifier, type: id, wave: single_year, pct_missing: 0.0}
+    - {name: template_id, label: 'problem template (CDM item unit: same template = same structure)', type: id, wave: single_year, pct_missing: 0.0}
+    - {name: skill_id, label: 'tagged skill (CDM attribute; 15% of rows untagged -> excluded)', type: id, wave: single_year, pct_missing: 15.0}
+    - {name: skill_name, label: human-readable skill tag, type: categorical, wave: single_year, pct_missing: 15.0}
+    - {name: attempt_count, label: attempts on the problem, type: continuous, wave: single_year, pct_missing: 0.0}
+    - {name: hint_count, label: hints requested, type: continuous, wave: single_year, pct_missing: 0.0}
+    - {name: ms_first_response, label: ms to first response, type: continuous, wave: single_year, pct_missing: 0.0}
+    - {name: original, label: 1=main problem / 0=scaffolding step (FILTER, never a predictor), type: binary, wave: single_year, pct_missing: 0.0}
+missingness:
+  mechanism_assumption: structural
+  sentinel_codes_or_labels: []
+  note: No NCES-style sentinels; missing skill tags mean the problem was
+    not skill-mapped. Sparsity is structural (students see different
+    problems) - a wide student x item matrix is mostly empty by design,
+    which CDM/IRT handle natively; NEVER impute responses.
+cdm_support:
+  # V4 wave-2 CDM (P7). Q-matrix derives from skill tags; items are
+  # TEMPLATES within selected skills (same template = same problem
+  # structure). Single-attribute rows (one skill per template) give a
+  # simple-structure Q-matrix appropriate for DINA.
+  q_matrix_source: skill_id tags on original==1 problems
+  item_unit: template_id
+  response_rule: first-attempt correct, one response per (user, template) -
+    take the FIRST chronological attempt row (min order_id)
+  recommended_scope: top 8-12 skills by user coverage; templates with
+    >= 300 responses; students with >= 5 items answered
+common_pitfalls:
+- {id: scaffolding_leak, description: including original==0 tutoring rows in correctness, check: filter original==1 FIRST, severity: critical}
+- {id: repeat_attempt_leak, description: counting later attempts of the same (user,template), check: dedupe to first attempt by order_id, severity: critical}
+- {id: sparse_matrix_imputation, description: imputing the empty cells of the wide matrix, check: responses are NEVER imputed; estimators handle NA, severity: critical}
+- {id: skill_tag_gaps, description: treating untagged rows (15%) as a skill level, check: drop untagged rows from CDM/IRT scope, severity: major}
+design_feasibility:
+  running_variables: []
+  candidate_instruments: []
+  policy_timing_variables: []
+  multi_cohort_partner: null
+  itr_ready: false
+canonical_research_questions:
+  psychometrics:
+  - Cognitive diagnosis (DINA/G-DINA) of middle-school math skills from skill-builder response patterns.
+  - IRT calibration of template items within a skill.
+  prediction:
+  - Predict next-problem correctness from interaction features.

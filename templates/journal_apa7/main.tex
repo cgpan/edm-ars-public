@@ -1,0 +1,199 @@
+%=========================================================
+% APA 7th Edition Manuscript Template (LaTeX)
+% Built on the apa7 document class + biblatex (APA style).
+% Replace every placeholder marked << ... >> with your content.
+%=========================================================
+\documentclass[man,floatsintex,longtable]{apa7}
+% Document-class options (apa7):
+%   man          -- manuscript format (title page, double spacing)
+%   jou          -- typeset like a printed journal article
+%   doc          -- simple document format
+%   floatsintext -- place figures/tables in the text (default: at the end)
+%   longtable    -- enable multi-page tables
+% Example alternative:
+%\documentclass[man,floatsintext,longtable]{apa7}
+
+%---------------------------------------------------------
+% PACKAGES
+%---------------------------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{subcaption}
+% normalem prevents ulem from turning \emph italics into underlines
+\usepackage[normalem]{ulem}
+\usepackage{xcolor}
+% hidelinks removes the colored boxes around hyperlinks
+\hypersetup{hidelinks}
+\usepackage{nameref}
+
+% Custom commands
+\newcommand{\authcomment}[1]{\textcolor{blue}{[#1]}} % editorial note
+\newcommand{\red}[1]{\textcolor{red}{#1}}            % flag text in red
+
+%---------------------------------------------------------
+% BIBLIOGRAPHY SETUP
+%---------------------------------------------------------
+\usepackage{csquotes}
+\usepackage[style=apa, backend=biber]{biblatex}
+
+%---------------------------------------------------------
+% MATH / TABLE / ALGORITHM SETUP
+%---------------------------------------------------------
+\usepackage{tabularx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{bbm}
+\usepackage{amsthm}
+\usepackage{accents}
+\usepackage{multirow}
+%\usepackage{setspace}
+
+% Math operator shortcuts
+\DeclareMathOperator{\E}{\mathbb{E}}
+\DeclareMathOperator{\R}{\mathbb{R}}
+\DeclareMathOperator*{\argmaxA}{arg\,max}
+\DeclareMathOperator*{\argminA}{arg\,min}
+% Centered fixed-width column type: e.g. C{2cm}
+\newcolumntype{C}[1]{>{\centering\let\newline\\\arraybackslash\hspace{0pt}}m{#1}}
+
+% Number subfigures as 1, 2, 3 (instead of a, b, c)
+\renewcommand\thesubfigure{\arabic{subfigure}}
+\setlength{\bibhang}{0.5in}
+
+\addbibresource{ref.bib}
+
+%---------------------------------------------------------
+% TITLE PAGE
+%---------------------------------------------------------
+\title{<<Full Paper Title>>}
+\shorttitle{<<Short Title / Running Head>>}
+\authorsnames{<<First A. Author>>, <<Second B. Author>>, <<Third C. Author>>}
+\authorsaffiliations{{<<Department, Institution>>}}
+
+\authornote{
+{\footnotesize
+\textbf{Correspondence:}
+Correspondence concerning this article should be addressed to \addORCIDlink{<<Author Name>>}{0000-0000-0000-0000}, <<Mailing address>>. Email: <<email@institution.edu>>.
+
+\textbf{Disclosures statement:} <<State competing interests, or that there are none to declare.>>
+
+\textbf{Funding:} <<State funding source and grant number, or that no funding was received.>>
+
+% \textbf{Prior Dissemination:} <<Preprint location and/or conference presentation, if applicable.>>
+}
+}
+
+%---------------------------------------------------------
+% ABSTRACT
+%---------------------------------------------------------
+\abstract{<<Abstract (typically 150--250 words): briefly state the problem, approach, key results, and conclusion.>>}
+
+\keywords{<<keyword one, keyword two, keyword three, keyword four>>}
+
+%---------------------------------------------------------
+% BEGIN DOCUMENT
+%---------------------------------------------------------
+\begin{document}
+\maketitle
+
+%---------------------------------------------------------
+% INTRODUCTION
+%---------------------------------------------------------
+\section{Introduction}
+
+<<Open with the problem, its significance, and the gap your study addresses. Use \parencite{example-article} for a parenthetical citation and \textcite{example-book} for an in-text citation. End with a roadmap of the paper.>>
+
+\subsection{<<Optional Subsection Heading>>}
+
+<<Subsection content.>>
+
+%---------------------------------------------------------
+% METHODS
+%---------------------------------------------------------
+\section{Methods}
+
+<<Describe the data/sample, materials, design, and analytic procedure in enough detail to be reproducible.>>
+
+% --- Example: a numbered, labeled equation ---
+\begin{align}\label{eq:example}
+    y = \beta_0 + \beta_1 x + \varepsilon.
+\end{align}
+Cross-reference it as Equation~\eqref{eq:example}.
+
+% --- Example: a labeled assumptions / items list ---
+\begin{itemize}
+    \item[(A1)] <<First assumption or item.>>
+    \item[(A2)] <<Second assumption or item.>>
+\end{itemize}
+
+% --- Example: an algorithm (uncomment to use) ---
+% \begin{algorithm}[!h]
+% \caption{<<Algorithm name>>}\label{alg:example}
+% \begin{algorithmic}[1]
+%     \State <<Initialize.>>
+%     \For{$i = 1$ to $n$}
+%         \State <<Do something.>>
+%     \EndFor
+%     \State \Return <<output>>
+% \end{algorithmic}
+% \end{algorithm}
+
+%---------------------------------------------------------
+% RESULTS
+%---------------------------------------------------------
+\section{Results}
+
+<<Report the findings. Reference figures as Figure~\ref{fig:example} and appendix material as Appendix~\ref{app:one} or Table~\ref{app:tab:example}.>>
+
+% --- Example: a single figure ---
+% Put image files in the figures/ folder and update the filename below.
+\begin{figure}[!h]
+    \centering
+    \includegraphics[width=1\linewidth]{figures/example-figure.png}
+    \caption{<<Figure caption.>>}
+    \label{fig:example}
+\end{figure}
+
+% --- Example: a figure with side-by-side subfigures (uncomment to use) ---
+% \begin{figure}[!h]
+%     \centering
+%     \begin{subfigure}{0.48\linewidth}
+%         \centering
+%         \includegraphics[width=\linewidth]{figures/panel-a.png}
+%         \caption{<<Panel caption.>>}
+%         \label{fig:panel-a}
+%     \end{subfigure}
+%     \hfill
+%     \begin{subfigure}{0.48\linewidth}
+%         \centering
+%         \includegraphics[width=\linewidth]{figures/panel-b.png}
+%         \caption{<<Panel caption.>>}
+%         \label{fig:panel-b}
+%     \end{subfigure}
+%     \caption{<<Overall figure caption.>>}
+%     \label{fig:example-multi}
+% \end{figure}
+
+%---------------------------------------------------------
+% DISCUSSION
+%---------------------------------------------------------
+\section{Discussion and Conclusions}
+
+<<Interpret the results, connect back to the introduction, acknowledge limitations, and conclude with implications and future directions.>>
+
+%---------------------------------------------------------
+% REFERENCES
+%---------------------------------------------------------
+\printbibliography
+
+%---------------------------------------------------------
+% APPENDIX
+%---------------------------------------------------------
+\appendix
+\renewcommand{\thesection}{Appendix \Alph{section}}
+\input{suppl}   % supplementary material / appendices
+
+\end{document}

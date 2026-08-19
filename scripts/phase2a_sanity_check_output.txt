@@ -1,0 +1,31 @@
+# Phase 2a Sanity Check
+
+Skills root: H:\My Drive\edm-ars\.claude\worktrees\upbeat-liskov-c05277\skills
+Loaded: 19
+By layer:
+  task-type: 0
+  dataset: 0
+  methodology: 10
+  writing: 9
+
+## Match query
+stage=Analyst, task_type=prediction, dataset=hsls09_public
+context="Predict 11th-grade math achievement with SHAP interpretability and subgroup fairness"
+top_k_per_layer={methodology: 4, writing: 2}
+
+## Matched skills (post-composition)
+  [methodology] subgroup-fairness-analysis (priority=1)
+  [methodology] shap-explainer-selection (priority=1)
+  [methodology] bootstrap-confidence-intervals (priority=1)
+  [methodology] inner-cv-tuning-discipline (priority=1)
+
+## Match query (Writer perspective)
+stage=Writer, task_type=prediction, dataset=hsls09_public
+context="ACM acmart sigconf paper with SHAP figures and tables"
+
+  [methodology] sensitivity-analysis-high-missingness (priority=2)
+  [writing    ] acm-acmart-sigconf-template (priority=1)
+  [writing    ] latex-figure-discipline (priority=1)
+  [writing    ] bibtex-from-literature-context (priority=1)
+  [writing    ] hsls09-multilevel-limitations-paragraph (priority=1)
+  [writing    ] hsls09-survey-weights-limitations-paragraph (priority=1)
