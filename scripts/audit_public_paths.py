@@ -71,6 +71,57 @@ def all_files(root: Path) -> list[Path]:
     ]
 
 
+def history_blobs(root: Path) -> list[tuple[str, str]]:
+    """Return (sha, path) for every blob reachable from any ref.
+
+    Sanitising the working tree does NOT unpublish anything. A string
+    removed in commit N is still served by ``git show N-1:file`` to
+    anyone who clones, and to GitHub's web UI, forever. This repository
+    learned that the hard way: config.yaml was cleaned at HEAD while two
+    earlier blobs kept the original absolute path.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(root), "rev-list", "--objects", "--all"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    blobs: list[tuple[str, str]] = []
+    for line in out.stdout.splitlines():
+        sha, _, path = line.partition(" ")
+        if not path:
+            continue  # commits and trees carry no path; only blobs interest us
+        blobs.append((sha, path))
+    return blobs
+
+
+def scan_history(root: Path) -> list[tuple[str, Path, int, str]]:
+    """Scan every historical blob, returning hits keyed by ``sha:path``."""
+    hits: list[tuple[str, Path, int, str]] = []
+    for sha, path in history_blobs(root):
+        raw = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "-p", sha],
+            capture_output=True,
+            check=False,
+        )
+        if raw.returncode != 0:
+            continue
+        try:
+            text = raw.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            continue  # binary blob: nothing textual to leak
+        lines = text.split("\n")
+        for label, pattern in PATTERNS:
+            for match in pattern.finditer(text):
+                lineno = text[: match.start()].count("\n")
+                if ALLOW_MARKER in lines[lineno]:
+                    continue
+                hits.append(
+                    (label, Path(f"{sha[:8]}:{path}"), lineno + 1, match.group(0))
+                )
+    return hits
+
+
 def scan(paths: list[Path], root: Path) -> list[tuple[str, Path, int, str]]:
     """Return (label, path, line_number, matched_text) for every hit."""
     hits: list[tuple[str, Path, int, str]] = []
@@ -97,17 +148,35 @@ def main() -> int:
         action="store_true",
         help="scan the whole tree, not just tracked files",
     )
+    parser.add_argument(
+        "--history",
+        action="store_true",
+        help="scan every blob in git history instead of the working tree",
+    )
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
-    paths = all_files(root) if args.all else tracked_files(root)
-    hits = scan(paths, root)
+
+    if args.history:
+        hits = scan_history(root)
+        count = len(history_blobs(root))
+        scope = "historical blobs"
+    else:
+        paths = all_files(root) if args.all else tracked_files(root)
+        hits = scan(paths, root)
+        count = len(paths)
+        scope = "all files" if args.all else "tracked files"
 
     for label, rel, lineno, text in hits:
         print(f"[{label}] {rel}:{lineno}: {text}")
 
-    scope = "all files" if args.all else "tracked files"
-    print(f"\n{len(hits)} machine-specific path(s) across {len(paths)} {scope}.")
+    print(f"\n{len(hits)} machine-specific path(s) across {count} {scope}.")
+    if hits and args.history:
+        print(
+            "History cannot be cleaned by editing files -- it needs a rewrite "
+            "(git filter-repo / rebase) and a force push, which is destructive "
+            "and does not reach anyone who already cloned or forked."
+        )
     if hits:
         print(
             "Replace them with ${LSAR_HOME} (expanded by src.config.load_config) "

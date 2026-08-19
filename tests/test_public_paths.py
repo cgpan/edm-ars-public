@@ -18,7 +18,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.audit_public_paths import PATTERNS, scan, tracked_files  # noqa: E402
+from scripts.audit_public_paths import (  # noqa: E402
+    PATTERNS,
+    history_blobs,
+    scan,
+    scan_history,
+    tracked_files,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BS = chr(92)
@@ -111,6 +117,75 @@ def test_allow_marker_suppresses_an_intentional_example() -> None:
         doc.unlink()
 
 
+def _init_repo(path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    for key, value in (("user.email", "t@example.invalid"), ("user.name", "T")):
+        subprocess.run(["git", "-C", str(path), "config", key, value], check=True)
+
+
+def _commit(path: Path, message: str) -> None:
+    subprocess.run(["git", "-C", str(path), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", message], check=True)
+
+
+def test_history_scan_finds_a_path_that_was_cleaned_at_head(tmp_path: Path) -> None:
+    """The exact failure this repository shipped.
+
+    config.yaml was sanitised at HEAD while two earlier blobs kept the
+    original absolute path. A working-tree scan calls that clean; anyone
+    can still run ``git show <old>:config.yaml`` and read it.
+    """
+    _init_repo(tmp_path)
+    conf = tmp_path / "conf.yaml"
+
+    conf.write_text(f'path: "H:{BS}{BS}My Drive{BS}{BS}LSAR"\n', encoding="utf-8")
+    _commit(tmp_path, "leak the path")
+
+    conf.write_text('path: "${LSAR_HOME}"\n', encoding="utf-8")
+    _commit(tmp_path, "clean it up at HEAD")
+
+    assert not scan(tracked_files(tmp_path), tmp_path), "working tree should look clean"
+
+    history = scan_history(tmp_path)
+    assert history, "history scan missed a path that only exists in an older blob"
+    assert any("drive-path" == label for label, _, _, _ in history)
+
+
+def test_history_scan_reports_the_blob_it_found(tmp_path: Path) -> None:
+    """A finding is only actionable if it names where to look."""
+    _init_repo(tmp_path)
+    (tmp_path / "conf.yaml").write_text(
+        f'path: "C:{BS}Users{BS}someone{BS}scratch"\n', encoding="utf-8"
+    )
+    _commit(tmp_path, "leak a home directory")
+
+    (label, located, lineno, text) = scan_history(tmp_path)[0]
+    assert label == "windows-home"
+    assert "conf.yaml" in str(located)
+    assert ":" in str(located), "should be reported as <sha>:<path>"
+    assert lineno == 1
+    assert "someone" in text
+
+
+def test_history_scan_honours_the_allow_marker(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    (tmp_path / "notes.md").write_text(
+        f"never write H:{BS}My Drive here -- audit-allow-path\n", encoding="utf-8"
+    )
+    _commit(tmp_path, "documented example")
+    assert not scan_history(tmp_path)
+
+
+def test_history_blobs_skips_commits_and_trees(tmp_path: Path) -> None:
+    """Only blobs carry content; counting trees would inflate the denominator."""
+    _init_repo(tmp_path)
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    _commit(tmp_path, "one file")
+
+    blobs = history_blobs(tmp_path)
+    assert [path for _, path in blobs] == ["a.txt"]
+
+
 def test_audit_script_exits_nonzero_when_it_finds_something(tmp_path: Path) -> None:
     """CI gates on the exit code, so the exit code has to be real."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -126,3 +201,31 @@ def test_audit_script_exits_nonzero_when_it_finds_something(tmp_path: Path) -> N
     )
     assert result.returncode == 1, result.stdout
     assert "drive-path" in result.stdout
+
+
+def test_audit_script_history_mode_is_wired_to_the_cli(tmp_path: Path) -> None:
+    """--history is what a release actually runs, so exercise the flag itself."""
+    _init_repo(tmp_path)
+    conf = tmp_path / "conf.yaml"
+    conf.write_text(f'path: "H:{BS}{BS}My Drive{BS}{BS}LSAR"\n', encoding="utf-8")
+    _commit(tmp_path, "leak")
+    conf.write_text('path: "${LSAR_HOME}"\n', encoding="utf-8")
+    _commit(tmp_path, "clean at HEAD")
+
+    script = str(REPO_ROOT / "scripts" / "audit_public_paths.py")
+
+    tree = subprocess.run(
+        [sys.executable, script, "--root", str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert tree.returncode == 0, "working tree is genuinely clean here"
+
+    history = subprocess.run(
+        [sys.executable, script, "--root", str(tmp_path), "--history"],
+        capture_output=True,
+        text=True,
+    )
+    assert history.returncode == 1, history.stdout
+    assert "drive-path" in history.stdout
+    assert "force push" in history.stdout, "must say editing files cannot fix history"
