@@ -1,0 +1,44 @@
+{
+  "task_id": "v3_1_itr_smoketest_mtheff_college_r3",
+  "task_type": "causal_itr",
+  "dataset": "hsls09_public",
+  "research_question": "For whom does high (>= median) 9th-grade math self-efficacy change the probability of ever attending college by Wave 4 - learn and evaluate an interpretable targeting rule over baseline SES, prior math achievement, and sex, under the no-unmeasured-confounding assumption, in the HSLS:09 analytic sample?",
+  "treatment": {
+    "variable": "X1MTHEFF",
+    "operationalization": "median_split_binary",
+    "rationale_for_PF": "median split chosen for first-pass smoke test; auditing whether PF flags this as ESC-07 (continuous treatment, undefined contrast) is part of the test"
+  },
+  "outcome": {
+    "variable": "X4EVRATNDCLG",
+    "type": "binary",
+    "definition": "ever attended any postsecondary institution by Wave 4"
+  },
+  "target_estimand_hint": "policy value of a learned rule vs best constant policy",
+  "primary_method": "M6",
+  "comparator_method": "M1",
+  "secondary_methods": [
+    "M5"
+  ],
+  "exclude_methods": [],
+  "rationale_for_method_set": "M1+M2+M3+M4 cover the four canonical SOO methods at fixed-treatment level; M5 (causal forest) added in 3b.7 to exercise the CATE pathway and test the M5 skill body for the first time. Subgroup-of-interest for M5: X1SEX (binary).",
+  "subgroup_of_interest_for_m5": "X1SEX",
+  "adjustment_set": [
+    "X1SES",
+    "X1TXMTSCOR",
+    "X1SEX",
+    "X1RACE",
+    "X1SCHOOLBEL",
+    "X1MTHID",
+    "X1MTHUTI",
+    "X1MTHINT",
+    "X1PAREDU",
+    "X1STUEDEXPCT",
+    "X1LOCALE",
+    "X1CONTROL"
+  ],
+  "rule_covariates": [
+    "X1SES",
+    "X1TXMTSCOR",
+    "X1SEX"
+  ]
+}

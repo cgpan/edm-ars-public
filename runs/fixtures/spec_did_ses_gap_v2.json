@@ -1,0 +1,28 @@
+{
+  "task_id": "stream1_did_v2_ses_gap_els_hsls",
+  "task_type": "causal_did",
+  "dataset": "did_els_hsls_panel",
+  "research_question": "Did the gap in within-cohort math achievement percentile rank between lowest-band and highest-band SES students change between the ELS:2002 and HSLS:09 cohorts, and how much of any raw change is accounted for by compositional shift within the SES bands versus a change at fixed composition (composition-adjusted gap-in-gaps with ML heterogeneity)?",
+  "group_variable": "low_ses",
+  "post_variable": "cohort",
+  "outcome": {
+    "variable": "rank_base",
+    "type": "continuous",
+    "definition": "within-cohort percentile rank (0-100) of the base-wave standardized math score"
+  },
+  "placebo_outcome": "rank_follow",
+  "estimand": "DID_GAP_CHANGE",
+  "primary_method": "M9",
+  "secondary_methods": ["M8", "M10"],
+  "adjustment_covariates": ["race5", "pared3", "expect_ba", "female"],
+  "heterogeneity_subgroups": ["female", "expect_ba", "race5", "pared3"],
+  "subgroup_analyses": ["female"],
+  "rationale_for_method_set": "M9 (within-group AIPW cohort standardization; certified bias 0.0003, coverage 1.0) answers the composition-fixed question; M8 raw is the always-reported comparator whose contrast with M9 is the substantive story; M10 (certified contrast-based) mines heterogeneity with boosted outcome models.",
+  "known_concerns_to_flag": [
+    "CCD-01 non-equated tests: only rank-gap changes are estimable",
+    "CCD-02 bundled treatment: the 2002-2009 cohort contrast bundles many changes; no single-policy attribution",
+    "grade offset: ELS base wave is grade 10, HSLS base wave is grade 9",
+    "harmonization coarseness: HSLS parent-education lacks a some-college-no-degree category",
+    "pared3 is a component of the SES composite: it enters only as WITHIN-GROUP cohort-composition adjustment, never as a cross-group control"
+  ]
+}

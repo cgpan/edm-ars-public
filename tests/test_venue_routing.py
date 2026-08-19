@@ -708,8 +708,14 @@ def test_tournament_remains_advisory_after_routing() -> None:
 
 
 def test_config_yaml_ships_the_ideation_block() -> None:
-    with open(CONFIG_PATH, encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
+    # Load through the REAL loader, not raw yaml: paths to the companion
+    # LSAR checkout ship as ${LSAR_HOME}/... and are expanded at load
+    # time, so asserting on the raw text would compare an unexpanded
+    # string against an expanded code default and pin behaviour the
+    # pipeline never sees.
+    from src.config import load_config
+
+    config = load_config(str(CONFIG_PATH))
     ideation = config["ideation"]
     assert ideation["venue_fit"]["rules_path"] == (
         "data_registry/venue_fit_rules_v2.yaml"

@@ -1,0 +1,19 @@
+{
+  "task_id": "v4_psy_els_mathse_calibration",
+  "task_type": "psychometrics",
+  "dataset": "els_2002",
+  "research_question": "How well does the ELS:2002 five-item mathematics self-efficacy scale function as a measurement instrument - graded-response calibration, information coverage, and reliability, with sex-DIF evidence?",
+  "scale_name": "ELS math self-efficacy (BYMATHSE items)",
+  "item_columns": ["BYS89A", "BYS89B", "BYS89L", "BYS89R", "BYS89U"],
+  "reverse_items": [],
+  "response_codes": [1, 2, 3, 4],
+  "factor_model": "EFF =~ BYS89A + BYS89B + BYS89L + BYS89R + BYS89U",
+  "grouping_vars": ["BYSEX"],
+  "grouping_notes": "BYSEX integer codes: 1=Male, 2=Female; negatives are sentinels.",
+  "method_battery": ["P1", "P2", "P3", "P4", "P5"],
+  "target_population": "ELS:2002 tenth graders who answered the BYS89 self-efficacy items",
+  "known_concerns_to_flag": [
+    "PSY-01 item nonresponse population framing",
+    "PSY-02 4-point ordinal items under MLR for the CFA arm"
+  ]
+}

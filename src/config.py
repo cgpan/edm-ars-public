@@ -1,3 +1,5 @@
+import os
+
 import yaml
 
 
@@ -21,9 +23,35 @@ def _validate_sandbox_config(config: dict) -> None:
         config["sandbox"].setdefault(key, val)
 
 
+#: Where LSAR (the separate review-gate repository) lives when the
+#: operator has not said. A sibling checkout is the conventional layout;
+#: set LSAR_HOME to point anywhere else.
+DEFAULT_LSAR_HOME = "../LSAR"
+
+
+def _expand_env(value):
+    """Expand ``${VAR}`` in every string in a nested config structure.
+
+    Paths to the companion LSAR repository differ per machine, so the
+    shipped config refers to ``${LSAR_HOME}`` rather than hard-coding one
+    checkout's layout. Without this pass those would stay literal and
+    fail to resolve.
+    """
+    if isinstance(value, str):
+        return os.path.expandvars(value)
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env(v) for v in value]
+    return value
+
+
 def load_config(path: str = "config.yaml") -> dict:
     with open(path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
+
+    os.environ.setdefault("LSAR_HOME", DEFAULT_LSAR_HOME)
+    config = _expand_env(config)
 
     missing_top = _REQUIRED_TOP_KEYS - set(config.keys())
     if missing_top:

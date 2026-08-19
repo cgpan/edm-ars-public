@@ -1,5 +1,12 @@
 # V5 Roadmap — Robustness, Taste, Self-Improvement
 
+> **Cost figures in this document predate measurement.** Every `$5-7`
+> per-run estimate below was a pre-K1 guess inherited from the MiniMax
+> era. Token metering (2026-08-08, `src/cost.py`) put the first measured
+> end-to-end cost of a gated paper at **$0.146** on DeepSeek. The
+> estimates are left in place as written; treat them as historical
+> context, not as current cost. See the README's cost section.
+
 Status: **user-confirmed 2026-07-11** (arc order P → T → I; user serves as
 taste anchor; Arc I diffs are PR-gated). SOTA investigation summarized in
 the 2026-07-10 discussion (AI Scientist-v2, Darwin Gödel Machine,

@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-# LSAR project location — adjust if your installation differs
-LSAR_ROOT = Path(r"H:\My Drive\LSAR")
+# LSAR project location. Override with the LSAR_HOME environment variable;
+# the default assumes LSAR is checked out beside this repository.
+LSAR_ROOT = Path(os.environ.get("LSAR_HOME", "../LSAR")).expanduser()
 
 
 def find_latest_run(output_dir: Path) -> Path:

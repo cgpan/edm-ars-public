@@ -220,4 +220,4 @@ paths:
   raw_data: data/raw/
   output_base: output/
   agent_prompts: agent_prompts/
-  paper_template: templates/paper_template.tex
+  paper_template: templates/paper_template_v2.tex

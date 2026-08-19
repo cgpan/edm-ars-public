@@ -4,7 +4,7 @@
 
 # F-P5-DEPTH-RECENCY-SKEW — Implementation Specification
 
-**Status:** ready to implement. No file in the worktree was modified while writing this (read-only analysis; scratch dir `C:/Users/grepa/AppData/Local/Temp/claude/analysis_scratch/`).
+**Status:** ready to implement. No file in the worktree was modified while writing this (read-only analysis; written from a scratch directory).
 
 **Defect restated in one line:** Arc P3 raised *how many* references reach the manuscript without constraining *which*, and the pool it draws from is sorted year-descending at `problem_formulator.py:578` and `:728`, so the count metric (62/62 available refs) went green while every reference in the shipped bibliography came from 2024–2026.
 
