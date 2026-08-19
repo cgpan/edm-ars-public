@@ -1,6 +1,6 @@
 # Skill-Flow Verification
 
-Skills root: H:\My Drive\edm-ars\.claude\worktrees\upbeat-liskov-c05277\skills
+Skills root: <repo>\skills
 Total skills loaded: 41
 Mandatory total: 8
 Default context: 'Predict 11th-grade math achievement from 9th-grade factors with SHAP and subgroup fairness'

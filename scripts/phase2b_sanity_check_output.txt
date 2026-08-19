@@ -1,6 +1,6 @@
 # Phase 2b Sanity Check
 
-Skills root: H:\My Drive\edm-ars\.claude\worktrees\upbeat-liskov-c05277\skills
+Skills root: <repo>\skills
 Loaded: 41
 By layer:
   task-type: 14

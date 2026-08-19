@@ -1000,7 +1000,7 @@ Stage strings used (matching V2.0.1 `STAGE_BY_AGENT`): `ProblemFormulator`, `Dat
 
 ### 4.4 LSAR rubric alignment (out of scope for V3.0 implementation)
 
-The current LSAR reviewer (configured at `H:\My Drive\LSAR`) is trained on prediction-task rubric. The Pass 1 failures it is **unlikely to catch** without rubric extensions:
+The current LSAR reviewer (configured via `review_gate.lsar_project_path`) is trained on prediction-task rubric. The Pass 1 failures it is **unlikely to catch** without rubric extensions:
 
 | Failure | Why current LSAR misses it |
 |---|---|

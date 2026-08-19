@@ -1,0 +1,155 @@
+# V4 smoke-test config - psychometrics on the all-deepseek stack.
+# Cloned from smoketest_did.yaml. R bridge requires the subprocess
+# executor (sandbox.enabled: false below) - R is not in the Docker image.
+# Phase 3b.23.7 (V4 Arc H) smoke-test config — ALL-DEEPSEEK per user
+# instruction 2026-07-03: "As for the LLM calling API, please use
+# deepseek-v4-pro or deepseek-v4-flash."
+#
+# Diffs from smoketest_3b11.yaml (kept unchanged for comparability of
+# prior runs):
+#   - per_stage_providers: openai overrides for analyst + writer REMOVED
+#     -> all six stages resolve to the default provider (deepseek) with
+#     deepseek-v4-pro per the deepseek.models block.
+#   - per_stage_max_tokens: analyst/writer 32000 -> 16000 (the openai
+#     budgets do not carry over; 16000 is the deepseek-proven ceiling
+#     used by PF/Critic in this repo).
+#
+# NOTE for run manifests: any run on this config has a provider Δ for
+# Analyst+Writer vs all 3b.5-3b.23.5 baselines (which used gpt-5.4 for
+# those stages). LSAR comparisons across that boundary are confounded
+# by the provider switch; in-run acceptance criteria (DE pre-flight,
+# refuters, positivity) are unaffected (DE/Analyst-adjacent stages were
+# already deepseek / are deterministic checks).
+
+llm_provider: deepseek
+
+models:
+  problem_formulator: claude-sonnet-4-6
+  data_engineer: claude-sonnet-4-6
+  analyst: claude-sonnet-4-6
+  critic: claude-opus-4-6
+  writer: claude-sonnet-4-6
+
+deepseek:
+  base_url: https://api.deepseek.com
+  models:
+    problem_formulator: deepseek-v4-pro
+    data_engineer: deepseek-v4-pro
+    analyst: deepseek-v4-pro  # ACTIVE (3b.23.7: openai override removed)
+    critic: deepseek-v4-pro
+    writer: deepseek-v4-pro  # ACTIVE (3b.23.7: openai override removed)
+    revision_writer: deepseek-v4-pro
+    outline_agent: deepseek-v4-flash  # tiered 2026-07-11
+
+minimax:
+  # Retained for backward-compat / quick rollback. NOT active under this
+  # config (llm_provider: deepseek above).
+  base_url: https://api.minimax.io/anthropic
+  models:
+    problem_formulator: MiniMax-M2.7
+    data_engineer: MiniMax-M2.7
+    analyst: MiniMax-M2.7
+    critic: MiniMax-M2.7
+    writer: MiniMax-M2.7
+    revision_writer: MiniMax-M2.7
+    outline_agent: MiniMax-M2.7
+
+openai:
+  models:
+    problem_formulator: gpt-5.4  # not used; per_stage_providers selects
+    data_engineer: gpt-5.4
+    analyst: gpt-5.4
+    critic: gpt-5.4
+    writer: gpt-5.4
+    revision_writer: gpt-5.4
+    outline_agent: gpt-5.4
+
+# Phase 3b.10 / §10.1.3 — per-stage provider overrides.
+# Analyst + Writer continue to route to OpenAI gpt-5.4 (3b.10 hardening).
+# All other stages use the default (deepseek per llm_provider above).
+per_stage_providers: {}
+
+# Phase 3b.10 / §10.2 — per-stage max_tokens budgets.
+default_max_tokens: 8000
+per_stage_max_tokens:
+  analyst: 16000
+  writer: 16000
+  critic: 16000
+  problem_formulator: 16000
+  data_engineer: 12000
+
+pipeline:
+  task_type: psychometrics
+  max_revision_cycles: 1
+  random_state: 42
+  cost_budget_usd: 100.0
+  mlp_enabled: false
+
+# Phase 3b.10 / §10.4 — task_id override marker. Not consumed by the
+# orchestrator's CLI yet (the existing --output-dir flag from 3b.4
+# handles run-dir disambiguation without editing the fixture). The
+# fixture's task_id remains "v3_0_smoketest_mtheff_college_3b7" for
+# direct comparability with 3b.7/3b.9 artifacts.
+run:
+  task_id_override: v4_psychometrics
+  output_dir_template: runs/v4_psy_<YYYYMMDD>/
+
+class_imbalance:
+  minority_threshold: 0.20
+  smote_random_state: 42
+  smote_k_neighbors: 5
+  fbeta_beta: 2
+  ablation_enabled: true
+
+sandbox:
+  enabled: false
+  image: "edm-ars-sandbox:latest"
+  memory_limit: "4g"
+  cpu_count: 2
+  network_disabled: true
+  auto_build: true
+
+semantic_scholar:
+  base_url: https://api.semanticscholar.org/graph/v1
+  max_results: 100
+  year_filter: 10
+  request_delay_s: 0.5
+  max_retries: 3
+  backoff_base_s: 1.0
+  backoff_factor: 2.0
+  backoff_jitter: true
+
+arxiv:
+  enabled: true
+  max_results_per_query: 10
+
+findings_memory:
+  enabled: false
+  path: findings_memory/memory.yaml
+  n_candidate_specs: 1
+
+review_gate:
+  enabled: true
+  # Arc L (user decision 2026-07-03): calibrated P25 gate; the file is
+  # rewritten by LSAR calibration_analyze.py under the CURRENT provider.
+  calibration_path: '${LSAR_HOME}/calibration/anchors_edm.yaml'
+  median_samples: 3          # borderline-triggered median review (MAD 1.9)
+  median_trigger_band: 1.5
+  lsar_project_path: "${LSAR_HOME}"
+  lsar_config_path: "${LSAR_HOME}\\config.yaml"
+  venue: "EDM"
+  max_cycles: 1
+  pass_threshold: 5.5
+  dimension_floor: 3
+  revision_model: "deepseek-v4-pro"
+  revision_max_tokens: 16000
+
+writer:
+  outline_first: true
+
+paths:
+  data_registry: data_registry/
+  raw_data: data/raw/
+  output_base: output/
+  agent_prompts: agent_prompts/
+  paper_template: templates/paper_template.tex

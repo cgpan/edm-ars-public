@@ -1,0 +1,24 @@
+{
+  "task_id": "phase_b_did_ses_gap_els_hsls",
+  "task_type": "causal_did",
+  "dataset": "did_els_hsls_panel",
+  "research_question": "Did the gap in within-cohort math achievement percentile rank between lowest-band and highest-band SES students change between the ELS:2002 and HSLS:09 high school cohorts (gap-in-gaps difference-in-differences)?",
+  "group_variable": "low_ses",
+  "post_variable": "cohort",
+  "outcome": {
+    "variable": "rank_base",
+    "type": "continuous",
+    "definition": "within-cohort percentile rank (0-100) of the base-wave standardized math score"
+  },
+  "placebo_outcome": "rank_follow",
+  "estimand": "DID_GAP_CHANGE",
+  "primary_method": "M8",
+  "secondary_methods": [],
+  "subgroup_analyses": ["female"],
+  "rationale_for_method_set": "M8 is the certified gap-in-gaps estimator with stratified bootstrap; no regression DiD comparator in the first live run to keep the contract surface minimal.",
+  "known_concerns_to_flag": [
+    "CCD-01 non-equated tests: only rank-gap changes are estimable",
+    "CCD-02 bundled treatment: the 2002-2009 cohort contrast bundles many changes; no single-policy attribution",
+    "grade offset: ELS base wave is grade 10, HSLS base wave is grade 9"
+  ]
+}

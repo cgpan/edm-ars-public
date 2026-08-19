@@ -1,0 +1,20 @@
+{
+  "task_id": "v4_psy_hsls_matheff_invariance",
+  "task_type": "psychometrics",
+  "dataset": "hsls09_public",
+  "research_question": "Do the HSLS:09 mathematics self-efficacy and utility scales measure the same constructs equivalently across student sex and socioeconomic status - item functioning (DIF) and measurement invariance evidence for two scales widely used as predictors in EDM research?",
+  "scale_name": "HSLS math self-efficacy + utility",
+  "item_columns": ["S1MTESTS", "S1MTEXTBOOK", "S1MSKILLS", "S1MASSEXCL", "S1MUSELIFE", "S1MUSECLG", "S1MUSEJOB"],
+  "reverse_items": [],
+  "response_labels": {"Strongly agree": 4, "Agree": 3, "Disagree": 2, "Strongly disagree": 1},
+  "factor_model": "EFF =~ S1MTESTS + S1MTEXTBOOK + S1MSKILLS + S1MASSEXCL\nUTI =~ S1MUSELIFE + S1MUSECLG + S1MUSEJOB",
+  "grouping_vars": ["X1SEX", "X1SESQ5"],
+  "grouping_notes": "X1SEX: Male/Female labels. X1SESQ5: use the two extreme quintiles (First quintile (lowest) vs Fifth quintile (highest)) as the DIF/invariance groups; other rows keep NaN group.",
+  "method_battery": ["P1", "P2", "P3", "P5", "P6"],
+  "target_population": "HSLS:09 ninth graders enrolled in a fall 2009 mathematics course (item legitimate skips excluded by design)",
+  "known_concerns_to_flag": [
+    "PSY-01 legit-skip missingness: claims describe enrolled students",
+    "PSY-02 4-point ordinal items under MLR",
+    "PSY-04 X1SESQ5 has 5 levels: extremes-only grouping must be named"
+  ]
+}

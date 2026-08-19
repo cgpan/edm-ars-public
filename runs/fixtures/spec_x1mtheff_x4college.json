@@ -1,0 +1,23 @@
+{
+  "task_id": "v3_0_smoketest_mtheff_college_3b7",
+  "task_type": "causal_soo",
+  "dataset": "hsls09_public",
+  "research_question": "Does 9th-grade math self-efficacy causally affect college attendance by Wave 4 (~age 22)?",
+  "treatment": {
+    "variable": "X1MTHEFF",
+    "operationalization": "median_split_binary",
+    "rationale_for_PF": "median split chosen for first-pass smoke test; auditing whether PF flags this as ESC-07 (continuous treatment, undefined contrast) is part of the test"
+  },
+  "outcome": {
+    "variable": "X4EVRATNDCLG",
+    "type": "binary",
+    "definition": "ever attended any postsecondary institution by Wave 4"
+  },
+  "target_estimand_hint": "ATT preferred (matched controls to treated); explicit declaration required per G2",
+  "primary_method": "M2",
+  "comparator_method": "M1",
+  "secondary_methods": ["M3", "M4", "M5"],
+  "exclude_methods": [],
+  "rationale_for_method_set": "M1+M2+M3+M4 cover the four canonical SOO methods at fixed-treatment level; M5 (causal forest) added in 3b.7 to exercise the CATE pathway and test the M5 skill body for the first time. Subgroup-of-interest for M5: X1SEX (binary).",
+  "subgroup_of_interest_for_m5": "X1SEX"
+}

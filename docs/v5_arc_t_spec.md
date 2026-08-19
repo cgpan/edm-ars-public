@@ -1,3 +1,10 @@
+> **Cost figures in this document predate measurement.** Every `$5-7`
+> per-run estimate below was a pre-K1 guess inherited from the MiniMax
+> era. Token metering (2026-08-08, `src/cost.py`) put the first measured
+> end-to-end cost of a gated paper at **$0.146** on DeepSeek. The
+> estimates are left in place as written; treat them as historical
+> context, not as current cost. See the README's cost section.
+
 <!-- Arc T spec, generated 2026-07-11 from run history + anchor corpus + SOTA. -->
 
 # Arc T (Research Taste) — Implementable Specification

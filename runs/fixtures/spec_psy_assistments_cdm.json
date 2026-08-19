@@ -1,0 +1,29 @@
+{
+  "task_id": "v4_wave2_assistments_cdm_journal",
+  "task_type": "psychometrics",
+  "dataset": "assistments_0910",
+  "research_question": "What do middle-school students' ASSISTments skill-builder response patterns reveal about mastery of core mathematics skills - a cognitive diagnosis (DINA) analysis of skill mastery prevalence and item quality, with classical item analysis, using a skill-tag-derived Q-matrix?",
+  "scale_name": "ASSISTments 2009-10 mathematics skill battery",
+  "item_construction": {
+    "unit": "template_id",
+    "response": "correct (binary, first attempt)",
+    "filters": ["original==1", "skill_id not null", "first attempt per (user_id, template_id) by min order_id"],
+    "scope": {
+      "n_skills": 8,
+      "skill_selection": "top by distinct-user coverage",
+      "min_responses_per_template": 300,
+      "min_items_per_student": 5
+    },
+    "q_matrix": "one attribute per template = its skill tag (simple structure); attributes = the 8 skill names"
+  },
+  "grouping_vars": [],
+  "method_battery": ["P1", "P7"],
+  "cdm_model": "compare",
+  "target_population": "ASSISTments 2009-10 skill-builder students meeting the scope floors",
+  "known_concerns_to_flag": [
+    "PSY-09 Q-matrix is tag-derived, not expert-validated - named limitation",
+    "PSY-10 mastery reported as prevalence, never individual diagnosis",
+    "structural sparsity: matrix mostly empty by design; responses never imputed",
+    "no demographics in the public log: demographic fairness analyses are not possible and the paper must say so"
+  ]
+}

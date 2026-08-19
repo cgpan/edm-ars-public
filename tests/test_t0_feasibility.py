@@ -679,11 +679,33 @@ def test_no_false_kills_on_archived_specs() -> None:
     assert not killed, f"FALSE KILLS on shipped specs: {killed}"
 
 
-@pytest.mark.skipif(not RUNS_DIR.exists(), reason="no run archive on this machine")
+#: The V1 gate needs a corpus of archived research specs, which lives in
+#: run OUTPUT directories. Those are excluded from the public release
+#: (they contain derived analytic data and this project's own research
+#: output), so a fresh clone has no corpus and the gate cannot run.
+#:
+#: The skip is deliberately narrow. It fires only when NO run-output
+#: directory exists at all — a checkout that never had a corpus. If the
+#: directories exist but yield too few specs, that is the corpus having
+#: been LOST, and the test still fails: deleting a git worktree once took
+#: the entire 26-spec denominator with it and the audit reported zero
+#: canonical specs while still exiting 0. A blanket skip would restore
+#: exactly that blind spot.
+_RUN_OUTPUT_DIRS = sorted(RUNS_DIR.glob("*/output*")) if RUNS_DIR.exists() else []
+
+
+@pytest.mark.skipif(
+    not _RUN_OUTPUT_DIRS,
+    reason="no run-output corpus in this checkout (public release excludes it)",
+)
 def test_audit_script_reports_zero_false_kills() -> None:
     from scripts.audit_feasibility import run_audit
 
     result = run_audit(RUNS_DIR)
-    assert result["n_canonical"] >= 20
+    assert result["n_canonical"] >= 20, (
+        f"run outputs exist ({len(_RUN_OUTPUT_DIRS)} dirs) but only "
+        f"{result['n_canonical']} canonical specs were found — the gate's "
+        "denominator has been lost, which is the failure this asserts against"
+    )
     assert result["false_kill_rate"] == 0.0, result["false_kills"]
     assert result["mutant_kill_rate"] == 1.0, result["mutants_missed"]

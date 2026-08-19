@@ -92,9 +92,9 @@ AGENT_KEY = "idea_priorart"
 #: Fallback default for ``ideation.priorart.anchor_corpus``. The
 #: ``ideation:`` block landed in config.yaml (H5, 2026-07-11); the config
 #: value wins whenever present, this constant is the offline fallback.
-DEFAULT_ANCHOR_CORPUS = os.environ.get(
-    "LSAR_HOME", "../LSAR"
-) + "/outputs"
+DEFAULT_ANCHOR_CORPUS = os.path.expandvars(
+    os.environ.get("LSAR_HOME", "../LSAR") + "/outputs"
+)
 
 # --------------------------------------------------------------------------
 # Trigger thresholds
