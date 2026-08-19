@@ -1,0 +1,68 @@
+% =========================================================
+% suppl.tex -- Appendix / Supplementary Material
+% Loaded from main.tex via \input{suppl} after \appendix.
+% Do NOT add \documentclass, \usepackage, or \begin{document} here.
+% =========================================================
+
+% Reset counters for the appendix
+\setcounter{secnumdepth}{1}
+\setcounter{equation}{0}
+\setcounter{figure}{0}
+\setcounter{table}{0}
+%\setcounter{page}{1}   % uncomment to restart page numbering at 1
+\setcounter{section}{0}
+
+% Rename counters to S1, S2, ... (supplementary numbering)
+\renewcommand{\theequation}{S\arabic{equation}}
+\renewcommand{\thefigure}{S\arabic{figure}}
+\renewcommand{\thesection}{S\arabic{section}}
+\renewcommand{\thetable}{S\arabic{table}}
+
+%---------------------------------------------------------
+\section{<<First Appendix Section>>} \label{app:one}
+
+<<Supplementary text. Cross-reference this section from the main text with Appendix~\ref{app:one}.>>
+
+% --- Example: an unnumbered display equation ---
+\begin{align*}
+    f(x) = \int_{-\infty}^{\infty} g(t)\,dt.
+\end{align*}
+
+\newpage
+
+%---------------------------------------------------------
+\section{<<Second Appendix Section>>} \label{app:two}
+
+<<Supplementary text.>>
+
+% --- Example: a multi-page table (longtable) ---
+\setlength{\tabcolsep}{4pt}          % horizontal padding (default 6pt)
+\renewcommand{\arraystretch}{1.0}    % row height
+\setlength{\LTpost}{0pt}             % space after the table
+
+\begin{longtable}{@{} l p{0.82\textwidth} @{}}
+    \caption{<<Table caption.>>} \label{app:tab:example} \\
+    \toprule
+    \textbf{<<Column 1>>} & \textbf{<<Column 2>>} \\
+    \midrule
+    \endfirsthead
+    \toprule
+    \textbf{<<Column 1>>} & \textbf{<<Column 2>>} \\
+    \midrule
+    \endhead
+    \midrule \multicolumn{2}{r}{\textit{Continued on next page}} \\
+    \midrule
+    \endfoot
+    \bottomrule
+    \endlastfoot
+
+    \texttt{<<row key>>} & \small <<row description>> \\
+    \texttt{<<row key>>} & \small <<row description>> \\
+    \texttt{<<row key>>} & \small <<row description>> \\
+\end{longtable}
+
+% Optional notes below the table
+\footnotesize
+\noindent
+\textbf{NOTE}: <<General notes about the table.>>\newline
+\textbf{SOURCE}: <<Data source.>>

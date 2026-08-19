@@ -11,3 +11,7 @@ requests>=2.31        # Semantic Scholar API calls
 python-dotenv>=1.0    # load .env file for API keys
 imbalanced-learn>=0.12  # SMOTE for class imbalance handling
 docker>=7.0           # Docker SDK for Python (sandbox mode); optional at runtime
+dowhy>=0.11,<0.13     # G5 sensitivity refuters (random_common_cause, placebo_treatment_refuter)
+openai>=1.30           # OpenAI-compatible endpoints (DeepSeek is the default provider)
+scipy>=1.11            # bootstrap CIs, distributional tests in analysis_helpers
+pymupdf>=1.24          # PDF text extraction for the review gate (imported as `fitz`)

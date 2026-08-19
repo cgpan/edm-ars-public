@@ -1,0 +1,59 @@
+# Phase 2b Sanity Check
+
+Skills root: H:\My Drive\edm-ars\.claude\worktrees\upbeat-liskov-c05277\skills
+Loaded: 41
+By layer:
+  task-type: 14
+  dataset: 7
+  methodology: 11
+  writing: 9
+
+## Assertion 1 -- total count + per-layer breakdown
+  OK    total = 41
+  OK    task-type = 14
+  OK    dataset = 7
+  OK    methodology = 11
+  OK    writing = 9
+
+## Assertion 2 -- hsls09-variable-registry bundled resource
+  OK    resource exists at variable_registry.yaml (62,342 bytes)
+
+## Assertion 3 -- Decision-9 composition (per-family expansion)
+  OK    prediction-model-battery matched
+  OK    all 6 per-family skills present via composition
+  OK    no duplicates in composed list (12 skills)
+  composed:
+    - prediction-model-battery
+    - model-logistic-regression
+    - model-random-forest
+    - model-xgboost
+    - model-elasticnet
+    - model-mlp
+    - model-stacking-ensemble
+    - prediction-workflow-overview
+    - prediction-evaluation-classification
+    - prediction-evaluation-regression
+    - shap-explainer-selection
+    - bootstrap-confidence-intervals
+
+## Assertion 4 -- Decision-6 composition (HSLS -> cluster reconstruction)
+  OK    hsls09-school-fingerprints matched
+  OK    cluster-id-reconstruction-from-fingerprints pulled in via reference
+  composed:
+    - prediction-workflow-overview
+    - hsls09-school-fingerprints
+    - cluster-id-reconstruction-from-fingerprints
+    - hsls09-variable-registry
+    - hsls09-csv-format-quirks
+    - hsls09-missing-codes
+
+## Assertion 5 -- task_type filter excludes prediction skills
+  OK    no prediction task-type skills leaked into causal_inference query
+  OK    cross-cutting methodology skills still match (6 found)
+
+## Assertion 6 -- dataset filter excludes HSLS-specific skills
+  OK    no HSLS-coupled skills leaked into els2002 query (Analyst+Writer)
+  OK    cross-cutting layers still match for els2002 query (task-type=12, writing=7)
+
+## Summary
+PASS: all 6 assertions passed

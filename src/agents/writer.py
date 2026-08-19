@@ -8,7 +8,39 @@ from datetime import datetime
 from typing import Any
 
 from src.agents.base import BaseAgent
+from src.citations import (
+    build_bibtex,
+    format_citation_key_block,
+    reconcile_citations,
+    venue_citation_target,
+)
 from src.latex_quality import LatexQualityReport, check_latex_quality
+from src.manuscript_linter import (
+    UNVERIFIED_BLOCK,
+    UNVERIFIED_MARKER,
+    run_is_unverified,
+)
+
+#: I1a (AERA_OPEN audit): the Writer invented values for every null field
+#: in its rendered results JSON. Nulls are now rendered as this loud
+#: marker so "make something up" is never the path of least resistance.
+NOT_AVAILABLE_MARKER = (
+    "NOT AVAILABLE - this value was not computed; "
+    "do NOT report a number for it"
+)
+
+
+def _mark_null_values(obj: Any) -> Any:
+    """Deep-copy a JSON-like structure replacing None leaves with
+    :data:`NOT_AVAILABLE_MARKER` (prompt rendering only — artifacts on
+    disk keep real nulls)."""
+    if obj is None:
+        return NOT_AVAILABLE_MARKER
+    if isinstance(obj, dict):
+        return {k: _mark_null_values(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_mark_null_values(v) for v in obj]
+    return obj
 
 def _count_tabular_spec_cols(spec: str) -> int:
     """Count column specifiers in a LaTeX tabular spec string, e.g. 'lrrrr' → 5."""
@@ -84,6 +116,29 @@ _S2_FAILURE_BIB_COMMENT = (
     "% Semantic Scholar API was unavailable; citations are placeholders only.\n"
 )
 
+def _extract_braced_arg(text: str, command: str) -> str:
+    """Return the balanced-brace argument of ``command`` (e.g. ``\\abstract``).
+
+    A plain regex cannot do this: abstracts contain nested braces
+    (``\\emph{...}``, ``$x_{1}$``), and a non-greedy match stops at the
+    first closing brace, silently truncating the text.
+    """
+    idx = text.find(command + "{")
+    if idx == -1:
+        return ""
+    start = idx + len(command) + 1
+    depth = 1
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "{" and text[i - 1] != "\\":
+            depth += 1
+        elif ch == "}" and text[i - 1] != "\\":
+            depth -= 1
+            if depth == 0:
+                return text[start:i].strip()
+    return ""
+
+
 # Sentinel used when template cannot be loaded at all
 _MINIMAL_STUB_TEX = (
     r"\documentclass[sigconf]{acmart}" + "\n"
@@ -140,8 +195,13 @@ class Writer(BaseAgent):
         fallback_bibtex = self._build_bibtex(lit)
 
         # Choose template and message builder based on outline availability
+        # V4 wave-2: journal venue format selects the APA7 manuscript
+        # template and an ~8000-word budget (config writer.venue_format).
+        venue_format = self.config.get("writer", {}).get(
+            "venue_format", "conference")
         if outline is not None:
-            template_text = self._load_template(version="v2")
+            template_text = self._load_template(
+                version="journal" if venue_format == "journal" else "v2")
             user_message = self._build_user_message_with_outline(
                 outline=outline,
                 research_spec=spec,
@@ -162,10 +222,18 @@ class Writer(BaseAgent):
                 template_text=template_text,
             )
 
-        llm_response = self.call_llm(user_message, max_tokens=self.max_tokens)
-
-        paper_tex = self._extract_latex(llm_response)
-        bibtex = self._extract_bibtex(llm_response) or fallback_bibtex
+        if venue_format == "journal" and outline is not None:
+            # E2a: journal manuscripts are generated SECTION BY SECTION
+            # (a single 16k-token call cannot reach ~8000 words), then
+            # assembled into a synthetic full-latex document that flows
+            # through the same reassembly path below.
+            paper_tex, bibtex = self._run_journal_sectionwise(
+                base_context=user_message, fallback_bibtex=fallback_bibtex,
+            )
+        else:
+            llm_response = self.call_llm(user_message, max_tokens=self.max_tokens)
+            paper_tex = self._extract_latex(llm_response)
+            bibtex = self._extract_bibtex(llm_response) or fallback_bibtex
 
         # v2 path: reassemble from clean template to prevent preamble corruption.
         # The LLM often modifies \makeatletter / \renewcommand\@copyrightpermission
@@ -217,6 +285,74 @@ class Writer(BaseAgent):
                     if repaired_bib:
                         bibtex = repaired_bib
 
+        # F-A5-MISSING-BIBLIOGRAPHY (Phase A attempt 3): deterministic
+        # guard on every path — a paper without \bibliography compiles to
+        # a PDF with no References section, which the LSAR sanity check
+        # rightly rejects. Inject the standard commands before
+        # \end{document} when both bibliography forms are absent.
+        if (
+            "\\bibliography{" not in paper_tex
+            and "\\begin{thebibliography}" not in paper_tex
+            and "\\printbibliography" not in paper_tex  # biblatex (journal)
+            and "\\end{document}" in paper_tex
+        ):
+            paper_tex = paper_tex.replace(
+                "\\end{document}",
+                "\\bibliographystyle{ACM-Reference-Format}\n"
+                "\\bibliography{references}\n\n"
+                "\\end{document}",
+                1,
+            )
+            self.ctx.log.append(
+                {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "agent": self.agent_name,
+                    "message": (
+                        "Injected missing \\bibliographystyle/\\bibliography "
+                        "before \\end{document} (F-A5 deterministic guard)."
+                    ),
+                }
+            )
+
+        # Arc P3: deterministic citation reconciliation. This is the last
+        # point at which paper_tex and bibtex are both final and still in
+        # memory — after the sectionwise assembly, the template
+        # reassembly, the quality-repair branch (which can replace
+        # `bibtex`) and the F-A5 guard, but before either touches disk.
+        #
+        # When real retrieved papers exist, the bibliography is rebuilt
+        # DETERMINISTICALLY from that metadata rather than trusting the
+        # model's own bib output: an LLM-authored reference list invents
+        # entries (29 fabricated venues found across shipped papers), and
+        # the sectionwise path leaves the two artifacts causally
+        # independent (F-E2A-SECTIONWISE-BIB-DRIFT: 22 dangling keys).
+        pool_papers = (lit or {}).get("papers") or []
+        if pool_papers:
+            bibtex = build_bibtex(pool_papers)
+        paper_tex, bibtex, cite_stats = reconcile_citations(
+            paper_tex, bibtex, pool_papers
+        )
+        self.ctx.log.append(
+            {
+                "timestamp": datetime.utcnow().isoformat(),
+                "agent": self.agent_name,
+                "message": (
+                    "Bib reconciliation: "
+                    f"{cite_stats['cited']} keys cited, "
+                    f"{cite_stats['bib_entries']} bib entries, "
+                    f"{cite_stats['backfilled']} back-filled, "
+                    f"{cite_stats['stripped']} invented keys stripped"
+                    + (f" ({cite_stats['skipped']})" if cite_stats["skipped"] else "")
+                ),
+            }
+        )
+
+        # I2 (AERA_OPEN audit): the SPEC section 4.5 UNVERIFIED block is
+        # injected DETERMINISTICALLY — it used to be prompt rule 6 only,
+        # and the one run that needed it omitted it while also
+        # fabricating numbers. Never again an LLM-obedience rule.
+        paper_tex = self._inject_unverified_flag(paper_tex, review)
+
         # Write outputs
         paper_path = os.path.join(self.ctx.output_dir, "paper.tex")
         with open(paper_path, "w", encoding="utf-8") as f:
@@ -227,6 +363,165 @@ class Writer(BaseAgent):
             f.write(bibtex)
 
         return paper_tex
+
+    # ------------------------------------------------------------------
+    # I2: deterministic UNVERIFIED flag (SPEC section 4.5)
+    # ------------------------------------------------------------------
+
+    def _inject_unverified_flag(
+        self, paper_tex: str, review_report: dict | None
+    ) -> str:
+        """Prepend the SPEC section 4.5 warning block and append the
+        Critic report appendix when the run is flagged UNVERIFIED.
+
+        Deterministic on every path (conference AND journal templates);
+        idempotent (skips when the marker is already present). The block
+        goes immediately before the first ``\\section`` so it opens the
+        paper body; fallback is right after ``\\begin{document}``.
+        """
+        if not run_is_unverified(review_report):
+            return paper_tex
+        if UNVERIFIED_MARKER in paper_tex:
+            return paper_tex
+
+        first_section = re.search(r"\\section\*?\{", paper_tex)
+        if first_section:
+            i = first_section.start()
+            paper_tex = paper_tex[:i] + UNVERIFIED_BLOCK + "\n" + paper_tex[i:]
+        elif "\\begin{document}" in paper_tex:
+            paper_tex = paper_tex.replace(
+                "\\begin{document}",
+                "\\begin{document}\n" + UNVERIFIED_BLOCK,
+                1,
+            )
+        else:
+            paper_tex = UNVERIFIED_BLOCK + paper_tex
+
+        if "\\end{document}" in paper_tex:
+            review_json = json.dumps(
+                review_report or {}, indent=1, default=str
+            ).replace("\\end{verbatim}", "\\end~{verbatim}")
+            appendix = (
+                "\\section*{Appendix: Automated Critic Review Report}\n"
+                "{\\small\\begin{verbatim}\n"
+                + review_json
+                + "\n\\end{verbatim}}\n\n"
+            )
+            paper_tex = paper_tex.replace(
+                "\\end{document}", appendix + "\\end{document}", 1
+            )
+
+        self.ctx.log.append(
+            {
+                "timestamp": datetime.utcnow().isoformat(),
+                "agent": self.agent_name,
+                "message": (
+                    "Injected UNVERIFIED warning block + Critic appendix "
+                    "(deterministic, SPEC section 4.5 / I2 guard)"
+                ),
+            }
+        )
+        return paper_tex
+
+    # ------------------------------------------------------------------
+    # E2a: sectionwise journal generation
+    # ------------------------------------------------------------------
+
+    JOURNAL_SECTIONS: list[tuple[str, int]] = [
+        ("Introduction", 1400),
+        ("Related Work", 1750),
+        ("Methods", 1750),
+        ("Results", 1500),
+        ("Discussion", 1200),
+        ("Limitations and Future Directions", 500),
+    ]
+
+    def _run_journal_sectionwise(
+        self, base_context: str, fallback_bibtex: str
+    ) -> tuple[str, str]:
+        """Generate a journal manuscript section by section (~8000 words).
+
+        Each section is its own LLM call carrying the full run context
+        plus brief summaries of the sections already written (for
+        coherence without token blow-up). The pieces are assembled into
+        a synthetic full-latex document compatible with
+        :meth:`_reassemble_from_template`.
+        """
+        # 1) Front matter: title / abstract / keywords
+        front_resp = self.call_llm(
+            base_context
+            + "\n\n## TASK (front matter only)\n"
+            "Write ONLY the manuscript front matter as LaTeX: a"
+            " \\title{...} line, a \\begin{abstract}...\\end{abstract}"
+            " block (150-250 words), and a \\keywords{...} line (4-6"
+            " keywords). Nothing else - no sections, no preamble.",
+            max_tokens=4000,
+        )
+        front = self._extract_latex(front_resp)
+        if not front or front == _MINIMAL_STUB_TEX:
+            front = front_resp
+
+        sections_tex: list[str] = []
+        summaries: list[str] = []
+        for name, words in self.JOURNAL_SECTIONS:
+            prior = (
+                "\n".join(f"- {s}" for s in summaries)
+                if summaries else "(none yet)"
+            )
+            resp = self.call_llm(
+                base_context
+                + "\n\n## SECTIONS ALREADY WRITTEN (one-line summaries)\n"
+                + prior
+                + f"\n\n## TASK (one section only)\n"
+                f"Write ONLY the \\section{{{name}}} of the journal "
+                f"manuscript as LaTeX body text, targeting ~{words} words "
+                "(subsections allowed). Use \\parencite/\\textcite for "
+                "citations keyed to the literature context. Do NOT repeat "
+                "content summarized above; do NOT write any other "
+                "section; no preamble, no \\end{document}. Then, after "
+                "the LaTeX block, output one line starting with "
+                "'SUMMARY:' - a single sentence summarizing what this "
+                "section covered (for the next section's context).",
+                max_tokens=8000,
+            )
+            body = self._extract_latex(resp)
+            if body == _MINIMAL_STUB_TEX:
+                body = ""
+            if not body or "\\section" not in body:
+                # salvage: wrap raw text under the section heading
+                body = f"\\section{{{name}}}\n" + (body or resp)
+            sections_tex.append(body)
+            m = re.search(r"SUMMARY:\s*(.+)", resp)
+            summaries.append(
+                f"{name}: {m.group(1).strip()[:200]}" if m else name
+            )
+            self.ctx.log.append({
+                "timestamp": datetime.utcnow().isoformat(),
+                "agent": self.agent_name,
+                "message": (
+                    f"Journal sectionwise: '{name}' written "
+                    f"(~{len(body.split())} words)"
+                ),
+            })
+
+        # 3) Bibliography from a dedicated call (or fallback builder)
+        bib_resp = self.call_llm(
+            base_context
+            + "\n\n## TASK (bibliography only)\n"
+            "Output ONLY a ```bibtex code block containing every entry "
+            "cited in a manuscript about this study, keyed to the "
+            "literature context paperIds.",
+            max_tokens=6000,
+        )
+        bibtex = self._extract_bibtex(bib_resp) or fallback_bibtex
+
+        synthetic = (
+            front.strip()
+            + "\n\\maketitle\n\n"
+            + "\n\n".join(sections_tex)
+            + "\n\n\\end{document}\n"
+        )
+        return synthetic, bibtex
 
     # ------------------------------------------------------------------
     # Template reassembly (v2 preamble protection)
@@ -269,10 +564,19 @@ class Writer(BaseAgent):
         title = self._extract_braced_arg(llm_latex, r"\title") or "Untitled"
 
         # --- Abstract ---
+        # Accept BOTH abstract forms. The prompt asks for the
+        # \begin{abstract} environment, but apa7 (the journal template)
+        # documents \abstract{...}, and the model follows the class it
+        # can see. Matching only the environment produced a manuscript
+        # with a literally empty \abstract{} that LSAR rejected outright
+        # ("No abstract found"), costing the entire review (F-P5-EMPTY-ABSTRACT).
         abstract_match = re.search(
             r"\\begin\{abstract\}(.*?)\\end\{abstract\}", llm_latex, re.DOTALL
         )
-        abstract = abstract_match.group(1).strip() if abstract_match else ""
+        if abstract_match:
+            abstract = abstract_match.group(1).strip()
+        else:
+            abstract = _extract_braced_arg(llm_latex, r"\abstract")
 
         # --- Keywords ---
         keywords = self._extract_braced_arg(llm_latex, r"\keywords") or ""
@@ -280,7 +584,8 @@ class Writer(BaseAgent):
         # --- Body (between \maketitle and the first structural boundary) ---
         body_match = re.search(
             r"\\maketitle\s*(.*?)"
-            r"(?=\\begin\{acks\}|\\appendix\b|\\bibliographystyle|\\end\{document\})",
+            r"(?=\\begin\{acks\}|\\appendix\b|\\bibliographystyle"
+            r"|\\printbibliography|\\end\{document\})",
             llm_latex,
             re.DOTALL,
         )
@@ -297,6 +602,8 @@ class Writer(BaseAgent):
         # --- Substitute into clean template ---
         result = template
         result = result.replace("%%PLACEHOLDER:TITLE%%", title)
+        short = title if len(title) <= 50 else title[:47].rstrip() + "..."
+        result = result.replace("%%PLACEHOLDER:SHORTTITLE%%", short)
         result = result.replace("%%PLACEHOLDER:ABSTRACT%%", abstract)
         result = result.replace("%%PLACEHOLDER:KEYWORDS%%", keywords)
         result = result.replace("%%PLACEHOLDER:PAPER_BODY%%", body)
@@ -315,7 +622,9 @@ class Writer(BaseAgent):
             version: ``"v1"`` for the original placeholder template,
                      ``"v2"`` for the outline-first single-body template.
         """
-        if version == "v2":
+        if version == "journal":
+            default_path = "templates/paper_template_journal.tex"
+        elif version == "v2":
             default_path = "templates/paper_template_v2.tex"
         else:
             default_path = "templates/paper_template.tex"
@@ -336,6 +645,36 @@ class Writer(BaseAgent):
             with open(template_path, encoding="utf-8") as f:
                 return f.read()
         except OSError:
+            # F-A4-V1-TEMPLATE-MISSING (Phase A attempt 3): the repo ships
+            # only paper_template_v2.tex; the v1 fallback path handed the
+            # LLM a minimal stub, which produced a paper with a corrupted
+            # preamble and NO bibliography. Fall back to the v2 template
+            # text (correct preamble + \bibliography lines for the LLM to
+            # mirror) before resorting to the stub.
+            if version == "v1":
+                v2_path = "templates/paper_template_v2.tex"
+                if not os.path.isabs(v2_path):
+                    project_root = os.path.dirname(
+                        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    )
+                    v2_abs = os.path.join(project_root, v2_path)
+                else:
+                    v2_abs = v2_path
+                try:
+                    with open(v2_abs, encoding="utf-8") as f:
+                        self.ctx.log.append(
+                            {
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "agent": self.agent_name,
+                                "message": (
+                                    f"v1 template missing at {template_path}; "
+                                    "using v2 template text as reference."
+                                ),
+                            }
+                        )
+                        return f.read()
+                except OSError:
+                    pass
             self.ctx.log.append(
                 {
                     "timestamp": datetime.utcnow().isoformat(),
@@ -470,60 +809,35 @@ class Writer(BaseAgent):
                 sanitized.append(p)
         return {**literature_context, "papers": sanitized}
 
+    def _citation_key_block(self, literature_context: dict | None) -> str:
+        """Arc P3 prompt block: the only citation keys the model may use.
+
+        Reads the venue target from the mined anchor norms so the writer
+        is told how deep the reference list must be for THIS venue
+        (EDM ~34, JEDM ~62, JLA ~65 by anchor median).
+        """
+        papers = (literature_context or {}).get("papers") or []
+        if not papers:
+            return ""
+        venue = self.config.get("review_gate", {}).get("venue")
+        try:
+            target = venue_citation_target(venue)
+        except Exception:
+            target = None
+        return format_citation_key_block(papers, target=target)
+
     def _build_bibtex(self, literature_context: dict | None) -> str:
         """
         Generate BibTeX entries from S2 literature_context.papers.
 
-        Falls back to a placeholder comment if papers is empty or None.
+        Delegates to the deterministic builder in ``src.citations`` so the
+        Writer, the reconciler and the review gate can never disagree
+        about entry formatting. Falls back to a placeholder comment if
+        papers is empty or None.
         """
         if not literature_context:
             return _S2_FAILURE_BIB_COMMENT
-
-        papers = literature_context.get("papers") or []
-        if not papers:
-            return _S2_FAILURE_BIB_COMMENT
-
-        entries: list[str] = []
-        for paper in papers:
-            raw_id = paper.get("paperId") or "unknown"
-            # Sanitize BibTeX key: replace colons (e.g. arxiv:2401.12345 → arxiv_2401.12345)
-            paper_id = raw_id.replace(":", "_")
-            title = paper.get("title") or "Unknown Title"
-            year = paper.get("year") or ""
-            authors = paper.get("authors") or []
-            venue = paper.get("venue") or ""
-            is_arxiv = raw_id.startswith("arxiv:") or raw_id.startswith("arxiv_") or paper.get("source") == "arxiv"
-
-            # Format authors as "Last, First and Last2, First2"
-            author_str = " and ".join(authors) if authors else "Unknown Author"
-
-            # Choose entry type based on source and venue
-            if is_arxiv:
-                entry_type = "misc"
-                venue_key = "note"
-                venue_val = "arXiv preprint"
-            elif venue and any(
-                kw in venue.lower() for kw in ("journal", "j.", "transactions", "review")
-            ):
-                entry_type = "article"
-                venue_key = "journal"
-                venue_val = venue
-            else:
-                entry_type = "inproceedings"
-                venue_key = "booktitle"
-                venue_val = venue or "Proceedings of the Educational Data Mining Conference"
-
-            entry = (
-                f"@{entry_type}{{{paper_id},\n"
-                f"  author    = {{{author_str}}},\n"
-                f"  title     = {{{title}}},\n"
-                f"  year      = {{{year}}},\n"
-                f"  {venue_key} = {{{venue_val}}},\n"
-                f"}}"
-            )
-            entries.append(entry)
-
-        return "\n\n".join(entries) + "\n"
+        return build_bibtex(literature_context.get("papers") or [])
 
     def _build_quality_repair_prompt(
         self, paper_tex: str, quality_report: LatexQualityReport
@@ -574,6 +888,10 @@ class Writer(BaseAgent):
             json.dumps(literature_context or {}, indent=2),
             "```",
             "",
+            # Arc P3: enumerate the legal citation keys explicitly. The
+            # JSON above was the only signal before, and the model
+            # invented keys that no bib entry could satisfy.
+            self._citation_key_block(literature_context),
             "## data_report.json",
             "```json",
             json.dumps(data_report or {}, indent=2),
@@ -581,7 +899,9 @@ class Writer(BaseAgent):
             "",
             "## results.json",
             "```json",
-            json.dumps(results_object or {}, indent=2),
+            # I1a: nulls render as loud NOT-AVAILABLE markers so the
+            # model never pads a missing value with an invented number.
+            json.dumps(_mark_null_values(results_object or {}), indent=2),
             "```",
             "",
             "## review_report.json",
@@ -636,6 +956,10 @@ class Writer(BaseAgent):
             json.dumps(literature_context or {}, indent=2),
             "```",
             "",
+            # Arc P3: enumerate the legal citation keys explicitly. The
+            # JSON above was the only signal before, and the model
+            # invented keys that no bib entry could satisfy.
+            self._citation_key_block(literature_context),
             "## data_report.json",
             "```json",
             json.dumps(data_report or {}, indent=2),
@@ -643,7 +967,9 @@ class Writer(BaseAgent):
             "",
             "## results.json",
             "```json",
-            json.dumps(results_object or {}, indent=2),
+            # I1a: nulls render as loud NOT-AVAILABLE markers so the
+            # model never pads a missing value with an invented number.
+            json.dumps(_mark_null_values(results_object or {}), indent=2),
             "```",
             "",
             "## review_report.json",

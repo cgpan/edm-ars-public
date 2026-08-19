@@ -265,3 +265,133 @@ def test_clean_outputs_produce_no_failures(tmp_path: "Path") -> None:
     result = run_pre_critic_checks(ctx, str(tmp_path))
     assert not result.failures
     assert not result.has_critical
+
+
+# ---------------------------------------------------------------------------
+# 3b.6 / 6.2 — task_type-aware gating
+# ---------------------------------------------------------------------------
+#
+# Causal_soo runs do not produce SHAP figures, top_features, all_models,
+# or per-class subgroup AUC. Pre-3b.6 the prediction-shaped checks fired
+# unconditionally and produced false-positive [major] issues that
+# polluted the Critic's input (3b.5's F-PRECRITIC-PREDICTION). The fix
+# gates pcc_02-05 behind ``task_type == 'prediction'``.
+
+
+def _make_causal_ctx(
+    *,
+    estimates: dict | None = None,
+    balance_diagnostics: dict | None = None,
+    sensitivity: dict | None = None,
+    validation_passed: bool = True,
+) -> MagicMock:
+    """Causal-shaped ctx for the 6.2 tests."""
+    ctx = MagicMock()
+    ctx.research_spec = {
+        "task_type": "causal_soo",
+        "outcome": {"variable": "X4EVRATNDCLG", "type": "binary"},
+        # outcome_variable used by pcc_01; mirror it from the causal block.
+        "outcome_variable": "X4EVRATNDCLG",
+    }
+    ctx.results_object = {
+        "estimand": "ATT",
+        "estimates": estimates or {
+            "M2": {"point_estimate": 0.05, "se": 0.02},
+        },
+        "balance_diagnostics": balance_diagnostics or {
+            "M2": {"smd_max_post": 0.04},
+        },
+        # Post-3b.23.7 a "clean" causal run includes attempted refuters
+        # (pcc_c01 asserts sensitivity.dowhy_refuters with >=2 entries
+        # carrying status). Callers override `sensitivity` to exercise
+        # the violation shapes.
+        "sensitivity": sensitivity or {
+            "e_value_point": 1.4,
+            "dowhy_refuters": {
+                "random_common_cause": {"status": "ran", "error": None},
+                "placebo_treatment_refuter": {"status": "ran", "error": None},
+            },
+        },
+        # Deliberately NO all_models / top_features / subgroup_performance
+        # — these are prediction-shape keys.
+    }
+    ctx.data_report = {"validation_passed": validation_passed}
+    return ctx
+
+
+class TestTaskTypeGating:
+    def test_unknown_task_type_raises(self, tmp_path: "Path") -> None:
+        ctx = _make_ctx()
+        with pytest.raises(ValueError, match="unknown task_type"):
+            run_pre_critic_checks(
+                ctx, str(tmp_path), task_type="not_a_real_type"
+            )
+
+    def test_prediction_default_runs_full_checks(
+        self, tmp_path: "Path"
+    ) -> None:
+        """No task_type kwarg means task_type='prediction' (the default).
+        All pcc_02-05 checks should still fire on prediction inputs.
+        """
+        # Strip the prediction-shaped fields to provoke pcc_02..05.
+        ctx = _make_ctx(
+            all_models={},
+            top_features=[],
+            subgroup_performance={},
+        )
+        _write_train_x(str(tmp_path), ["X1TXMTSCOR"])
+        # NO _write_shap_figures — provoke pcc_03
+        result = run_pre_critic_checks(ctx, str(tmp_path))  # default task_type
+        ids = {f.check_id for f in result.failures}
+        # Prediction-shaped checks must fire.
+        assert "pcc_02" in ids  # too few individual models
+        assert "pcc_03" in ids  # missing SHAP figures
+        assert "pcc_04" in ids  # empty top_features
+        assert "pcc_05" in ids  # empty subgroup_performance
+
+    def test_causal_soo_skips_prediction_shaped_checks(
+        self, tmp_path: "Path"
+    ) -> None:
+        """The 6.2 acceptance: prediction-shaped checks must NOT fire on
+        causal_soo inputs that legitimately lack SHAP / top_features /
+        all_models / subgroup_performance."""
+        ctx = _make_causal_ctx()
+        # No train_X (so pcc_01 skips), no SHAP figures.
+        result = run_pre_critic_checks(
+            ctx, str(tmp_path), task_type="causal_soo"
+        )
+        ids = {f.check_id for f in result.failures}
+        assert "pcc_02" not in ids
+        assert "pcc_03" not in ids
+        assert "pcc_04" not in ids
+        assert "pcc_05" not in ids
+
+    def test_causal_soo_still_runs_universal_checks(
+        self, tmp_path: "Path"
+    ) -> None:
+        """pcc_01 (target leakage) and pcc_06 (data validation) are
+        universal — they fire regardless of task type."""
+        # Provoke pcc_06 by setting validation_passed=False.
+        ctx = _make_causal_ctx(validation_passed=False)
+        # Provoke pcc_01 by writing train_X with the outcome column.
+        _write_train_x(str(tmp_path), ["X1TXMTSCOR", "X4EVRATNDCLG"])
+        result = run_pre_critic_checks(
+            ctx, str(tmp_path), task_type="causal_soo"
+        )
+        ids = {f.check_id for f in result.failures}
+        assert "pcc_01" in ids  # target leakage detected
+        assert "pcc_06" in ids  # data_report validation failed
+        # Critical-bucket aggregation still works.
+        assert result.has_critical
+
+    def test_causal_soo_clean_run_produces_no_failures(
+        self, tmp_path: "Path"
+    ) -> None:
+        ctx = _make_causal_ctx()
+        # Clean train_X (no outcome leakage).
+        _write_train_x(str(tmp_path), ["X1TXMTSCOR", "X1SES"])
+        result = run_pre_critic_checks(
+            ctx, str(tmp_path), task_type="causal_soo"
+        )
+        assert not result.failures
+        assert not result.has_critical

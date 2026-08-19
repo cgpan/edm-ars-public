@@ -4,14 +4,37 @@ import json
 import os
 import re
 import shutil
+from datetime import datetime
 from typing import Any
 
 from src.agents.base import BaseAgent
 
-# Path to the deterministic analysis helpers module (relative to this file)
-_HELPERS_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "analysis_helpers.py")
+# Path to the deterministic analysis helpers module (relative to this file).
+# The helpers live at src/analysis_helpers.py -- one level up from this
+# file (which lives in src/agents/). The pre-Phase-2c-recovery version
+# pointed at src/agents/analysis_helpers.py and silently failed every
+# copy; the LLM retry loop masked the bug because the LLM eventually
+# generated inline code that didn't need the helper.
+_HELPERS_SRC = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "analysis_helpers.py",
+)
+# V4 psychometrics: the psy_* helpers call the R bridge; copy it flat
+# next to analysis_helpers.py so output-dir execution can import it.
+_R_BRIDGE_SRC = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "r_bridge.py",
+)
 
-# Required top-level keys in results.json
+# Required top-level keys in results.json for the PREDICTION task type
+# (SPEC §4.3). This set is prediction-shaped: `all_models`, `top_features`
+# and `subgroup_performance` do not exist in a psychometrics or causal
+# results object. Do NOT apply it unconditionally — resolve the active
+# task type's contract through Analyst._required_results_keys() instead
+# (G4 / F-P5-PSY-SCHEMA-KEYS: applying this set to every task type
+# injected a phantom "results.json is missing required keys: [...]" error
+# into every psychometrics and causal run, which the Critic then read as
+# a genuine analysis failure).
 _REQUIRED_KEYS = {
     "best_model",
     "best_metric_value",
@@ -24,6 +47,24 @@ _REQUIRED_KEYS = {
     "errors",
     "warnings",
 }
+
+# Fallback contract for task types whose TaskTemplate declares no
+# required results keys: the two lists every downstream consumer reads.
+_MINIMUM_REQUIRED_KEYS = {"errors", "warnings"}
+
+# Per-task-type contracts known to the Analyst. This exists only because
+# TaskTemplate does not yet expose a required-results-keys hook; once
+# `get_required_results_keys()` lands on the templates (see
+# src/task_template.py) this table should be deleted and the hook used
+# for every task type.
+_TASK_REQUIRED_KEYS: dict[str, set[str]] = {
+    "prediction": _REQUIRED_KEYS,
+}
+
+# Block keys inside results.json["measurement_results"] are named
+# "<METHOD_ID>_<label>" (e.g. "P1_ctt", "P6_invariance"). Used by the
+# post-Analyst method-battery scope assertion (G3).
+_METHOD_BLOCK_RE = re.compile(r"^([A-Za-z]+[0-9]+)")
 
 # Default AUC threshold above which leakage is suspected (overridden by TaskTemplate)
 _AUC_SUSPICION_THRESHOLD_DEFAULT = 0.95
@@ -88,6 +129,55 @@ _REPAIR_HINTS: dict[str, str] = {
 }
 
 
+def _sanitize_nonfinite(
+    obj: Any, path: str = "$"
+) -> tuple[Any, list[str]]:
+    """Replace non-finite reals (NaN/Inf) with None, returning the
+    sanitized structure and the JSON-paths of every replacement.
+
+    I3 (AERA_OPEN audit): a NaN follow-wave probe crashed
+    ``json.dump(..., allow_nan=False)`` mid-stream, truncating
+    results.json and killing the REVISING stage. Review hardening:
+    matches ``numbers.Real`` rather than bare ``float`` so numpy
+    float32/float64 scalars are caught and normalized to Python floats,
+    and non-finite float dict KEYS (which also crash strict dumps) are
+    sanitized too.
+    """
+    import numbers
+
+    if isinstance(obj, bool):
+        return obj, []
+    if isinstance(obj, numbers.Real) and not isinstance(obj, int):
+        v = float(obj)
+        if v != v or v in (float("inf"), float("-inf")):
+            return None, [path]
+        return v, []
+    if isinstance(obj, dict):
+        out: dict = {}
+        paths: list[str] = []
+        for k, v in obj.items():
+            k2 = k
+            if (
+                isinstance(k, numbers.Real)
+                and not isinstance(k, (bool, int))
+                and (float(k) != float(k) or float(k) in (float("inf"), float("-inf")))
+            ):
+                k2 = "non-finite-key"
+                paths.append(f"{path}.<key>")
+            out[k2], sub = _sanitize_nonfinite(v, f"{path}.{k2}")
+            paths.extend(sub)
+        return out, paths
+    if isinstance(obj, list):
+        out_l: list = []
+        paths = []
+        for i, v in enumerate(obj):
+            clean, sub = _sanitize_nonfinite(v, f"{path}[{i}]")
+            out_l.append(clean)
+            paths.extend(sub)
+        return out_l, paths
+    return obj, []
+
+
 def _classify_error(stderr: str) -> str:
     """Classify an execution error from stderr into a category for targeted repair."""
     s = stderr.lower()
@@ -142,6 +232,10 @@ class Analyst(BaseAgent):
         helpers_dst = os.path.join(self.ctx.output_dir, "analysis_helpers.py")
         try:
             shutil.copy2(_HELPERS_SRC, helpers_dst)
+            shutil.copy2(
+                _R_BRIDGE_SRC,
+                os.path.join(self.ctx.output_dir, "r_bridge.py"),
+            )
         except OSError as exc:
             self.ctx.log.append({
                 "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
@@ -189,11 +283,47 @@ class Analyst(BaseAgent):
 
         results = self._read_results(last_response)
         results = self._validate_results(results)
+        # G3: deterministic post-Analyst scope assertion against the
+        # locked spec (no-op unless the spec declares a method_battery).
+        results = self._check_method_battery_scope(results, spec)
 
-        # Persist to disk
+        # Persist to disk. allow_nan=False: NaN/Infinity are NOT valid
+        # JSON — Python emits bare `NaN` tokens that json.load accepts
+        # but strict parsers reject (a sparse-matrix CTT run produced 47
+        # NaN item stats this way). I3 (AERA_OPEN audit): a NaN that
+        # slips through must NOT crash the stage — json.dump STREAMS
+        # into the open file, so the raise left a truncated, invalid
+        # results.json on disk and the whole REVISING stage fell over,
+        # discarding an otherwise-correct revision. Sanitize non-finite
+        # floats to null (recording each path in warnings), serialize to
+        # a string first, and only then touch the file.
+        results, nonfinite_paths = _sanitize_nonfinite(results)
+        if nonfinite_paths:
+            # The sandbox-written file may carry warnings as a non-list
+            # (review finding: a string here crashed the append).
+            w = results.get("warnings")
+            if not isinstance(w, list):
+                results["warnings"] = [str(w)] if w else []
+            results["warnings"].append(
+                "Non-finite values (NaN/Inf) recorded as null at: "
+                + ", ".join(nonfinite_paths[:20])
+                + (" ..." if len(nonfinite_paths) > 20 else "")
+            )
+            self.ctx.log.append(
+                {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "agent": self.agent_name,
+                    "message": (
+                        f"Sanitized {len(nonfinite_paths)} non-finite "
+                        "value(s) to null before serializing results.json "
+                        "(I3 guard)"
+                    ),
+                }
+            )
+        serialized = json.dumps(results, indent=2, allow_nan=False)
         results_path = os.path.join(self.ctx.output_dir, "results.json")
-        with open(results_path, "w") as f:
-            json.dump(results, f, indent=2)
+        with open(results_path, "w", encoding="utf-8") as f:
+            f.write(serialized)
 
         return results
 
@@ -211,6 +341,45 @@ class Analyst(BaseAgent):
         # Inject pipeline configuration (MLP toggle, class imbalance settings)
         mlp_enabled = self.config.get("pipeline", {}).get("mlp_enabled", True)
         imbalance_cfg = self.config.get("class_imbalance", {})
+
+        # causal_did: split-less panel contract — the prediction-shaped
+        # file list below would be a lie (no train/test CSVs exist), and
+        # the first live run showed the LLM GUESSES a filename when the
+        # panel is not named explicitly (F-B1-ANALYST-PANEL-FILENAME:
+        # it tried analytic_panel.csv; DataEngineer writes
+        # panel_analytic.csv).
+        if research_spec.get("task_type") == "causal_did":
+            parts = [
+                "## Data Report",
+                "```json",
+                json.dumps(data_report, indent=2),
+                "```",
+                "",
+                "## Research Specification",
+                "```json",
+                json.dumps(research_spec, indent=2),
+                "```",
+                "",
+                "## Data File Path (EXACT — do not guess or rename)",
+                f"- analytic panel: `{os.path.join(output_dir, 'panel_analytic.csv')}`",
+                "",
+                "There is NO train/test split in DiD mode — the estimator runs "
+                "on the full panel. Load exactly this file.",
+                "",
+                "## Analysis Helpers (REQUIRED — import and use these, do NOT reimplement)",
+                "`analysis_helpers.py` is available in your working directory.",
+                "```python",
+                "import analysis_helpers",
+                "core = analysis_helpers.did_gap_in_gaps(df, outcome_col, group_col, post_col)",
+                "probe = analysis_helpers.did_placebo_follow_wave(df, base_col, follow_col, group_col, post_col)",
+                "```",
+                "",
+                f"Write results.json to `{os.path.join(output_dir, 'results.json')}` "
+                "conforming to the schema in your system prompt.",
+            ]
+            if revision_instructions:
+                parts += ["", "## Revision Instructions", revision_instructions]
+            return "\n".join(parts)
 
         parts = [
             "## Configuration",
@@ -249,7 +418,8 @@ class Analyst(BaseAgent):
             "```",
             "",
             "## Analysis Helpers (REQUIRED — import and use these, do NOT reimplement)",
-            "`analysis_helpers.py` is pre-installed in your working directory.",
+            "`analysis_helpers.py` is available in your working directory "
+            "(the orchestrator copies it in before your code runs).",
             "```python",
             "import analysis_helpers",
             "",
@@ -358,7 +528,7 @@ class Analyst(BaseAgent):
         if not os.path.exists(results_path):
             return None
         try:
-            with open(results_path) as f:
+            with open(results_path, encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             return None
@@ -391,7 +561,7 @@ class Analyst(BaseAgent):
         """Read results.json written by the generated code, or fall back to LLM JSON."""
         results_path = os.path.join(self.ctx.output_dir, "results.json")
         if os.path.exists(results_path):
-            with open(results_path) as f:
+            with open(results_path, encoding="utf-8") as f:
                 return json.load(f)
 
         # Try to parse the JSON block from the LLM response
@@ -421,13 +591,54 @@ class Analyst(BaseAgent):
     # Validation
     # ------------------------------------------------------------------
 
+    def _required_results_keys(self) -> set[str]:
+        """Return the required top-level results.json keys for this task type.
+
+        Source of truth is the TaskTemplate: if it declares the contract
+        (``get_required_results_keys()`` or a ``REQUIRED_RESULTS_KEYS``
+        attribute) that declaration wins. Templates that declare nothing
+        fall back to the minimum contract (errors/warnings) — never to
+        the prediction schema, which is what produced the phantom
+        "missing required keys" error on psychometrics and causal runs
+        (G4 / F-P5-PSY-SCHEMA-KEYS).
+
+        Prediction keeps its full SPEC §4.3 contract via
+        :data:`_TASK_REQUIRED_KEYS` until the templates grow the hook.
+        """
+        template = getattr(self, "task_template", None)
+
+        declared: Any = None
+        getter = getattr(template, "get_required_results_keys", None)
+        if callable(getter):
+            try:
+                declared = getter()
+            except Exception:  # a broken hook must not break a healthy run
+                declared = None
+        if declared is None:
+            declared = getattr(template, "REQUIRED_RESULTS_KEYS", None)
+        if declared is not None and not isinstance(declared, (str, bytes)):
+            try:
+                return {str(k) for k in declared}
+            except TypeError:
+                pass
+
+        task_name = ""
+        try:
+            if template is not None:
+                task_name = str(template.get_name())
+        except Exception:
+            task_name = ""
+        return set(_TASK_REQUIRED_KEYS.get(task_name, _MINIMUM_REQUIRED_KEYS))
+
     def _validate_results(self, results: dict) -> dict:
         """Enforce schema requirements and flag suspicious AUC values."""
         results.setdefault("errors", [])
         results.setdefault("warnings", [])
 
-        # Check required top-level keys
-        missing_keys = _REQUIRED_KEYS - results.keys()
+        # Check required top-level keys (task-type-specific, never the
+        # prediction schema by default — see _required_results_keys)
+        required_keys = self._required_results_keys()
+        missing_keys = required_keys - results.keys()
         if missing_keys:
             results["errors"].append(
                 f"results.json is missing required keys: {sorted(missing_keys)}"
@@ -467,10 +678,18 @@ class Analyst(BaseAgent):
                         "Potential data leakage."
                     )
 
-        # Ensure top_features is a list
-        if not isinstance(results.get("top_features"), list):
-            results["warnings"].append("top_features is missing or not a list; defaulting to []")
-            results["top_features"] = []
+        # Ensure top_features is a list. Only complain about ABSENCE when
+        # the task type actually contracts for it — a measurement or DiD
+        # results.json legitimately has no SHAP feature ranking, and the
+        # warning was reaching the Critic as a real defect (same phantom
+        # class as the missing-keys error above). A present-but-wrong-type
+        # value is always a defect, whatever the task type.
+        if "top_features" in results or "top_features" in required_keys:
+            if not isinstance(results.get("top_features"), list):
+                results["warnings"].append(
+                    "top_features is missing or not a list; defaulting to []"
+                )
+                results["top_features"] = []
 
         # Validate ablation presence for imbalanced classification
         data_report = getattr(self.ctx, "data_report", None) or {}
@@ -481,6 +700,126 @@ class Analyst(BaseAgent):
                 "data_report.is_imbalanced is true and ablation_enabled is true, "
                 "but results.json contains no 'ablation' key. "
                 "The Analyst may not have performed the SMOTE ablation comparison."
+            )
+
+        return results
+
+    # ------------------------------------------------------------------
+    # Post-Analyst method-battery scope assertion (G3)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _block_method_id(block_key: str) -> str:
+        """Map a measurement_results block key to its method ID.
+
+        ``"P1_ctt" -> "P1"``, ``"P6_invariance" -> "P6"``, ``"P1" -> "P1"``.
+        Returns ``""`` for keys with no ``<letters><digits>`` prefix:
+        ``measurement_results`` may carry ancillary non-method entries and
+        flagging those as scope creep would be exactly the kind of phantom
+        complaint this pass is removing elsewhere. A method whose block is
+        misnamed still surfaces — as the (more serious) missing-block error.
+        """
+        match = _METHOD_BLOCK_RE.match(block_key.strip())
+        if match:
+            return match.group(1).upper()
+        return ""
+
+    def _log_scope(self, message: str) -> None:
+        """Append a scope-assertion line to the pipeline context log."""
+        log = getattr(self.ctx, "log", None)
+        if isinstance(log, list):
+            log.append(
+                {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "agent": self.agent_name,
+                    "message": message,
+                }
+            )
+
+    def _check_method_battery_scope(self, results: dict, research_spec: dict) -> dict:
+        """Assert the produced blocks match the locked ``method_battery``.
+
+        Deterministic post-Analyst check mirroring the orchestrator's
+        post-DE pre-flight in spirit: the locked research_spec is the
+        contract, and drift from it is reported explicitly rather than
+        discovered by reading a 24-minute run's output (G3 /
+        F-P5-BATTERY-SCOPE-CREEP — the Analyst ran the full P1-P7 battery
+        against a locked ``["P1","P7"]`` in 1 of 2 observed runs).
+
+        Severity, following the pre-flight's "report, do not crash a
+        healthy run" stance:
+          * MISSING requested blocks -> ``results["errors"]`` (the locked
+            battery was not delivered; this IS an analysis failure).
+          * EXTRA unrequested blocks -> ``results["warnings"]`` (wasted
+            compute and unusable output the Critic would otherwise reason
+            about as if it were requested).
+
+        No-op when the spec declares no ``method_battery`` (prediction and
+        causal task types), so this never fires prediction-shaped noise.
+        """
+        results.setdefault("errors", [])
+        results.setdefault("warnings", [])
+
+        battery = research_spec.get("method_battery") if research_spec else None
+        if not isinstance(battery, list) or not battery:
+            return results
+
+        requested: list[str] = []
+        for method in battery:
+            method_id = str(method).strip().upper()
+            if method_id and method_id not in requested:
+                requested.append(method_id)
+        if not requested:
+            return results
+
+        blocks = results.get("measurement_results")
+        if not isinstance(blocks, dict):
+            message = (
+                f"METHOD BATTERY SCOPE VIOLATION: the locked method_battery is "
+                f"{requested}, but results.json has no 'measurement_results' "
+                f"dict — none of the requested methods produced a block."
+            )
+            results["errors"].append(message)
+            self._log_scope(message)
+            return results
+
+        produced: dict[str, list[str]] = {}
+        for block_key in blocks:
+            method_id = self._block_method_id(str(block_key))
+            if not method_id:
+                continue
+            produced.setdefault(method_id, []).append(str(block_key))
+
+        missing = [m for m in requested if m not in produced]
+        extra_ids = [m for m in sorted(produced) if m not in requested]
+        extra_keys = sorted(k for m in extra_ids for k in produced[m])
+
+        if missing:
+            message = (
+                f"METHOD BATTERY SCOPE VIOLATION: the locked method_battery is "
+                f"{requested}, but results.json.measurement_results has no block "
+                f"for {missing}. Present blocks: {sorted(blocks)}. Every locked "
+                f"method must produce its block — a silently dropped method is "
+                f"an analysis failure, not a stylistic choice."
+            )
+            results["errors"].append(message)
+            self._log_scope(message)
+
+        if extra_keys:
+            message = (
+                f"METHOD BATTERY SCOPE CREEP: results.json.measurement_results "
+                f"contains unrequested blocks {extra_keys} (method IDs "
+                f"{extra_ids}); the locked method_battery is {requested}. These "
+                f"methods were never requested — they cost compute and must not "
+                f"be reported as findings."
+            )
+            results["warnings"].append(message)
+            self._log_scope(message)
+
+        if not missing and not extra_keys:
+            self._log_scope(
+                f"Method-battery scope check passed: measurement_results blocks "
+                f"match the locked method_battery {requested}"
             )
 
         return results

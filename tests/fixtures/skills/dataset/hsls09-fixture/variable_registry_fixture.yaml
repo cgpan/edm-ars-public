@@ -1,0 +1,11 @@
+name: hsls09_fixture
+waves:
+  base_year:
+    prefix: X1
+    label: 9th grade
+  first_follow_up:
+    prefix: X2
+    label: 11th grade
+variables:
+  outcomes: []
+  predictors: {}

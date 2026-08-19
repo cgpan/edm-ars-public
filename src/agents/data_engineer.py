@@ -3,12 +3,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
 import yaml
 
 from src.agents.base import BaseAgent, parse_llm_json
+
+# Path to the deterministic analysis helpers module. Mirrors the constant
+# in src/agents/analyst.py so both agents copy from the same source. The
+# helpers live at src/analysis_helpers.py -- one level up from this file.
+_HELPERS_SRC = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "analysis_helpers.py",
+)
 
 
 class DataEngineer(BaseAgent):
@@ -53,6 +63,23 @@ class DataEngineer(BaseAgent):
         with open(code_path, "w", encoding="utf-8") as f:
             f.write(code)
 
+        # Copy deterministic helpers into output_dir so generated code can
+        # `import analysis_helpers`. Mirrors the Analyst's pattern
+        # (src/agents/analyst.py); pre-Phase-2c the DataEngineer was
+        # missing this copy and the helper-using code path failed
+        # intermittently. Failure to copy is logged but non-fatal — some
+        # generated code may inline reconstruction logic and not need the
+        # helper.
+        helpers_dst = os.path.join(self.ctx.output_dir, "analysis_helpers.py")
+        try:
+            shutil.copy2(_HELPERS_SRC, helpers_dst)
+        except OSError as exc:
+            self.ctx.log.append({
+                "timestamp": datetime.utcnow().isoformat(),
+                "agent": self.agent_name,
+                "message": f"WARNING: Could not copy analysis_helpers.py: {exc}",
+            })
+
         # Execute with up to MAX_RETRIES retry attempts on failure
         for attempt in range(self.MAX_RETRIES + 1):
             exec_result = self.execute_code(code)
@@ -77,7 +104,7 @@ class DataEngineer(BaseAgent):
         data_report = self._validate_outputs(data_report)
 
         report_path = os.path.join(self.ctx.output_dir, "data_report.json")
-        with open(report_path, "w") as f:
+        with open(report_path, "w", encoding="utf-8") as f:
             json.dump(data_report, f, indent=2)
 
         return data_report
@@ -124,6 +151,30 @@ class DataEngineer(BaseAgent):
             ]
         return "\n".join(parts)
 
+    @staticmethod
+    def _stderr_hint(stderr: str) -> str:
+        """Targeted diagnosis hints for cryptic pandas/sklearn errors the
+        LLM repeatedly fails to root-cause from the traceback alone
+        (F-A2-DE-DUPLICATE-KEEP-COLS: deepseek saw the to_numeric
+        TypeError three times without connecting it to duplicate column
+        labels)."""
+        hints = []
+        if "arg must be a list, tuple, 1-d array, or Series" in stderr:
+            hints.append(
+                "DIAGNOSIS: this TypeError almost always means DUPLICATE "
+                "COLUMN LABELS — `df[col]` returned a DataFrame, not a "
+                "Series, because `col` appears twice (e.g. a variable "
+                "listed in both predictors and subgroup columns). Build "
+                "the column selection with list(dict.fromkeys([...])) "
+                "so every label is unique."
+            )
+        if "cannot reindex on an axis with duplicate labels" in stderr:
+            hints.append(
+                "DIAGNOSIS: duplicate column labels in the frame — "
+                "de-duplicate the selection list before slicing."
+            )
+        return ("\n\n" + "\n".join(hints)) if hints else ""
+
     def _build_fix_message(
         self, code: str, exec_result: dict, attempt: int
     ) -> str:
@@ -133,7 +184,8 @@ class DataEngineer(BaseAgent):
             "## Failed Code\n"
             f"```python\n{code}\n```\n\n"
             "## stderr\n"
-            f"```\n{exec_result['stderr'][:2000]}\n```\n\n"
+            f"```\n{exec_result['stderr'][:2000]}\n```"
+            f"{self._stderr_hint(exec_result.get('stderr', ''))}\n\n"
             "## stdout\n"
             f"```\n{exec_result['stdout'][:500]}\n```\n\n"
             "Please output a corrected ```python code block followed by the "
@@ -169,7 +221,7 @@ class DataEngineer(BaseAgent):
         """Read data_report.json written by the generated code, or fall back to LLM JSON."""
         report_path = os.path.join(self.ctx.output_dir, "data_report.json")
         if os.path.exists(report_path):
-            with open(report_path) as f:
+            with open(report_path, encoding="utf-8") as f:
                 return json.load(f)
         # Try to parse the JSON block from the LLM response
         try:
@@ -203,7 +255,16 @@ class DataEngineer(BaseAgent):
         """
         Read the generated CSVs and enforce SPEC §4.2 validation checks.
         Mutates and returns data_report with updated fields and any new warnings.
+
+        causal_did runs use a split-less panel contract instead — see
+        :meth:`_validate_panel_outputs`.
         """
+        spec = getattr(self.ctx, "research_spec", None) or {}
+        if spec.get("task_type") == "causal_did":
+            return self._validate_panel_outputs(data_report)
+        if spec.get("task_type") == "psychometrics":
+            return self._validate_items_outputs(data_report)
+
         output_dir = self.ctx.output_dir
         issues: list[str] = []
 
@@ -251,12 +312,30 @@ class DataEngineer(BaseAgent):
             if nan_count > 0:
                 issues.append(f"NaN values remain in {name}: {nan_count} cells")
 
-        # Check: no zero-variance (constant) predictors
+        # Check: no zero-variance (constant) predictors. Phase 3b.5 narrow
+        # exception #1: drop+warn instead of fail. Zero-variance one-hot
+        # columns are an artifact of school-aware splits where rare
+        # categories appear in test but not train (or vice versa). They
+        # carry no predictive/causal signal and the prediction model
+        # battery + causal estimators are robust to dropping them. The
+        # original behavior (validation fail) blocks downstream Analyst /
+        # Critic / Writer / LSAR stages from running on otherwise-valid
+        # data — that is in scope for unblocking under the in-phase fix
+        # policy. The DataEngineer agent's generated code should also
+        # drop these proactively (post-3b.5 skill-content work).
         zero_var_cols = [
             col for col in train_X.columns if train_X[col].nunique() <= 1
         ]
         if zero_var_cols:
-            issues.append(f"Zero-variance predictors found: {zero_var_cols}")
+            train_X = train_X.drop(columns=zero_var_cols)
+            test_X = test_X.drop(columns=zero_var_cols, errors="ignore")
+            train_X.to_csv(os.path.join(output_dir, "train_X.csv"), index=False)
+            test_X.to_csv(os.path.join(output_dir, "test_X.csv"), index=False)
+            data_report.setdefault("warnings", []).append(
+                f"Dropped {len(zero_var_cols)} zero-variance predictor(s) "
+                f"introduced during one-hot encoding (rare categories in "
+                f"test but not train, or vice versa): {zero_var_cols}"
+            )
 
         # Update report with ground-truth counts from files
         data_report["n_train"] = len(train_X)
@@ -268,6 +347,147 @@ class DataEngineer(BaseAgent):
             data_report["validation_passed"] = False
             data_report.setdefault("warnings", []).extend(issues)
 
+        self._ensure_multilevel_warning(data_report)
+        return data_report
+
+    def _validate_panel_outputs(self, data_report: dict) -> dict:
+        """causal_did panel contract (V4 Phase B): split-less validation.
+
+        Checks panel_analytic.csv against the research_spec's design
+        columns instead of the prediction-mode train/test artifacts.
+        """
+        output_dir = self.ctx.output_dir
+        spec = getattr(self.ctx, "research_spec", None) or {}
+        issues: list[str] = []
+
+        path = os.path.join(output_dir, "panel_analytic.csv")
+        if not os.path.exists(path):
+            issues.append("Missing output file: panel_analytic.csv")
+        else:
+            try:
+                panel = pd.read_csv(path)
+            except Exception as exc:
+                panel = None
+                issues.append(f"Failed to read panel_analytic.csv: {exc}")
+            if panel is not None:
+                group = spec.get("group_variable", "")
+                post = spec.get("post_variable", "")
+                outcome = (spec.get("outcome") or {}).get("variable", "")
+                required = [c for c in (group, post, outcome) if c]
+                missing = [c for c in required if c not in panel.columns]
+                if missing:
+                    issues.append(
+                        f"panel_analytic.csv missing required columns: {missing}"
+                    )
+                else:
+                    if len(panel) < 1000:
+                        issues.append(
+                            f"Panel too small: {len(panel)} rows < 1000"
+                        )
+                    if panel[outcome].isna().any():
+                        issues.append(
+                            f"Primary outcome '{outcome}' has NaN rows — "
+                            "drop them, never impute an outcome."
+                        )
+                    for col in (group, post):
+                        vals = set(pd.unique(panel[col].dropna()))
+                        if not vals <= {0, 1}:
+                            issues.append(
+                                f"Design column '{col}' is not binary 0/1: "
+                                f"{sorted(vals)[:6]}"
+                            )
+                    cells = panel.groupby([group, post]).size()
+                    if len(cells) < 4 or int(cells.min()) < 200:
+                        issues.append(
+                            f"Degenerate 2x2 design: cell counts "
+                            f"{cells.to_dict()} (need all four cells >= 200)"
+                        )
+                    data_report["analytic_n"] = len(panel)
+                    data_report["n_train"] = len(panel)
+                    data_report["n_test"] = 0  # no split by design
+
+        if issues:
+            data_report["validation_passed"] = False
+            data_report.setdefault("warnings", []).extend(issues)
+        self._ensure_multilevel_warning(data_report)
+        return data_report
+
+
+    def _validate_items_outputs(self, data_report: dict) -> dict:
+        """psychometrics item-matrix contract (V4): split-less validation.
+
+        Checks items_analytic.csv against the research_spec's item and
+        grouping columns; items must be integer categories or NaN, never
+        imputed (missingness is expected and reported, not an error).
+        """
+        output_dir = self.ctx.output_dir
+        spec = getattr(self.ctx, "research_spec", None) or {}
+        issues: list[str] = []
+
+        path = os.path.join(output_dir, "items_analytic.csv")
+        if not os.path.exists(path):
+            issues.append("Missing output file: items_analytic.csv")
+        else:
+            try:
+                items = pd.read_csv(path)
+            except Exception as exc:
+                items = None
+                issues.append(f"Failed to read items_analytic.csv: {exc}")
+            if items is not None:
+                item_cols = spec.get("item_columns") or []
+                if spec.get("item_construction"):
+                    # log-mode WINS over any item_columns the PF refine
+                    # step invented (F-W2-PF-ITEMCOLS: its output schema
+                    # demands the field, so it fills it with junk)
+                    item_cols = []
+                if not item_cols and spec.get("item_construction"):
+                    # log-mode: items are DERIVED (t<template_id> columns)
+                    item_cols = [c for c in items.columns
+                                 if str(c).startswith("t")
+                                 and str(c) != "user_id"]
+                    if len(item_cols) < 3:
+                        issues.append(
+                            "Log-mode item matrix has fewer than 3 derived "
+                            f"item columns ({len(item_cols)})")
+                    if not os.path.exists(os.path.join(output_dir,
+                                                       "q_matrix.json")):
+                        issues.append(
+                            "Missing q_matrix.json (required in "
+                            "item_construction mode)")
+                group_cols = spec.get("grouping_vars") or []
+                missing = [c for c in item_cols + group_cols
+                           if c not in items.columns]
+                if missing:
+                    issues.append(
+                        f"items_analytic.csv missing columns: {missing}")
+                else:
+                    if len(items) < 1000:
+                        issues.append(
+                            f"Item matrix too small: {len(items)} rows < 1000")
+                    for c in item_cols:
+                        v = pd.to_numeric(items[c], errors="coerce")
+                        vals = set(v.dropna().unique())
+                        if not vals:
+                            issues.append(f"Item '{c}' has no observed values")
+                        elif not all(float(x).is_integer() and 0 <= x <= 10
+                                     for x in vals):
+                            # 0/1 = binary correctness (CDM/log data);
+                            # 1..k = Likert categories - both valid
+                            issues.append(
+                                f"Item '{c}' has non-categorical values: "
+                                f"{sorted(vals)[:6]} (expect integers 0-10; "
+                                "sentinels must be NaN)")
+                        if v.notna().mean() < 0.5:
+                            data_report.setdefault("warnings", []).append(
+                                f"Item '{c}' is {100*(1-v.notna().mean()):.0f}% "
+                                "missing - flag as limitation.")
+                    data_report["analytic_n"] = int(len(items))
+                    data_report["n_train"] = int(len(items))
+                    data_report["n_test"] = 0  # no split by design
+
+        if issues:
+            data_report["validation_passed"] = False
+            data_report.setdefault("warnings", []).extend(issues)
         self._ensure_multilevel_warning(data_report)
         return data_report
 

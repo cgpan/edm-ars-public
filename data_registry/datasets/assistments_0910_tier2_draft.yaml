@@ -1,0 +1,231 @@
+name: assistments_0910
+tier: 2
+auto_generated_by: scripts/onboard_dataset.py (Arc G G1)
+source_note: 2009-10 skill-builder; interaction-level; prediction/knowledge-tracing
+  side (Arc G G2-lite)
+n_rows: 100000
+curation_checklist:
+- assign waves / collection rounds per variable
+- 'mark protected attributes (protected_attribute: true)'
+- 'promote outcomes into an outcomes: section with rationales'
+- verify missing sentinels; map labeled-missing categories
+- confirm tier-3 exclusions (weights/IDs/flags) below
+- populate design_feasibility (cutoffs? instruments? cohorts?)
+- write dataset skills (CSV quirks, conventions) per skills/README
+tier3_exclusion_candidates:
+- order_id
+- assignment_id
+- user_id
+- assistment_id
+- problem_id
+- sequence_id
+- student_class_id
+- base_sequence_id
+- skill_id
+- teacher_id
+- school_id
+- template_id
+- answer_id
+design_feasibility:
+  running_variables: []
+  candidate_instruments: []
+  policy_timing_variables: []
+  multi_cohort_partner: null
+  itr_ready: false
+variables:
+  auto_profiled:
+  - name: order_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 20225581.0
+    - 38310202.0
+  - name: assignment_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 217900.0
+    - 291413.0
+  - name: user_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 14.0
+    - 96299.0
+  - name: assistment_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 30179.0
+    - 102044.0
+  - name: problem_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 43199.0
+    - 196456.0
+  - name: original
+    type: binary
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 0.0
+    - 1.0
+  - name: correct
+    type: binary
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 0.0
+    - 1.0
+  - name: attempt_count
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 0.0
+    - 1853.0
+  - name: ms_first_response
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - -7759575.0
+    - 84076920.0
+  - name: tutor_mode
+    type: binary
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+  - name: answer_type
+    type: categorical
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+  - name: sequence_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 5870.0
+    - 12451.0
+  - name: student_class_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 11771.0
+    - 14415.0
+  - name: position
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 1.0
+    - 295.0
+  - name: type
+    type: constant
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+  - name: base_sequence_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 5870.0
+    - 11503.0
+  - name: skill_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 1.0
+    - 40.0
+  - name: skill_name
+    type: categorical
+    pct_missing: 3.45
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+  - name: teacher_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 11158.0
+    - 69274.0
+  - name: school_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 1.0
+    - 7561.0
+  - name: hint_count
+    type: categorical
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 0.0
+    - 5.0
+  - name: hint_total
+    type: categorical
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 0.0
+    - 8.0
+  - name: overlap_time
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - -7759575.0
+    - 84076925.0
+  - name: template_id
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 29936.0
+    - 102028.0
+  - name: answer_id
+    type: continuous
+    pct_missing: 96.66
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 60698.0
+    - 315843.0
+  - name: answer_text
+    type: categorical
+    pct_missing: 11.74
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+  - name: first_action
+    type: categorical
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 0.0
+    - 2.0
+  - name: bottom_hint
+    type: binary
+    pct_missing: 87.09
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 0.0
+    - 1.0
+  - name: opportunity
+    type: continuous
+    pct_missing: 0.0
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 1.0
+    - 402.0
+  - name: opportunity_original
+    type: continuous
+    pct_missing: 0.93
+    wave: 'UNKNOWN  # CURATE: assign wave / collection round'
+    range:
+    - 1.0
+    - 402.0

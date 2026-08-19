@@ -1832,3 +1832,41 @@ canonical_research_questions:
   policy:
   - Estimate associations between school climate/counseling context and postsecondary pathways.
   - Model transcript math/science progression as mediators of STEM-related outcomes.
+
+design_feasibility:
+  # V3.2 Arc D — deterministic inputs for src/design_selector.py.
+  # Honest-empty is deliberate: the public-use file suppresses or
+  # coarsens the structures the stronger designs need. Arc Q / dataset
+  # onboarding populates these per dataset.
+  running_variables: []   # no assignment variable with a documented cutoff survives public-use coarsening
+  candidate_instruments: []   # no defensible exclusion restriction curated for the public file
+  policy_timing_variables: []   # single 2009 cohort; no policy-shock timing in-file
+  multi_cohort_partner: els_2002   # acquired 2026-07-03 (EDAT export); cross-cohort DiD now data-feasible pending Q3 harmonization
+  treatment_sequences:
+  - name: math_course_intensity_9th_to_11th
+    waves: [base_year, first_follow_up]
+    note: candidate for 2-stage dynamic regimes (Arc R stretch; not yet implemented)
+  itr_ready: true   # rich pre-treatment covariates; M6/M7 battery synthetic-gate certified
+
+item_banks:
+  # V4 psychometrics (2026-07-08). Response labels map to ordered codes
+  # 1=Strongly disagree .. 4=Strongly agree (agreement-positive). Items
+  # marked reverse: true must be recoded (5 - x) BEFORE modeling.
+  math_identity:
+    items: [S1MPERSON1, S1MPERSON2]
+    response_labels: {"Strongly agree": 4, "Agree": 3, "Disagree": 2, "Strongly disagree": 1}
+    note: 2 items - too few for a standalone CFA factor; use in 2-factor models only.
+  math_self_efficacy:
+    items: [S1MTESTS, S1MTEXTBOOK, S1MSKILLS, S1MASSEXCL]
+    response_labels: {"Strongly agree": 4, "Agree": 3, "Disagree": 2, "Strongly disagree": 1}
+    composite: X1MTHEFF
+    pct_missing_approx: 19.0   # incl. legitimate skips (not enrolled in fall math)
+  math_utility:
+    items: [S1MUSELIFE, S1MUSECLG, S1MUSEJOB]
+    response_labels: {"Strongly agree": 4, "Agree": 3, "Disagree": 2, "Strongly disagree": 1}
+    composite: X1MTHUTI
+  math_interest:
+    items: [S1MENJOYING, S1MWASTE, S1MBORING]
+    reverse: [S1MWASTE, S1MBORING]
+    response_labels: {"Strongly agree": 4, "Agree": 3, "Disagree": 2, "Strongly disagree": 1}
+    composite: X1MTHINT

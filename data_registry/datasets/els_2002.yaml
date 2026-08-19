@@ -1,0 +1,198 @@
+name: els_2002
+full_name: Education Longitudinal Study of 2002 - Public-Use BY-F3 PETS student file (CSV, EDAT export)
+source: NCES
+documentation_url: https://nces.ed.gov/surveys/els2002/
+access: public
+data_structure: multilevel
+levels:
+  student: 16197
+multilevel_note: Public-use school linkage (SCH_ID, F1SCH_ID) present but design-based
+  variance estimation requires the BRR replicate-weight file (excluded by tier-3 rules).
+csv_format_note: 'UNLIKE HSLS: this CSV stores NUMERIC CODES, not labeled values.
+  Negative integers are missing-data sentinels; continuous composites (BYSES1, BYMATHSE)
+  have VALID negative values in (-3, 0) - only exact codes <= -3 are sentinels for them.'
+waves:
+  base_year: {year: 2002, grade: 10, prefix: BY, label: 10th grade}
+  first_follow_up: {year: 2004, grade: 12, prefix: F1, label: 12th grade}
+  second_follow_up: {year: 2006, grade: null, prefix: F2, label: 2 years post-HS}
+  third_follow_up: {year: 2012, grade: null, prefix: F3, label: 8 years post-HS}
+temporal_order:
+- base_year
+- first_follow_up
+- second_follow_up
+- third_follow_up
+tier: 1
+cluster_id_variable: F1SCH_ID   # 752 real school IDs covering ~76% of students; base-year SCH_ID is 100% suppressed (-5). Cluster ID ONLY - never a predictor (tier-3).
+tier3_exclusion_rules:
+  prefix_patterns:
+  - ^W[0-9]
+  - ^BRR
+  - ^BYSTUWT
+  - ^F[1-3].*WT
+  suffix_patterns:
+  - IM$
+  - _FLG$
+  - FLAG$
+  exact_matches:
+  - STU_ID
+  - SCH_ID
+  - STRAT_ID
+  - PSU
+  - F1SCH_ID
+  - F1UNIV1
+  - F1UNIV2A
+  - F1UNIV2B
+  - F2UNIV1
+  - F2UNIV_P
+  - F3UNIV
+  - F3UNIVG10
+  category_labels: [administrative, sampling, weight, imputation_flag]
+missingness:
+  mechanism_assumption: mixed_MAR_MNAR
+  sentinel_codes_or_labels: ['-1', '-2', '-3', '-4', '-8', '-9']
+  continuous_composite_note: for BYSES1/BYMATHSE only exact codes <= -3 are sentinels
+    (valid negative scale values exist); for integer-coded variables all negatives
+    are sentinels.
+  recommended_method: multiple_imputation_or_indicator_plus_sensitivity
+variables:
+  outcomes:
+  - name: F2EVRATT
+    label: Ever attended a postsecondary institution by F2 (2006)
+    type: binary
+    wave: second_follow_up
+    pct_missing: 13.32
+    categories: ['0', '1']
+    codebook_codes: {'0': 'No', '1': 'Yes'}
+    note: Primary near-term attainment outcome; ELS analogue of HSLS X4EVRATNDCLG.
+  - name: F1TXMSTD
+    label: F1 mathematics standardized score (grade 12)
+    type: continuous
+    wave: first_follow_up
+    pct_missing: 15.74
+    range: [19.82, 79.85]
+  - name: F3ATTAINMENT
+    label: Highest level of education attained by F3 (2012)
+    type: categorical
+    wave: third_follow_up
+    pct_missing: 18.19
+    codebook_codes: {'1': 'No HS credential', '2': 'HS diploma/GED', '3': 'Some PS no credential', '4': 'Undergraduate certificate', '5': "Associate's", '6': "Bachelor's", '7': 'Post-BA certificate', '8': "Master's", '10': 'Doctoral/professional'}
+  predictors:
+    demographic:
+    - name: BYSEX
+      label: Student sex (BY composite)
+      type: binary
+      wave: base_year
+      pct_missing: 5.11
+      codebook_codes: {'1': 'Male', '2': 'Female'}
+      protected_attribute: true
+    - name: BYRACE
+      label: Student race/ethnicity composite
+      type: categorical
+      wave: base_year
+      pct_missing: 5.88
+      codebook_codes: {'1': 'Amer. Indian/Alaska Native', '2': 'Asian/Pacific Islander', '3': 'Black', '4': 'Hispanic no race', '5': 'Hispanic race specified', '6': 'Multiracial', '7': 'White'}
+      protected_attribute: true
+    - name: BYSES1
+      label: Socio-economic status composite v1
+      type: continuous
+      wave: base_year
+      pct_missing: 5.88
+      range: [-2.11, 1.82]
+      protected_attribute: true
+    - name: BYSES1QU
+      label: SES quartile (v1)
+      type: categorical
+      wave: base_year
+      pct_missing: 5.88
+      codebook_codes: {'1': 'Lowest', '2': 'Second', '3': 'Third', '4': 'Highest'}
+      protected_attribute: true
+    - name: BYINCOME
+      label: Total family income 2001 (13 bands)
+      type: categorical
+      wave: base_year
+      pct_missing: 0.0
+    family:
+    - name: BYPARED
+      label: Parents' highest level of education
+      type: categorical
+      wave: base_year
+      pct_missing: 5.41
+      codebook_codes: {'1': 'Less than HS', '2': 'HS/GED', '3': 'Some college', '4': '2-year degree', '5': 'Began 4-year', '6': "Bachelor's", '7': "Master's", '8': 'PhD/professional'}
+    academic:
+    - name: BYTXMSTD
+      label: BY mathematics standardized score (grade 10)
+      type: continuous
+      wave: base_year
+      pct_missing: 1.88
+      range: [19.38, 86.68]
+      note: Baseline achievement; ELS analogue of HSLS X1TXMTSCOR.
+    - name: BYTXRSTD
+      label: BY reading standardized score (grade 10)
+      type: continuous
+      wave: base_year
+      pct_missing: 1.88
+      range: [22.57, 78.76]
+    - name: BYSTEXP
+      label: How far in school student thinks will get (BY)
+      type: categorical
+      wave: base_year
+      pct_missing: 14.84
+      codebook_codes: {'1': 'Less than HS', '2': 'HS/GED', '3': '2yr no degree', '4': '2yr degree', '5': '4yr no degree', '6': "Bachelor's", '7': 'Advanced degree'}
+    - name: BYSCHPRG
+      label: High school program type (BY)
+      type: categorical
+      wave: base_year
+      pct_missing: 1.88
+      codebook_codes: {'1': 'General', '2': 'College prep', '3': 'Vocational'}
+    - name: BYRISKFC
+      label: Number of academic risk factors (BY)
+      type: continuous
+      wave: base_year
+      pct_missing: 26.12
+      range: [0.0, 5.0]
+    math_attitudes:
+    - name: BYMATHSE
+      label: Mathematics self-efficacy scale (BY)
+      type: continuous
+      wave: base_year
+      pct_missing: 35.53
+      range: [-1.83, 1.77]
+      note: ELS analogue of HSLS X1MTHEFF; high missingness - tiered protocol applies.
+design_feasibility:
+  running_variables: []
+  candidate_instruments: []
+  policy_timing_variables: []
+  multi_cohort_partner: hsls09_public   # 2002 g10 cohort vs HSLS 2009 g9 - cross-cohort DiD (Q3)
+  treatment_sequences: []
+  itr_ready: true
+tier2_config:
+  enabled: true
+  auto_generated_file: els_2002_tier2_draft.yaml
+  usage_policy: Tier 2 variables (4,012 auto-profiled) require rationale + temporal
+    checks + sentinel-aware missingness handling before model inclusion.
+canonical_research_questions:
+  prediction:
+  - Predict grade-12 math achievement (F1TXMSTD) from grade-10 covariates.
+  - Predict postsecondary attendance (F2EVRATT) from base-year academic, demographic, and expectation variables.
+  - Predict educational attainment by 2012 (F3ATTAINMENT) from base-year factors.
+common_pitfalls:
+- id: numeric_codes_not_labels
+  description: 'ELS CSVs store numeric codes; naive get_dummies on raw codes produces
+    meaningless column names; naive to_numeric is safe (unlike HSLS) but sentinel
+    codes must be mapped to missing FIRST.'
+  check: Map sentinels per the missingness block before any imputation or encoding.
+  severity: critical
+- id: continuous_composite_sentinels
+  description: BYSES1/BYMATHSE have valid negative values; treating all negatives
+    as missing drops half the SES distribution.
+  check: Only exact codes <= -3 are sentinels for continuous composites.
+  severity: critical
+
+item_banks:
+  # V4 psychometrics. ELS stores integer codes 1-4 directly; negative
+  # codes are sentinels -> NaN. Composition verified from the codebook's
+  # BYMATHSE SAS derivation.
+  math_self_efficacy:
+    items: [BYS89A, BYS89B, BYS89L, BYS89R, BYS89U]
+    response_codes: [1, 2, 3, 4]
+    composite: BYMATHSE

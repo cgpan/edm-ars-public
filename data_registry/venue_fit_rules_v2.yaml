@@ -1,0 +1,944 @@
+# Arc T -- venue-fit rule table, v2. DERIVED BLIND.
+#
+# ASCII only (a test enforces it).
+#
+# WHY v2 EXISTS
+# -------------
+# The V2 backtest of the v1 table came back NULL, not positive: 2 of the 7
+# v1 rules cite this project's own realized gate scores in their evidence,
+# and on n=24 the external-only rules measured rho = +0.002 while the
+# in-sample-only rules measured +0.349. All of the apparent signal came
+# from rules written knowing the answer. Design commitment C3 requires the
+# tournament to produce a defensible ordering with every LLM verdict
+# removed, so the deterministic table has to be re-derived from evidence
+# that could not have been contaminated by our outcomes.
+#
+# This file is that re-derivation. It was written WITHOUT reading:
+#   evaluation/ledger.json, runs/** (gate_summary.json, lsar_review/**,
+#   scores.json, research_spec.json, REPORT.md, FINDINGS.md),
+#   docs/v5_arc_t_v2_backtest_verdict.md, or the v1 rules tagged
+#   provenance: in_sample.
+# Every rule below is provenance: external.
+#
+# EVIDENCE BASE
+# -------------
+# The anchor corpus of PUBLISHED papers only: paper.md + metadata.json
+# under $LSAR_HOME/outputs. LSAR's own reviews of those papers
+# (scores.json, review.json, LSAR_Review_Report.*) were NOT read and are
+# NOT used -- the corpus supplies "what these venues publish", nothing
+# about how anything scored.
+#
+# Corpus construction (reproduced by scripts/derive_venue_rules.py):
+#   - a directory contributes iff it holds BOTH paper.md and metadata.json
+#     (10 of the 50 directories are empty aborted ingests and drop out,
+#     including jla_9743, the editorial named in the task brief)
+#   - duplicates removed by sha1 of paper.md (several papers were ingested
+#     twice under different timestamps)
+#   - venue from the directory prefix: jedm_* -> JEDM, jla_* -> JLA,
+#     everything else (all *_20260703_*) -> EDM 2024
+#   - result: n = 34 anchors, EDM 15 / JEDM 10 / JLA 9
+#
+# Directory stems are NOT trusted for semantics: the EDM stems are rotated
+# relative to their contents (the paper filed under
+# dkt_interpretability_* is the theory-building/DBR paper). All measurement
+# reads paper.md and metadata.json text, never the stem.
+#
+# WHAT A COUNT MEANS, AND WHAT IT DOES NOT
+# ----------------------------------------
+# Every anchor is published. There is no negative class in this corpus, so
+# no rule here is a fitted discriminator. A count is a BASE RATE in
+# published work. Rules are derived from extreme base rates in both
+# directions and nothing else. No outcome variable was consulted, because
+# none was visible.
+#
+# DELTA MAGNITUDES ARE CONVENTIONAL, NOT CALIBRATED.
+# The signs and the relative ordering of magnitudes follow from the counts
+# via the fixed policy below. The absolute numbers (0.5 / 1.0 / 1.5) are a
+# convention chosen so a single rule moves a candidate about one rank and
+# no rule can dominate. They were not tuned against anything -- tuning was
+# impossible here by construction. Whoever validates this table should
+# expect to re-scale the magnitudes and should treat only the signs and
+# the ordering as derived.
+
+schema_version: "2.0"
+table_id: venue_fit_rules_v2
+derived_at: "2026-08-03"
+provenance: external
+default_venue: EDM
+audit_script: scripts/derive_venue_rules.py
+
+corpus:
+  path: "${LSAR_HOME}/outputs"
+  unit: published_paper
+  n_total: 34
+  n_by_venue: {EDM: 15, JEDM: 10, JLA: 9}
+  requires_files: [paper.md, metadata.json]
+  dedupe: sha1_of_paper_md
+  excluded_dirs: [jla_9743_20260710_171001]
+  excluded_reason: >-
+    Editorial, named as out of scope in the task brief. It also has no
+    paper.md, so it drops out of corpus construction independently.
+  fields:
+    abstract: metadata.json -> abstract, whitespace-normalized, lowercased
+    full_text: paper.md, whitespace-normalized, lowercased
+
+derivation_policy:
+  # Stated once, applied uniformly. A test asserts every shipped rule
+  # obeys it, so a rule cannot be smuggled in with an off-policy delta.
+  field_choice:
+    negative_rules: >-
+      Measured on full_text. A feature absent from an entire published
+      paper is stronger evidence of venue misfit than one merely absent
+      from the abstract. Where the abstract count would yield a LARGER
+      magnitude, the full_text count wins (conservative).
+    positive_rules: >-
+      Measured on the abstract. A positive rule claims the feature is a
+      CONTRIBUTION, and contributions are stated in abstracts. Full-text
+      presence of a term is not a contribution claim: 'generaliz*' occurs
+      in 29 of 34 full texts, nearly all of it in limitations or related
+      work, versus 7 of 34 abstracts.
+  negative_band:
+    - {count: 0, delta: -1.5}
+    - {count_min: 1, count_max: 3, delta: -1.0}
+    - {count_min: 4, delta: null, note: "no rule; not rare enough in published work"}
+  positive_band:
+    - {count_min: 6, count_max: 22, delta: 0.5}
+    - {count_max: 5, delta: null, note: "no rule; too few independent published exemplars"}
+    - {count_min: 23, delta: null, note: "no rule; fires on more than two thirds of published work"}
+  venue_override:
+    rule: >-
+      A venue whose own anchor count is >= 6 gets +1.0 at that venue
+      instead of the corpus-wide +0.5. Venues below 6 hits keep the
+      corpus-wide delta. The floor of 6 is the same floor the positive
+      band uses; it exists so a venue-specific delta never rests on two
+      or three papers.
+  disclosure: >-
+    The band thresholds were fixed after the counts were measured but
+    before any rule was selected, and could not have been fitted to an
+    outcome because no outcome was visible. They are conventional.
+
+# Idea-card text fields the predicates read. Card fields are looked up
+# first, then the compiled spec.
+card_text_fields: &card_text
+  - research_question
+  - why_it_matters
+  - what_we_would_do
+  - what_counts_as_the_result
+  - expected_contribution
+  - rationale_for_method_set
+
+# Datasets currently runnable (src/ideation/feasibility.py DATASET_TASK_MATRIX).
+# Recorded here so the dataset-keyed predicate is auditable.
+known_datasets: [hsls09_public, els_2002, did_els_hsls_panel, assistments_0910]
+known_task_types: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+
+# Named pattern sets used as contrast probes. Kept here so every count
+# quoted in an evidence string is recomputable from this file alone.
+probe_library:
+  instrumented_platform_or_log: &probe_log
+    - 'log data'
+    - 'log files'
+    - 'clickstream'
+    - 'learning management system'
+    - '\blms\b'
+    - 'intelligent tutoring system'
+    - 'keystroke'
+    - 'chat log'
+    - '\bmooc\b'
+    - 'online textbook'
+    - 'tutoring system'
+    - 'trace data'
+    - 'interaction data'
+    - 'learning platform'
+  learner_authored_text_or_speech:
+    - 'essays'
+    - 'transcript'
+    - 'student writing'
+    - 'open-ended response'
+    - 'reflections'
+    - 'dialog'
+    - 'discussion post'
+  survey_or_questionnaire:
+    - 'questionnaire'
+    - 'survey response'
+    - 'self-report'
+  administrative_records:
+    - 'institutional record'
+    - 'registrar'
+    - 'admissions application'
+    - 'student information system'
+    - 'gradebook'
+
+venues:
+  EDM:
+    full_name: "International Conference on Educational Data Mining"
+    n_anchors: 15
+  JEDM:
+    full_name: "Journal of Educational Data Mining"
+    n_anchors: 10
+  JLA:
+    full_name: "Journal of Learning Analytics"
+    n_anchors: 9
+  # NOTE: v1 carries an ethics multiplier (EDM 1.0 / JEDM 0.5 / JLA 0.6).
+  # That weighting is NOT reproducible from this corpus and is therefore
+  # absent from v2. Measured: fairness/equity/bias/disparity/inclusivity
+  # language in abstracts is EDM 2/15, JEDM 3/10, JLA 3/9 -- flat, and if
+  # anything it runs the other way. See rejected_rules[venue_ethics_multiplier].
+
+rules:
+
+  # ---------------------------------------------------------------- VF2-01
+  - code: VF2-01
+    name: observational_causal_effect_as_the_contribution
+    provenance: external
+    sign: negative
+    delta: -1.5
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: >-
+      The idea's stated result is an observational causal effect estimate.
+      No paper in the anchor corpus offers one.
+    evidence: >-
+      0 of 34 anchors mention propensity score, difference-in-differences,
+      regression discontinuity, instrumental variable, doubly robust,
+      inverse probability weighting, average treatment effect, causal
+      forest, marginal structural model, or synthetic control ANYWHERE in
+      full text -- not in methods, not in related work. 0 of 34 abstracts
+      do either. By contrast the corpus is saturated with associational
+      language: 'associat*' in 32 of 34 full texts, 'correlat*' in 18 of
+      34. When these venues do address causation they do it by design, not
+      by observational adjustment.
+    caveats:
+      - >-
+        DETECTOR NOT VALIDATED ON ANCHORS. It fires on 0 of 34, so the
+        corpus cannot demonstrate that it fires correctly on real prose.
+        A synthetic positive control is asserted in
+        tests/test_venue_rules_v2.py. This is the highest-variance rule in
+        the table and should be the first one a validator attacks.
+      - >-
+        The zero is not an ingestion artifact: near-neighbour probes do
+        fire in the same corpus ('causal' 6/34, 'causal inference' 2/34,
+        'counterfactual' 1/34, 'quasi-experiment' 1/34, 'confound*' 4/34).
+        The lexical field is present; the estimator machinery is not.
+      - >-
+        This measures PUBLISHED PRACTICE, not declared scope. The EDM 2026
+        venue_criteria file explicitly lists 'causal inference' among its
+        topics. A validator may legitimately conclude the delta is too
+        harsh on that ground; the count is what it is.
+      - >-
+        This rule is UNCONDITIONAL. It carries no escape hatch for a
+        second contribution, because no such carve-out is derivable from a
+        corpus in which the feature never appears at all.
+      - >-
+        CONVERGENCE DISCLOSURE. v1 carries an in-sample rule pointed at
+        roughly the same target. I was exposed to that rule's text through
+        docs/v5_arc_t_spec.md, which the task brief required me to read
+        first. The evidence here is independent (corpus counts, no gate
+        scores) and mechanically recomputable, but the CHOICE to measure
+        this feature may not be independent. Treat the convergence as
+        possibly contaminated, not as confirmation.
+    measurement:
+      field: full_text
+      observed: {EDM: 0, JEDM: 0, JLA: 0, total: 0, n: 34}
+      patterns:
+        - 'propensity score'
+        - 'difference-in-differences'
+        - 'difference in differences'
+        - 'regression discontinuity'
+        - 'instrumental variable'
+        - 'doubly robust'
+        - 'inverse probability weight'
+        - 'average treatment effect'
+        - 'causal forest'
+        - 'marginal structural model'
+        - 'synthetic control'
+      cross_field_check:
+        field: abstract
+        observed_total: 0
+        note: "same magnitude either way; full_text declared per policy"
+      neighbour_controls:
+        field: full_text
+        probes:
+          '\bcausal\b': 6
+          'causal inference': 2
+          'counterfactual': 1
+          'quasi-experiment': 1
+          'confound': 4
+          '\bassociat': 32
+          '\bcorrelat': 18
+    predicate:
+      kind: any_of
+      clauses:
+        - kind: task_type_in
+          values: [causal_soo, causal_itr, causal_did]
+        - kind: field_regex
+          fields: *card_text
+          patterns:
+            - 'propensity score'
+            - 'difference-in-differences'
+            - 'difference in differences'
+            - 'regression discontinuity'
+            - 'instrumental variable'
+            - 'doubly robust'
+            - 'inverse probability weight'
+            - 'average treatment effect'
+            - 'causal effect of'
+            - 'causal forest'
+    corpus_separation: "none"
+    detector_validated_on_anchors: false
+    predicate_strictness: same_as_measurement
+
+  # ---------------------------------------------------------------- VF2-02
+  - code: VF2-02
+    name: national_survey_extract_as_the_data_source
+    provenance: external
+    sign: negative
+    delta: -1.0
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: >-
+      The idea's data is a secondary extract from a national education
+      survey. These venues publish instrumented learning-environment data.
+    evidence: >-
+      2 of 34 anchors reference a national survey extract (HSLS, NELS,
+      PISA, NAEP, ECLS, 'nationally representative', NCES, 'education
+      longitudinal study') anywhere in full text. Against that: 25 of 34
+      use instrumented platform or log data (log files, clickstream, LMS,
+      tutoring system, keystroke, chat log, MOOC, trace data), 23 of 34 use
+      learner-authored text or speech, 13 of 34 use a survey or
+      questionnaire the authors themselves administered, and 2 of 34 use
+      institutional administrative records. The corpus's default unit of
+      observation is a learner interacting with an instrumented system,
+      not a row in a national panel.
+    caveats:
+      - >-
+        The complementary positive rule ('uses instrumented log data',
+        25/34) was considered and REJECTED: 25/34 exceeds the positive
+        band ceiling of 22, so it would fire on nearly all published work.
+        The rare pole carries the evidence; the common pole does not.
+        Both orderings are equivalent up to a constant, so nothing is lost.
+      - >-
+        SLATE ASYMMETRY. This predicate fires on 3 of the 4 currently
+        runnable datasets (hsls09_public, els_2002, did_els_hsls_panel)
+        and not on assistments_0910. On a slate drawn only from the three
+        survey datasets it degenerates to a constant offset and cannot
+        reorder anything. Its discriminative power is entirely a function
+        of slate composition, which was not visible during derivation.
+    measurement:
+      field: full_text
+      observed: {EDM: 2, JEDM: 0, JLA: 0, total: 2, n: 34}
+      patterns:
+        - '\bhsls\b'
+        - '\bnels\b'
+        - '\bpisa\b'
+        - '\bnaep\b'
+        - '\becls\b'
+        - 'nationally representative'
+        - 'national center for education statistics'
+        - 'education longitudinal study'
+      cross_field_check:
+        field: abstract
+        observed_total: 0
+        note: "abstract count 0 would give -1.5; full_text -1.0 wins per policy"
+      contrast_probes:
+        field: full_text
+        from: probe_library
+        expected:
+          instrumented_platform_or_log: 25
+          learner_authored_text_or_speech: 23
+          survey_or_questionnaire: 13
+          administrative_records: 2
+    predicate:
+      kind: any_of
+      clauses:
+        - kind: dataset_in
+          values: [hsls09_public, els_2002, did_els_hsls_panel]
+        - kind: field_regex
+          fields: *card_text
+          patterns:
+            - '\bhsls\b'
+            - '\bnels\b'
+            - '\bpisa\b'
+            - '\bnaep\b'
+            - '\becls\b'
+            - 'nationally representative'
+            - 'education longitudinal study'
+    corpus_separation: "separated"
+    detector_validated_on_anchors: true
+    predicate_strictness: same_as_measurement
+
+  # ---------------------------------------------------------------- VF2-03
+  - code: VF2-03
+    name: shap_or_feature_importance_as_the_contribution
+    provenance: external
+    sign: negative
+    delta: -1.0
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: >-
+      The idea offers a feature-importance ranking as what the reader
+      takes away. Three anchors touch this machinery; none headlines it.
+    evidence: >-
+      3 of 34 anchors mention SHAP, Shapley values, feature importance,
+      permutation importance, or variable importance anywhere in full
+      text, and 0 of 34 mention any of them in the abstract. So the
+      technique is not unknown to these venues -- it is simply never
+      promoted to a contribution.
+    caveats:
+      - >-
+        The abstract count of 0 would license -1.5 under the negative
+        band. The full_text count of 3 licenses -1.0, and the conservative
+        field policy takes the smaller magnitude.
+    measurement:
+      field: full_text
+      observed: {EDM: 2, JEDM: 0, JLA: 1, total: 3, n: 34}
+      patterns:
+        - '\bshap\b'
+        - 'shapley'
+        - 'feature importance'
+        - 'permutation importance'
+        - 'variable importance'
+      cross_field_check:
+        field: abstract
+        observed_total: 0
+        note: "abstract count 0 would give -1.5; full_text -1.0 wins per policy"
+    predicate:
+      kind: field_regex
+      fields: *card_text
+      patterns:
+        - '\bshap\b'
+        - 'shapley'
+        - 'feature importance'
+        - 'permutation importance'
+        - 'variable importance'
+        - 'which predictors matter most'
+        - 'rank the predictors'
+    corpus_separation: "separated"
+    detector_validated_on_anchors: true
+    predicate_strictness: same_as_measurement
+
+  # ---------------------------------------------------------------- VF2-04
+  - code: VF2-04
+    name: llm_or_nlp_as_a_measurement_instrument
+    provenance: external
+    sign: positive
+    delta: 0.5
+    venue_delta: {JEDM: 1.0}
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: >-
+      The idea uses a language model or text classifier to measure
+      something about learners from their own words or interactions.
+      This is the corpus's single most common contribution shape.
+    evidence: >-
+      15 of 34 abstracts announce a language model or text classifier as
+      part of the contribution (GPT, ChatGPT, BERT, Llama, 'large language
+      model', 'generative AI', 'language model'). Strongly
+      venue-conditional: JEDM 8 of 10, EDM 5 of 15, JLA 2 of 9. Only JEDM
+      clears the 6-anchor floor, so only JEDM gets the +1.0 override.
+      Full-text prevalence is 22 of 34, which would exceed the positive
+      band ceiling; the abstract count is the contribution-level measure
+      and is the one used.
+    caveats:
+      - >-
+        SLATE VARIANCE UNVERIFIED. None of the five current task types
+        (prediction, causal_soo, causal_itr, causal_did, psychometrics)
+        produces an LLM-as-instrument study, so this rule may fire on zero
+        candidates and contribute nothing to the ordering. It is shipped
+        because the corpus supports it and because it prices a direction
+        the generator cannot currently go. If a slate never triggers it,
+        that is information about the generator, not a defect in the rule.
+    measurement:
+      field: abstract
+      observed: {EDM: 5, JEDM: 8, JLA: 2, total: 15, n: 34}
+      patterns:
+        - '\bgpt'
+        - 'large language model'
+        - '\bllms?\b'
+        - 'chatgpt'
+        - '\bbert\b'
+        - 'llama'
+        - 'generative ai'
+        - '\bgenai\b'
+        - '\bgai\b'
+        - 'language model'
+      cross_field_check:
+        field: full_text
+        observed_total: 22
+        note: "22 is at the band ceiling; abstract is the contribution-level field"
+    predicate:
+      kind: field_regex
+      fields: *card_text
+      patterns:
+        - 'large language model'
+        - '\bllms?\b'
+        - '\bgpt'
+        - 'chatgpt'
+        - '\bbert\b'
+        - 'language model'
+        - 'text classifier'
+        - 'automated coding of'
+        - 'code student (writing|responses|essays|reflections)'
+    corpus_separation: "separated"
+    detector_validated_on_anchors: true
+    predicate_strictness: same_as_measurement
+
+  # ---------------------------------------------------------------- VF2-05
+  - code: VF2-05
+    name: benchmarked_against_human_or_expert_judgement
+    provenance: external
+    sign: positive
+    delta: 0.5
+    venue_delta: {JEDM: 1.0}
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: >-
+      The result is an automated measure checked against human coders or
+      expert judgement, with agreement reported.
+    evidence: >-
+      9 of 34 abstracts state agreement with humans or experts as part of
+      the result (human coders, inter-rater, Cohen's kappa, Krippendorff,
+      human expert/evaluation, 'against human', human-level, human-AI,
+      human-in-the-loop). Venue split JEDM 6 of 10, JLA 3 of 9, EDM 0 of
+      15; only JEDM clears the 6-anchor floor. This is a journal habit
+      more than a conference one, and it is not an abstract-length
+      artifact: median abstract length is EDM 221 words, JEDM 210, JLA
+      279. Full-text prevalence is 18 of 34 (EDM 5/15), so the conference
+      does the work without claiming it as the contribution.
+    caveats:
+      - >-
+        EDM measures 0 of 15 at abstract level. Under the negative band a
+        0 count would license a negative rule, but this is a venue-level
+        subcount on n=15, not a corpus-level zero, and the same feature is
+        present in 5 of 15 EDM full texts. No negative rule is derived;
+        EDM simply keeps the corpus-wide +0.5.
+    measurement:
+      field: abstract
+      observed: {EDM: 0, JEDM: 6, JLA: 3, total: 9, n: 34}
+      patterns:
+        - 'human coder'
+        - 'inter-rater'
+        - "cohen.s kappa"
+        - 'krippendorff'
+        - 'human rater'
+        - 'human expert'
+        - 'human evaluation'
+        - 'expert evaluation'
+        - 'against human'
+        - 'human-level'
+        - 'human judgment'
+        - 'human-ai'
+        - 'human-in-the-loop'
+        - 'human review'
+      cross_field_check:
+        field: full_text
+        observed_total: 18
+    predicate:
+      kind: field_regex
+      fields: *card_text
+      patterns:
+        - 'human coder'
+        - 'inter-rater'
+        - "cohen.s kappa"
+        - 'krippendorff'
+        - 'human expert'
+        - 'expert evaluation'
+        - 'against human'
+        - 'human-level'
+        - 'expert-labelled'
+        - 'expert-labeled'
+        - 'validated against (human|expert)'
+    corpus_separation: "separated"
+    detector_validated_on_anchors: true
+    predicate_strictness: same_as_measurement
+
+  # ---------------------------------------------------------------- VF2-06
+  - code: VF2-06
+    name: cross_context_generalization_or_replication_claim
+    provenance: external
+    sign: positive
+    delta: 0.5
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: >-
+      The result is a test of whether something holds in a second context,
+      dataset, institution, or cohort -- not only in the one at hand.
+    evidence: >-
+      7 of 34 abstracts make a cross-context generalization, external
+      validation, or replication claim (EDM 3, JEDM 3, JLA 1). No venue
+      clears the 6-anchor floor, so there is no venue override. The
+      abstract is the correct field by a wide margin here: the same
+      pattern set matches 29 of 34 FULL texts, almost entirely in
+      limitations and related work, which is exactly the kind of
+      false-positive the field policy exists to prevent.
+    caveats:
+      - >-
+        The v1 table carries a hand-written carve-out excluding the term
+        'cross-cohort' from transfer language, justified by how it behaved
+        on two of this project's own shipped specs. That carve-out was
+        derived in-sample and is deliberately NOT imported here. My
+        pattern set never contained 'cross-cohort', so the exclusion is
+        moot, but the omission is intentional and should stay intentional.
+    measurement:
+      field: abstract
+      observed: {EDM: 3, JEDM: 3, JLA: 1, total: 7, n: 34}
+      patterns:
+        - 'generaliz'
+        - 'external dataset'
+        - 'external validation'
+        - 'across institution'
+        - 'across (diverse|multiple) (context|institution|setting)'
+        - 'cross-context'
+        - '\breplicat'
+        - 'second dataset'
+        - 'another dataset'
+        - 'transfer'
+      cross_field_check:
+        field: full_text
+        observed_total: 29
+        note: "29/34 in full text is the false-positive the field policy prevents"
+    predicate:
+      kind: field_regex
+      fields: *card_text
+      patterns:
+        - 'generaliz'
+        - 'external dataset'
+        - 'external validation'
+        - 'across institution'
+        - 'across (diverse|multiple) (context|institution|setting)'
+        - 'cross-context'
+        - '\breplicat'
+        - 'second dataset'
+        - 'another dataset'
+        - 'transfers? to'
+    corpus_separation: "separated"
+    detector_validated_on_anchors: true
+    predicate_strictness: stricter_than_measurement
+    strictness_note: >-
+      The bare token 'transfer' is dropped from the predicate. On a
+      120-word idea card it matches unrelated uses (transfer of credit,
+      knowledge transfer as a learning construct) that the measurement,
+      running over full published prose with surrounding context, tolerates.
+
+  # ---------------------------------------------------------------- VF2-07
+  - code: VF2-07
+    name: names_a_practice_or_decision_the_result_would_change
+    provenance: external
+    sign: positive
+    delta: 0.5
+    venue_delta: {JLA: 1.0}
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: >-
+      The abstract-level contribution names a specific practice, decision,
+      or design that would change, rather than stopping at understanding.
+    evidence: >-
+      12 of 34 abstracts name a practice, decision, or design artifact
+      that the result feeds (actionable, dashboard, course design,
+      admissions, advising, instructional design, 'informs
+      instruction/curriculum/teaching/program/course/practice',
+      practitioner, recommendation, design principle, heuristic,
+      educators, intervention). Venue split JLA 6 of 9, EDM 5 of 15, JEDM
+      1 of 10; only JLA clears the 6-anchor floor. Full-text prevalence is
+      33 of 34, i.e. everyone gestures at practice somewhere; only a third
+      put it in the contribution.
+    caveats:
+      - >-
+        HIGH RISK OF FIRING ON EVERYTHING. The measurement pattern set is
+        broad by design (it has to be, to establish the base rate), but
+        applied to idea cards it would match most research questions this
+        project generates. The predicate is therefore deliberately
+        stricter than the measurement -- see strictness_note. If the rule
+        still fires on every candidate in practice, it is a constant and
+        should be dropped, not re-tuned.
+    measurement:
+      field: abstract
+      observed: {EDM: 5, JEDM: 1, JLA: 6, total: 12, n: 34}
+      patterns:
+        - 'actionable'
+        - 'dashboard'
+        - 'course design'
+        - 'admission'
+        - 'advising'
+        - 'instructional design'
+        - 'inform(s|ed)? (instruct|curricul|teach|program|course|practice)'
+        - 'practition'
+        - 'recommendation'
+        - 'implications for practice'
+        - 'we recommend'
+        - 'design principle'
+        - 'heuristic'
+        - 'educators'
+        - 'intervention'
+      cross_field_check:
+        field: full_text
+        observed_total: 33
+        note: "33/34 in full text; the abstract is the only field that separates"
+    predicate:
+      kind: field_regex
+      fields: *card_text
+      patterns:
+        - 'course placement'
+        - 'placement decision'
+        - 'admissions decision'
+        - 'advising'
+        - 'course design'
+        - 'curriculum revision'
+        - 'instructional design'
+        - 'dashboard'
+        - 'who to (target|flag|contact|enrol|enroll)'
+        - 'targeting decision'
+        - 'screening decision'
+        - 'resource allocation'
+        - 'design principle'
+    corpus_separation: "separated"
+    detector_validated_on_anchors: true
+    predicate_strictness: stricter_than_measurement
+    strictness_note: >-
+      The predicate drops the generic tokens (actionable, practitioner,
+      recommendation, intervention, educators, implications for practice)
+      and keeps only named decisions. Those generic tokens appear in
+      virtually every research question this project writes, so keeping
+      them would turn a +0.5 into a constant that cannot reorder anything.
+      This makes the predicate strictly narrower than the base rate it
+      cites: the 12/34 establishes that naming a decision is a published
+      contribution shape, not that these exact 13 phrases are.
+
+  # ---------------------------------------------------------------- VF2-08
+  - code: VF2-08
+    name: qualitative_or_human_in_the_loop_analytic_workflow
+    provenance: external
+    sign: positive
+    delta: 0.5
+    venue_delta: {JEDM: 1.0}
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: >-
+      The contribution is an analytic workflow in which humans and
+      automation each do part of the interpretation.
+    evidence: >-
+      10 of 34 abstracts describe a qualitative or human-in-the-loop
+      analytic workflow (thematic analysis, focus group, codebook,
+      'qualitative', interview, human-in-the-loop, human-AI
+      collaboration/partnership/workflow). Venue split JEDM 7 of 10, EDM 1
+      of 15, JLA 2 of 9; only JEDM clears the 6-anchor floor. This is the
+      largest single venue asymmetry in the table.
+    caveats:
+      - >-
+        SLATE VARIANCE UNVERIFIED, same as VF2-04. None of the five
+        current task types produces a qualitative or human-in-the-loop
+        study, so this rule may never fire. Shipped because the corpus
+        supports it; review it if a slate never triggers it.
+    measurement:
+      field: abstract
+      observed: {EDM: 1, JEDM: 7, JLA: 2, total: 10, n: 34}
+      patterns:
+        - 'thematic analysis'
+        - 'focus group'
+        - 'codebook'
+        - 'qualitative'
+        - 'interview'
+        - 'human-in-the-loop'
+        - 'human-ai (collaboration|partnership|workflow)'
+      cross_field_check:
+        field: full_text
+        observed_total: 25
+    predicate:
+      kind: field_regex
+      fields: *card_text
+      patterns:
+        - 'thematic analysis'
+        - 'focus group'
+        - 'codebook'
+        - 'qualitative coding'
+        - 'human-in-the-loop'
+        - 'human-ai (collaboration|partnership|workflow)'
+        - 'human oversight of'
+    corpus_separation: "separated"
+    detector_validated_on_anchors: true
+    predicate_strictness: stricter_than_measurement
+    strictness_note: >-
+      The predicate drops the bare tokens 'qualitative' and 'interview',
+      which on a short card match incidental mentions rather than a
+      workflow claim.
+
+# --------------------------------------------------------------------------
+# REJECTED RULES
+# --------------------------------------------------------------------------
+# Measured, then dropped. Recorded with their counts so the rejection is
+# auditable and nobody re-derives them by accident. The audit script
+# recomputes every count in this block too.
+
+rejected_rules:
+
+  - name: predictive_performance_metric_as_the_only_result
+    considered_sign: negative
+    rejected_because: >-
+      Not rare enough in published work. A negative rule must clear the
+      negative band on its declared field, and the declared field for a
+      negative rule is full_text, where the count is 19 of 34. The feature
+      is only rare at the abstract level (4 of 34), i.e. what is rare is
+      PROMOTING the metric to the headline -- and 'is it the headline' is
+      not mechanically separable from 'is it mentioned' without a judged
+      call, which is out of scope for a deterministic table.
+    measurement:
+      field: full_text
+      observed: {EDM: 9, JEDM: 6, JLA: 4, total: 19, n: 34}
+      also_abstract: {EDM: 1, JEDM: 0, JLA: 3, total: 4}
+      patterns:
+        - '\bauc\b'
+        - 'area under'
+        - '\bf1\b'
+        - '\brmse\b'
+        - 'predictive accuracy'
+        - 'accuracy of \d'
+        - '\d\d(\.\d+)?% accuracy'
+        - 'achiev\w* .{0,20}accuracy'
+    note: >-
+      This is a substantive disagreement with the v1 table, which penalizes
+      an AUC-only prediction contribution. The blind corpus does not
+      support that penalty at full-text level. It may still be correct;
+      it is simply not derivable from what these venues publish.
+
+  - name: instrumented_platform_or_log_data
+    considered_sign: positive
+    rejected_because: >-
+      25 of 34 exceeds the positive band ceiling of 22. A rule that fires
+      on nearly three quarters of published work carries little
+      information. Its rare complement is shipped instead as VF2-02.
+    measurement:
+      field: full_text
+      observed: {EDM: 11, JEDM: 6, JLA: 8, total: 25, n: 34}
+      patterns: *probe_log
+
+  - name: psychometric_measurement_model
+    considered_sign: positive
+    rejected_because: >-
+      3 of 34 abstracts is below the 6-anchor floor for a positive rule.
+      Full-text prevalence is 10 of 34, but full text is not the
+      contribution-level field. Measurement models exist in this corpus;
+      there are not enough of them, stated as the contribution, to price
+      the feature.
+    measurement:
+      field: abstract
+      observed: {EDM: 0, JEDM: 1, JLA: 2, total: 3, n: 34}
+      also_full_text_total: 10
+      patterns:
+        - 'item response theory'
+        - '\birt\b'
+        - 'confirmatory factor'
+        - '\bcfa\b'
+        - 'latent profile'
+        - 'latent class'
+        - 'measurement invariance'
+        - 'psychometric'
+        - '\brasch\b'
+        - 'reliability and validity'
+
+  - name: venue_ethics_multiplier
+    considered_sign: multiplier
+    rejected_because: >-
+      Not reproducible from the corpus. Fairness/equity/bias/disparity/
+      inclusivity language in abstracts is EDM 2 of 15, JEDM 3 of 10, JLA
+      3 of 9 -- flat within noise, and pointing the opposite way to v1's
+      EDM 1.0 / JEDM 0.5 / JLA 0.6 weighting. The venue_criteria YAMLs
+      cannot supply it either: edm_2026.yaml carries seven weighted review
+      dimensions of which none is named Ethics, while jedm_2026.yaml and
+      jla_2026.yaml carry no review_dimensions block at all and both still
+      declare calibrated: false. v2 therefore ships no ethics multiplier.
+    measurement:
+      field: abstract
+      observed: {EDM: 2, JEDM: 3, JLA: 3, total: 8, n: 34}
+      patterns:
+        - '\bfairness\b'
+        - '\bequit'
+        - '\bbias(ed|es)?\b'
+        - 'protected attribute'
+        - '\binclusiv'
+        - '\bdisparit'
+        - 'demographic'
+
+  - name: contribution_bundle_size
+    considered_sign: positive
+    rejected_because: >-
+      MEASUREMENT UNRELIABLE. The task brief asked how many distinct
+      contributions each anchor bundles. Counting six contribution types
+      lexically over abstracts gives a distribution of
+      {0 types: 3, 1: 15, 2: 8, 3: 7, 4: 1} anchors, mean 1.20 at EDM
+      versus 2.00 at both journals, with 16 of 34 carrying two or more.
+      The direction is suggestive -- journals bundle more -- but the
+      detector is visibly lossy: several abstracts are truncated
+      mid-sentence in metadata.json, and the 'empirical' type fires on
+      only 6 of 34 despite nearly every anchor reporting a sample. A rule
+      priced off a count this noisy would be dressing noise as evidence,
+      so none is shipped. This is a NEGATIVE RESULT, not an omission.
+    measurement:
+      field: abstract
+      bundle_distribution: {0: 3, 1: 15, 2: 8, 3: 7, 4: 1}
+      mean_by_venue: {EDM: 1.20, JEDM: 2.00, JLA: 2.00}
+      at_least_two: 16
+      type_counts: {method: 16, resource: 8, empirical: 6, validation: 7, generalization: 7, guidance: 12}
+      type_patterns:
+        method:
+          - 'we (propose|introduce|present|develop|design|derive|offer)'
+          - 'this (paper|study) (presents|introduces|proposes|offers)'
+          - 'novel (method|metric|framework|dataset|approach|analytic)'
+          - 'we (apply|employ) (a |our )?(novel|hybrid|new)'
+        resource:
+          - 'github\.com'
+          - 'osf\.io'
+          - 'publicly available'
+          - 'open-access'
+          - 'code (is |are )?available'
+          - 'we release'
+          - 'we make (the|our|these)'
+          - 'available (online )?(here|at)'
+          - 'supplemental materials'
+        empirical:
+          - '\d[\d,]*\s+(students|participants|learners|teachers|courses|essays|responses|turns|samples|instructors|videos|groups)'
+          - '\bn\s?=\s?\d'
+          - '\(\s?n\s?='
+          - 'data from \d'
+        validation:
+          - 'human coder'
+          - 'inter-rater'
+          - "cohen.s kappa"
+          - 'krippendorff'
+          - 'human rater'
+          - 'human expert'
+          - 'human evaluation'
+          - 'expert evaluation'
+          - 'against human'
+          - 'human-level'
+          - 'human judgment'
+        generalization:
+          - 'generaliz'
+          - 'external dataset'
+          - 'across institution'
+          - 'cross-context'
+          - 'external validation'
+          - '\breplicat'
+          - 'second (dataset|context)'
+          - 'across (diverse|multiple) (context|institution|setting)'
+        guidance:
+          - 'recommendation'
+          - 'we recommend'
+          - 'design principle'
+          - 'heuristic'
+          - 'best practice'
+          - 'implications for'
+          - 'guidance'
+          - 'practical (tool|implication)'
+          - 'informed subsequent revision'
+          - 'inform(s|ed)? (course|curricul|instruct|program)'
+
+# --------------------------------------------------------------------------
+# INTEGRATION NOTES (for whoever owns src/ideation/venue_fit.py)
+# --------------------------------------------------------------------------
+# This file is NOT drop-in loadable by the v1 scorer. v1 keys each rule to
+# a named Python predicate in venue_fit.py::_PREDICATES; v2 carries a
+# declarative predicate instead, so that adding a rule never requires
+# adding Python. The clause language is a closed enum -- field_regex,
+# task_type_in, dataset_in, composed by any_of / all_of / none_of -- and
+# no YAML value is ever eval'd. A 40-line reference evaluator lives in
+# scripts/derive_venue_rules.py::evaluate_predicate and is exercised by
+# tests/test_venue_rules_v2.py. Either import it or reimplement it; the
+# tests pin the semantics.
+#
+# v2 also differs from v1 in shape, deliberately:
+#   - no rule conditions on the presence of a second contribution
+#   - no ethics multiplier
+#   - no penalty for a prediction-performance headline
+#   - deltas are venue-conditional via venue_delta, not via a multiplier

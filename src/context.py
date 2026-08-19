@@ -28,9 +28,20 @@ class PipelineContext:
     task_type: str = "prediction"
     max_revision_cycles: int = 2
 
+    # Locked research spec from --research-spec CLI flag (Phase 3b.4 / B6).
+    # When non-None, ProblemFormulator runs in "refine" mode against this
+    # spec rather than generating a new one from scratch. The "refine"
+    # branch in the PF prompt is task-type-keyed (introduced in 3b.4
+    # sub-wave 2 for task_type='causal_soo').
+    locked_research_spec: Optional[dict] = None
+
     # Agent outputs
     research_spec: Optional[dict] = None
     literature_context: Optional[dict] = None
+    # Arc P3: full retrieved literature pool (~100 papers) that the
+    # Writer tops the reference list up from. literature_context holds
+    # only the 8-12 papers the ProblemFormulator selected.
+    retrieved_literature: Optional[dict] = None
     data_report: Optional[dict] = None
     results_object: Optional[dict] = None
     review_report: Optional[dict] = None
@@ -58,8 +69,10 @@ class PipelineContext:
             "current_state": self.current_state.value if isinstance(self.current_state, PipelineState) else str(self.current_state),
             "completed_stages": self.completed_stages,
             "revision_cycle": self.revision_cycle,
+            "locked_research_spec": self.locked_research_spec,
             "research_spec": self.research_spec,
             "literature_context": self.literature_context,
+            "retrieved_literature": self.retrieved_literature,
             "data_report": self.data_report,
             "results_object": self.results_object,
             "review_report": self.review_report,
@@ -83,8 +96,10 @@ class PipelineContext:
         ctx.current_state = PipelineState(data.get("current_state", "INITIALIZED"))
         ctx.completed_stages = data.get("completed_stages", [])
         ctx.revision_cycle = data.get("revision_cycle", 0)
+        ctx.locked_research_spec = data.get("locked_research_spec")
         ctx.research_spec = data.get("research_spec")
         ctx.literature_context = data.get("literature_context")
+        ctx.retrieved_literature = data.get("retrieved_literature")
         ctx.data_report = data.get("data_report")
         ctx.results_object = data.get("results_object")
         ctx.review_report = data.get("review_report")

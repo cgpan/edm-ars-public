@@ -22,7 +22,7 @@ def _validate_sandbox_config(config: dict) -> None:
 
 
 def load_config(path: str = "config.yaml") -> dict:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     missing_top = _REQUIRED_TOP_KEYS - set(config.keys())

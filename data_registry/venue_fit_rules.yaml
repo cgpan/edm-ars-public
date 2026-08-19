@@ -1,0 +1,143 @@
+# Arc T / T0 - deterministic venue-fit rule table.
+#
+# Mined from the 34-anchor LSAR corpus (docs/v5_arc_t_spec.md sec. 3 Stage 2b).
+# There is NO LLM in this layer: every rule has a named predicate
+# implemented in src/ideation/venue_fit.py and an `evidence` string
+# recording the anchor fact that motivated it (design commitment C2).
+#
+# Deliberately NOT grounded in venue_criteria/jedm_2026.yaml or
+# jla_2026.yaml: those are three generic lines each and still declare
+# calibrated: false, while calibration/anchors_edm.yaml already records
+# JEDM P25 5.15 and JLA P25 5.4 from these same anchors.
+#
+# Scores are deltas on a 0-centred venue-fit scale. They are ordinal
+# guidance for the tournament's BT prior, not a predicted review score.
+
+schema_version: "1.0"
+source: docs/v5_arc_t_spec.md section 3 "Stage 2b" (34-anchor corpus)
+generated: 2026-07-25
+
+venues:
+  EDM:
+    ethics_weight: 1.0
+    evidence: >-
+      Ethics/Fairness dimension weight 1.0 at the EDM conference - a
+      fairness-forward framing buys most at the conference (spec sec. 3
+      Stage 2b, VF-08).
+  JEDM:
+    ethics_weight: 0.5
+    evidence: >-
+      Ethics dimension weight 0.5 at JEDM; the journal rubric
+      down-weights it relative to the conference (spec sec. 3 Stage 2b,
+      VF-08; JEDM P25 5.15 in calibration/anchors_edm.yaml).
+  JLA:
+    ethics_weight: 0.6
+    evidence: >-
+      Ethics dimension weight 0.6 at JLA (spec sec. 3 Stage 2b, VF-08; JLA
+      P25 5.4 in calibration/anchors_edm.yaml).
+
+# PROVENANCE AND THE VALIDATION TRAP (added 2026-07-11 after the V2 backtest)
+#
+# Each rule carries `provenance:`.
+#   external  -- derived ONLY from the 34-anchor corpus of published papers.
+#   in_sample -- the evidence cites OUR OWN runs and their gate scores.
+#
+# This distinction is load-bearing, not bookkeeping. VF-01 and VF-04 were
+# authored from the very outcomes the V2 backtest measures against, so any
+# correlation they produce is circular. Measured on the 24-run population:
+#
+#     full rule table          rho = +0.377  (p = 0.036)
+#     external rules only      rho = +0.002  (p = 0.501)   <-- zero
+#     in-sample rules only     rho = +0.349  (p = 0.049)
+#
+# ALL of the apparent signal comes from the two rules written knowing the
+# answer. scripts/backtest_ranker.py must therefore always report the
+# external-only partition, and no in_sample rule may ever be cited as
+# evidence that the ranker works.
+
+default_venue: EDM
+
+rules:
+  - code: VF-01
+    provenance: in_sample
+    # cites our own gate outcomes -> circular; excluded from validation
+    predicate: bare_observational_causal
+    delta: -2.0
+    applies_to: [causal_soo, causal_itr, causal_did]
+    summary: >-
+      Observational causal estimate offered as the whole contribution,
+      with no second contribution.
+    evidence: >-
+      0 of 34 anchors run an observational causal estimator as the
+      contribution. Our own phase_b_did_20260704 (bare 2x2 gap-in-gaps)
+      scored Relevance 2 / Significance 2 -> 3.7 Reject, and the ledger
+      note attributes the failure to venue fit.
+
+  - code: VF-02
+    provenance: external
+    predicate: shap_headline
+    delta: -1.0
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: SHAP / feature importance presented as the headline result.
+    evidence: >-
+      SHAP appears in 1 of 34 anchors; feature importance in 3 of 34.
+      It is not what the venue's conversation is about.
+
+  - code: VF-03
+    provenance: external
+    predicate: auc_only_prediction
+    delta: -1.5
+    applies_to: [prediction]
+    summary: Prediction study whose only contribution is predictive accuracy.
+    evidence: >-
+      AUC is mentioned in only 6 of 34 anchors; the closest
+      "prediction paper" anchor scored 5.4 Borderline (Rigor 3 /
+      Empirical 2) and survived on its generalizability framing rather
+      than on its accuracy numbers.
+
+  - code: VF-04
+    provenance: in_sample
+    # cites our own gate outcomes -> circular; excluded from validation
+    predicate: second_contribution
+    delta: 1.5
+    ethics_weighted_reasons: [fairness]
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: >-
+      Carries a second contribution - transfer, fairness,
+      measurement-chained-to-decision, or replication.
+    evidence: >-
+      The 3.7 -> 7.0 recovery on identical data (phase_b_did ->
+      stream1_did_v2) came from wrapping the same DiD estimand in the
+      M9 composition-adjusted and M10 contrast-heterogeneity layers.
+
+  - code: VF-05
+    provenance: external
+    predicate: transfer_claim
+    delta: 1.5
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: Explicit cross-context transfer / generalizability claim.
+    evidence: >-
+      jla_9099's entire thesis is transfer; jedm_974 external
+      validation scored 7.3; the learning-curve replication scored 6.6.
+
+  - code: VF-06
+    provenance: external
+    predicate: measurement_to_decision
+    delta: 1.0
+    applies_to: [psychometrics]
+    summary: Measurement model chained to a downstream institutional decision.
+    evidence: >-
+      jla_9035 (6.8) is the only anchor with a measurement model at its
+      core, and it works because the CFA serves an institutional
+      decision rather than standing alone.
+
+  - code: VF-07
+    provenance: external
+    predicate: synthetic_only
+    delta: -1.0
+    applies_to: [prediction, causal_soo, causal_itr, causal_did, psychometrics]
+    summary: Synthetic-DGP certification offered as the only empirical support.
+    evidence: >-
+      The bkt_parametric_constraints anchor scored Empirical Support 5
+      with the reviewer note "Experiments are restricted to synthetic
+      data".

@@ -35,8 +35,13 @@ def test_base_agent_raises_on_missing_api_key(tmp_path, monkeypatch) -> None:
     """BaseAgent.__init__ must raise EnvironmentError with a clear message when
     the active provider's API key is not set."""
 
+    # Strip every provider's API key — whichever one config.yaml is
+    # currently set to should surface the expected env var name in the
+    # error.
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
     class _ConcreteAgent(BaseAgent):
         def run(self, **kwargs: Any) -> Any:  # pragma: no cover
@@ -49,8 +54,15 @@ def test_base_agent_raises_on_missing_api_key(tmp_path, monkeypatch) -> None:
         dataset_name = "hsls09_public"
         output_dir = str(tmp_path)
 
-    # Error message depends on active provider
+    # Error message depends on active provider. Phase 3b.10.5: deepseek
+    # is now the project default, so the expected env var is usually
+    # DEEPSEEK_API_KEY.
     provider = config.get("llm_provider", "anthropic")
-    expected_key = "MINIMAX_API_KEY" if provider == "minimax" else "ANTHROPIC_API_KEY"
+    expected_key = {
+        "deepseek": "DEEPSEEK_API_KEY",
+        "minimax": "MINIMAX_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }.get(provider, "ANTHROPIC_API_KEY")
     with pytest.raises(EnvironmentError, match=expected_key):
         _ConcreteAgent(_FakeCtx(), "problem_formulator", config)

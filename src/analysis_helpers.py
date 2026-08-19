@@ -1091,3 +1091,1112 @@ def compute_icc(
         "avg_cluster_size": round(n0, 1),
         "interpretation": interp,
     }
+
+
+# ---------------------------------------------------------------------------
+# V3.1 Arc R (R3-followup) - deterministic ITR helpers (M6 + M7)
+# ---------------------------------------------------------------------------
+# The synthetic gate (scripts/itr_synthetic_gate.py) certified these
+# recipes; R3's live run showed LLM re-implementations deviate
+# (F-R3-M6-SCALE-DEGENERATE-RULE, F-R3-M7-CI-INCONSISTENT). Generated
+# code must CALL these instead of re-implementing (per the M6/M7
+# skills).
+
+def itr_dr_pseudo_outcomes(df, treatment_col, outcome_col, adjustment_cols,
+                           groups=None, n_folds=5, random_state=42):
+    """Cross-fitted doubly-robust pseudo-outcomes (M6 recipe)."""
+    import numpy as np
+    from sklearn.ensemble import GradientBoostingRegressor
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import GroupKFold, KFold
+
+    X = df[adjustment_cols].astype(float).to_numpy()
+    t = df[treatment_col].astype(float).to_numpy()
+    y = df[outcome_col].astype(float).to_numpy()
+    gamma = np.zeros(len(df))
+    if groups is not None:
+        splits = GroupKFold(n_splits=n_folds).split(X, t, groups=np.asarray(groups))
+    else:
+        splits = KFold(n_splits=n_folds, shuffle=True,
+                       random_state=random_state).split(X)
+    for tr, te in splits:
+        ps = LogisticRegression(max_iter=1000).fit(X[tr], t[tr])
+        e = np.clip(ps.predict_proba(X[te])[:, 1], 0.02, 0.98)
+        m1 = GradientBoostingRegressor(random_state=random_state).fit(
+            X[tr][t[tr] == 1], y[tr][t[tr] == 1])
+        m0 = GradientBoostingRegressor(random_state=random_state).fit(
+            X[tr][t[tr] == 0], y[tr][t[tr] == 0])
+        mu1, mu0 = m1.predict(X[te]), m0.predict(X[te])
+        tt, yy = t[te], y[te]
+        gamma[te] = (mu1 - mu0 + tt * (yy - mu1) / e
+                     - (1 - tt) * (yy - mu0) / (1 - e))
+    return gamma
+
+
+def itr_learn_policy_tree(df, gamma, rule_covariate_cols,
+                          max_depth=2, min_samples_leaf=200, random_state=42):
+    """M6: shallow policy tree on RULE covariates; returns
+    (tree, rule_text, share_treated). Raises ValueError on a
+    degenerate rule (share outside [0.02, 0.98]) so callers must
+    report the no-meaningful-rule case honestly
+    (F-R3-M6-SCALE-DEGENERATE-RULE guard)."""
+    import numpy as np
+    from sklearn.tree import DecisionTreeClassifier, export_text
+
+    feats = df[rule_covariate_cols].astype(float).to_numpy()
+    tree = DecisionTreeClassifier(max_depth=max_depth,
+                                  min_samples_leaf=min_samples_leaf,
+                                  random_state=random_state)
+    tree.fit(feats, (gamma > 0).astype(int), sample_weight=np.abs(gamma))
+    share = float(tree.predict(feats).mean())
+    rule_text = export_text(tree, feature_names=list(rule_covariate_cols))
+    if not (0.02 <= share <= 0.98):
+        raise ValueError(
+            "degenerate policy rule: share_treated={:.3f}; report "
+            "'no meaningful targeting rule' per the M6 skill instead of "
+            "shipping a treat-all/none rule".format(share))
+    return tree, rule_text, share
+
+
+def itr_crossfit_policy_value(df, treatment_col, outcome_col, adjustment_cols,
+                              rule_covariate_cols, groups=None, n_folds=5,
+                              n_boot=1000, random_state=42):
+    """M7: cross-fitted policy value + gain over best constant, with a
+    cluster-bootstrap CI computed on the SAME gain statistic
+    (F-R3-M7-CI-INCONSISTENT guard)."""
+    import numpy as np
+    from sklearn.ensemble import GradientBoostingRegressor
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import GroupKFold, KFold
+    from sklearn.tree import DecisionTreeClassifier
+
+    X = df[adjustment_cols].astype(float).to_numpy()
+    R = df[rule_covariate_cols].astype(float).to_numpy()
+    t = df[treatment_col].astype(float).to_numpy()
+    y = df[outcome_col].astype(float).to_numpy()
+    n = len(df)
+    gamma = itr_dr_pseudo_outcomes(df, treatment_col, outcome_col,
+                                   adjustment_cols, groups, n_folds,
+                                   random_state)
+    mu0_hat = np.zeros(n)
+    e_hat = np.zeros(n)
+    pi_hat = np.zeros(n)
+    if groups is not None:
+        splits = GroupKFold(n_splits=n_folds).split(X, t, groups=np.asarray(groups))
+    else:
+        splits = KFold(n_splits=n_folds, shuffle=True,
+                       random_state=random_state).split(X)
+    for tr, te in splits:
+        m0 = GradientBoostingRegressor(random_state=random_state).fit(
+            X[tr][t[tr] == 0], y[tr][t[tr] == 0])
+        mu0_hat[te] = m0.predict(X[te])
+        ps = LogisticRegression(max_iter=1000).fit(X[tr], t[tr])
+        e_hat[te] = np.clip(ps.predict_proba(X[te])[:, 1], 0.02, 0.98)
+        fold_tree = DecisionTreeClassifier(max_depth=2, min_samples_leaf=200,
+                                           random_state=random_state)
+        fold_tree.fit(R[tr], (gamma[tr] > 0).astype(int),
+                      sample_weight=np.abs(gamma[tr]))
+        pi_hat[te] = fold_tree.predict(R[te])
+    v0c = mu0_hat + (1 - t) * (y - mu0_hat) / (1 - e_hat)
+    scores_rule = v0c + pi_hat * gamma
+    scores_all = v0c + gamma
+    scores_none = v0c
+    v_rule = float(scores_rule.mean())
+    v_all = float(scores_all.mean())
+    v_none = float(scores_none.mean())
+    gain = v_rule - max(v_all, v_none)
+    rng = np.random.default_rng(random_state)
+    cluster_ids = np.asarray(groups) if groups is not None else np.arange(n)
+    uniq = np.unique(cluster_ids)
+    boots = []
+    for _ in range(n_boot):
+        take = rng.choice(uniq, size=len(uniq), replace=True)
+        idx = np.concatenate([np.where(cluster_ids == c)[0] for c in take])
+        b_rule = scores_rule[idx].mean()
+        b_best = max(scores_all[idx].mean(), scores_none[idx].mean())
+        boots.append(b_rule - b_best)
+    lo, hi = np.percentile(boots, [2.5, 97.5])
+    return {
+        "policy_value": v_rule, "value_treat_all": v_all,
+        "value_treat_none": v_none, "value_gain_vs_best_constant": gain,
+        "gain_ci_lower": float(lo), "gain_ci_upper": float(hi),
+        "se_method": "cluster_bootstrap", "n_folds": n_folds,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase B - deterministic cross-cohort DiD helpers (M8)
+# ---------------------------------------------------------------------------
+# Certified by scripts/quasi_experimental_gates.py (DiD bias 0.006,
+# pretrend detection 1.0). Generated code must CALL these (the
+# M1/M6/M7 lesson).
+
+def did_gap_in_gaps(df, outcome_col, group_col, post_col, n_boot=1000,
+                    random_state=42):
+    """2x2 DiD on a cross-cohort student panel with a bootstrap CI on
+    the SAME statistic: (gap in POST cohort) - (gap in PRE cohort)
+    where gap = mean(outcome | group=1) - mean(outcome | group=0).
+    Returns the estimates.M8 core dict."""
+    import numpy as np
+
+    y = df[outcome_col].astype(float).to_numpy()
+    g = df[group_col].astype(float).to_numpy()
+    p = df[post_col].astype(float).to_numpy()
+
+    def _did(idx):
+        yy, gg, pp = y[idx], g[idx], p[idx]
+        def gap(post_val):
+            m = pp == post_val
+            return yy[m & (gg == 1)].mean() - yy[m & (gg == 0)].mean()
+        return gap(1.0) - gap(0.0)
+
+    import numpy as np
+    all_idx = np.arange(len(df))
+    point = float(_did(all_idx))
+    rng = np.random.default_rng(random_state)
+    boots = []
+    # stratified bootstrap within the four cells to preserve the design
+    cells = [(gv, pv) for gv in (0.0, 1.0) for pv in (0.0, 1.0)]
+    cell_idx = {c: all_idx[(g == c[0]) & (p == c[1])] for c in cells}
+    for _ in range(n_boot):
+        take = np.concatenate([
+            rng.choice(cell_idx[c], size=len(cell_idx[c]), replace=True)
+            for c in cells
+        ])
+        boots.append(_did(take))
+    lo, hi = np.percentile(boots, [2.5, 97.5])
+    return {
+        "point_estimate": point, "ci_lower": float(lo), "ci_upper": float(hi),
+        "se": float(np.std(boots)), "se_method": "stratified_bootstrap",
+        "n": int(len(df)),
+    }
+
+
+def did_placebo_follow_wave(df, base_col, follow_col, group_col, post_col,
+                            n_boot=500, random_state=42):
+    """Stability probe: re-run the gap-in-gaps on the FOLLOW-wave ranks.
+    A materially different estimate flags wave-instability of the gap
+    change (the cross-cohort analogue of a pre-trend check; with only
+    two cohorts a true pre-period does not exist and the paper must
+    say so)."""
+    base = did_gap_in_gaps(df.dropna(subset=[base_col]), base_col,
+                           group_col, post_col, n_boot, random_state)
+    fol = did_gap_in_gaps(df.dropna(subset=[follow_col]), follow_col,
+                          group_col, post_col, n_boot, random_state)
+    diverges = abs(base["point_estimate"] - fol["point_estimate"]) > (
+        2 * max(base["se"], fol["se"]))
+    return {"base_wave": base, "follow_wave": fol,
+            "wave_instability_flag": bool(diverges)}
+
+
+# ---------------------------------------------------------------------------
+# Prediction rigor extensions (V4 stream-2, 2026-07-04)
+# ---------------------------------------------------------------------------
+# Deterministic implementations for the reviewer-named gaps: moderation
+# analyses must be COMPUTED (not promised), dummy SHAP must be grouped by
+# parent variable, best-model claims need a paired test, and calibration
+# must be quantified. Generated code must CALL these.
+
+def run_moderation_analysis(X, y, focal_cols, moderator_col, n_boot=200,
+                            random_state=42):
+    """Test whether the focal block's association with y varies with a
+    continuous moderator.
+
+    (a) Likelihood-ratio test of the focal x moderator interaction block
+        in an unpenalized logistic model (inference model, fit on the
+        full analytic sample - separate from the prediction models).
+    (b) Descriptive gradient: incremental AUC of the focal block within
+        moderator tertiles, with a bootstrap CI on the top-minus-bottom
+        difference of increments.
+    """
+    import numpy as np
+    import pandas as pd
+    from scipy import stats
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+
+    X = X.reset_index(drop=True).copy()
+    y = np.asarray(y).astype(float)
+    focal_cols = [c for c in focal_cols if c in X.columns]
+    if not focal_cols or moderator_col not in X.columns:
+        return {"status": "skipped",
+                "reason": "focal or moderator columns absent"}
+
+    inter = pd.DataFrame(
+        {f"{c}__x__{moderator_col}": X[c] * X[moderator_col]
+         for c in focal_cols},
+        index=X.index,
+    )
+    X_full = pd.concat([X, inter], axis=1)
+    base_cols = list(X.columns)
+
+    def _loglik(frame, cols):
+        m = LogisticRegression(penalty=None, max_iter=2000)
+        m.fit(frame[cols], y)
+        p = np.clip(m.predict_proba(frame[cols])[:, 1], 1e-12, 1 - 1e-12)
+        return float(np.sum(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+    ll_reduced = _loglik(X_full, base_cols)
+    ll_full = _loglik(X_full, base_cols + list(inter.columns))
+    lrt = max(0.0, 2.0 * (ll_full - ll_reduced))
+    df = len(inter.columns)
+    p_value = float(stats.chi2.sf(lrt, df))
+
+    # (b) tertile incremental AUC of the focal block
+    tert = pd.qcut(X[moderator_col], 3, labels=["low", "mid", "high"],
+                   duplicates="drop")
+    rng = np.random.default_rng(random_state)
+    cols_wo = [c for c in X.columns if c not in focal_cols]
+
+    def _inc_for(row_idx):
+        Xi, yi = X.iloc[row_idx], y[row_idx]
+        if yi.sum() < 10 or (1 - yi).sum() < 10:
+            return None
+        try:
+            m_full = LogisticRegression(penalty=None, max_iter=2000).fit(Xi, yi)
+            m_red = LogisticRegression(penalty=None, max_iter=2000).fit(
+                Xi[cols_wo], yi)
+            return (roc_auc_score(yi, m_full.predict_proba(Xi)[:, 1])
+                    - roc_auc_score(yi, m_red.predict_proba(Xi[cols_wo])[:, 1]))
+        except Exception:
+            return None
+
+    lev_idx = {lev: np.where((tert == lev).to_numpy())[0]
+               for lev in ("low", "mid", "high")}
+    tertile_inc = {lev: _inc_for(idx) for lev, idx in lev_idx.items()}
+
+    diff = None
+    ci = [None, None]
+    if tertile_inc["low"] is not None and tertile_inc["high"] is not None:
+        diff = tertile_inc["high"] - tertile_inc["low"]
+        boots = []
+        for _ in range(n_boot):
+            bl = rng.choice(lev_idx["low"], len(lev_idx["low"]), replace=True)
+            bh = rng.choice(lev_idx["high"], len(lev_idx["high"]), replace=True)
+            il, ih = _inc_for(bl), _inc_for(bh)
+            if il is not None and ih is not None:
+                boots.append(ih - il)
+        if len(boots) >= max(50, n_boot // 4):
+            ci = [float(np.percentile(boots, 2.5)),
+                  float(np.percentile(boots, 97.5))]
+
+    return {
+        "status": "computed",
+        "lrt_stat": float(lrt), "lrt_df": int(df), "lrt_p": p_value,
+        "tertile_incremental_auc": {
+            k: (float(v) if v is not None else None)
+            for k, v in tertile_inc.items()
+        },
+        "top_minus_bottom_diff": (float(diff) if diff is not None else None),
+        "diff_ci": ci,
+        "interpretation": (
+            "interaction significant at alpha=0.05" if p_value < 0.05
+            else "no detectable moderation (interaction LRT p >= 0.05)"
+        ),
+    }
+
+
+def group_shap_by_parent(feature_names, shap_mean_abs, sep="_"):
+    """Aggregate mean |SHAP| of one-hot dummy columns by parent variable.
+
+    Parent = the token before the first ``sep``; columns without ``sep``
+    are their own parent. Returns a list sorted by total mean |SHAP|,
+    each entry {parent, total_shap_mean_abs, n_columns, columns}.
+    """
+    import numpy as np
+
+    groups = {}
+    for name, val in zip(feature_names, shap_mean_abs):
+        s = str(name)
+        parent = s.split(sep, 1)[0] if sep in s else s
+        g = groups.setdefault(parent, {"parent": parent,
+                                       "total_shap_mean_abs": 0.0,
+                                       "n_columns": 0, "columns": []})
+        g["total_shap_mean_abs"] += float(abs(val))
+        g["n_columns"] += 1
+        g["columns"].append(s)
+    out = sorted(groups.values(), key=lambda d: -d["total_shap_mean_abs"])
+    for d in out:
+        d["total_shap_mean_abs"] = float(np.round(d["total_shap_mean_abs"], 6))
+    return out
+
+
+def bootstrap_auc_difference(y_true, prob_a, prob_b, school_ids=None,
+                             n_boot=1000, random_state=42):
+    """Paired bootstrap test of AUC(a) - AUC(b) on the same test rows.
+
+    Cluster-aware when ``school_ids`` is given (resamples clusters).
+    Guards "the best model outperforms the baseline" claims.
+    """
+    import numpy as np
+    from sklearn.metrics import roc_auc_score
+
+    y = np.asarray(y_true).astype(float)
+    a = np.asarray(prob_a, dtype=float)
+    b = np.asarray(prob_b, dtype=float)
+    point = float(roc_auc_score(y, a) - roc_auc_score(y, b))
+    rng = np.random.default_rng(random_state)
+    boots = []
+    if school_ids is not None:
+        sid = np.asarray(school_ids)
+        clusters = np.unique(sid)
+        cluster_rows = {c: np.where(sid == c)[0] for c in clusters}
+        for _ in range(n_boot):
+            take = rng.choice(clusters, len(clusters), replace=True)
+            idx = np.concatenate([cluster_rows[c] for c in take])
+            if len(np.unique(y[idx])) < 2:
+                continue
+            boots.append(roc_auc_score(y[idx], a[idx])
+                         - roc_auc_score(y[idx], b[idx]))
+    else:
+        n = len(y)
+        for _ in range(n_boot):
+            idx = rng.integers(0, n, n)
+            if len(np.unique(y[idx])) < 2:
+                continue
+            boots.append(roc_auc_score(y[idx], a[idx])
+                         - roc_auc_score(y[idx], b[idx]))
+    lo, hi = np.percentile(boots, [2.5, 97.5])
+    return {
+        "auc_diff": point, "ci_lower": float(lo), "ci_upper": float(hi),
+        "significant": bool(lo > 0 or hi < 0),
+        "se_method": ("cluster_bootstrap" if school_ids is not None
+                      else "bootstrap"),
+        "n_boot_effective": len(boots),
+    }
+
+
+def compute_calibration_metrics(y_true, y_prob, n_bins=10):
+    """Brier score, expected calibration error, and logistic
+    recalibration slope/intercept (Cox calibration)."""
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import brier_score_loss
+
+    y = np.asarray(y_true).astype(float)
+    p = np.clip(np.asarray(y_prob, dtype=float), 1e-12, 1 - 1e-12)
+    brier = float(brier_score_loss(y, p))
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    which = np.digitize(p, bins[1:-1])
+    ece = 0.0
+    for b in range(n_bins):
+        m = which == b
+        if m.sum() == 0:
+            continue
+        ece += (m.mean() * abs(y[m].mean() - p[m].mean()))
+    logit = np.log(p / (1 - p)).reshape(-1, 1)
+    cal = LogisticRegression(penalty=None, max_iter=2000).fit(logit, y)
+    return {
+        "brier": brier,
+        "ece": float(ece),
+        "calibration_slope": float(cal.coef_[0][0]),
+        "calibration_intercept": float(cal.intercept_[0]),
+        "n_bins": int(n_bins),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Stream-1 (2026-07-04): M9 composition-adjusted DiD + M10 ML heterogeneity
+# ---------------------------------------------------------------------------
+# Certified by scripts/quasi_experimental_gates.py::did_dr_gate /
+# did_het_gate (replicated over seeds; see gate thresholds there).
+# Generated code must CALL these.
+
+def _did_design_matrix(df, covariate_cols):
+    """Shared design-matrix builder for M9/M10.
+
+    Object/categorical columns are one-hot encoded WITH an explicit
+    "Missing" level (keeps n; composition adjustment stays honest about
+    nonresponse). Continuous columns: NaN -> 0 plus a missing-flag
+    column.
+    """
+    import numpy as np
+    import pandas as pd
+
+    parts = []
+    for c in covariate_cols:
+        col = df[c]
+        if col.dtype == object or str(col.dtype) == "category":
+            filled = col.astype(object).where(col.notna(), "Missing")
+            parts.append(pd.get_dummies(filled, prefix=c, dtype=float))
+        else:
+            v = pd.to_numeric(col, errors="coerce")
+            flag = v.isna().astype(float)
+            parts.append(pd.DataFrame({c: v.fillna(0.0),
+                                       f"{c}__missing": flag},
+                                      index=df.index))
+    X = pd.concat(parts, axis=1)
+    # drop constant columns (e.g. a Missing level that never occurs)
+    keep = [c for c in X.columns if X[c].nunique() > 1]
+    return X[keep]
+
+
+def did_dr_gap_change(df, outcome_col, group_col, post_col, covariate_cols,
+                      n_boot=200, random_state=42, ps_clip=(0.02, 0.98)):
+    """M9: composition-adjusted (AIPW) cross-cohort gap-in-gaps.
+
+    Adjusts for COHORT compositional shift WITHIN each SES group: for
+    each group g, standardizes both cohorts to the group's pooled
+    covariate distribution via AIPW with a binary cohort propensity
+    e_g(x) = P(post=1 | x, group=g), then differences the adjusted
+    within-group changes:
+
+        Delta_g = E_x~g[ mu_{g,1}(x) - mu_{g,0}(x) ]   (AIPW)
+        tau     = Delta_1 - Delta_0
+
+    Deliberately NOT a 4-cell standardization across groups: SES-band
+    membership is near-deterministic given covariates that are
+    components of the SES composite (e.g. parent education), so a
+    cross-group propensity has structural positivity failure - and
+    "holding fixed" a component of the group-defining construct would
+    over-adjust. Cohort overlap within group is where positivity
+    actually holds; clip counts are reported so the Critic can check.
+    """
+    import numpy as np
+    from sklearn.linear_model import LinearRegression, LogisticRegression
+
+    work = df.dropna(subset=[outcome_col]).reset_index(drop=True)
+    y = work[outcome_col].astype(float).to_numpy()
+    g = work[group_col].astype(int).to_numpy()
+    p = work[post_col].astype(int).to_numpy()
+    X = _did_design_matrix(work, covariate_cols)
+    Xv = X.to_numpy(dtype=float)
+
+    def _delta_for_group(idx_g):
+        Xi, yi, pi_ = Xv[idx_g], y[idx_g], p[idx_g]
+        e_model = LogisticRegression(max_iter=2000)
+        e_model.fit(Xi, pi_)
+        e = np.clip(e_model.predict_proba(Xi)[:, 1],
+                    ps_clip[0], ps_clip[1])
+        n_clip = int(np.sum((e <= ps_clip[0]) | (e >= ps_clip[1])))
+        psis = {}
+        for post_val in (0, 1):
+            rows = pi_ == post_val
+            mu = LinearRegression().fit(Xi[rows], yi[rows]).predict(Xi)
+            denom = e if post_val == 1 else (1.0 - e)
+            corr = np.where(rows, (yi - mu) / denom, 0.0)
+            psis[post_val] = float(np.mean(mu + corr))
+        return psis[1] - psis[0], n_clip
+
+    def _tau(idx):
+        gl = g[idx]
+        d1, c1 = _delta_for_group(idx[gl == 1])
+        d0, c0 = _delta_for_group(idx[gl == 0])
+        return d1 - d0, d0, d1, c0 + c1
+
+    all_idx = np.arange(len(work))
+    point, delta_g0, delta_g1, n_clipped = _tau(all_idx)
+
+    rng = np.random.default_rng(random_state)
+    cell = g * 2 + p
+    cell_idx = {c: all_idx[cell == c] for c in (0, 1, 2, 3)}
+    boots = []
+    for _ in range(n_boot):
+        take = np.concatenate([
+            rng.choice(cell_idx[c], size=len(cell_idx[c]), replace=True)
+            for c in (0, 1, 2, 3)
+        ])
+        try:
+            boots.append(_tau(take)[0])
+        except Exception:
+            continue
+    lo, hi = np.percentile(boots, [2.5, 97.5])
+    return {
+        "point_estimate": float(point),
+        "ci_lower": float(lo), "ci_upper": float(hi),
+        "se": float(np.std(boots)),
+        "se_method": "stratified_bootstrap",
+        "adjusted_change_high_ses": float(delta_g0),
+        "adjusted_change_low_ses": float(delta_g1),
+        "covariates_used": list(covariate_cols),
+        "n": int(len(work)),
+        "n_ps_clipped": int(n_clipped),
+        "estimator": "AIPW_within_group_cohort_standardization",
+    }
+
+
+def did_ml_heterogeneity(df, outcome_col, group_col, post_col,
+                         covariate_cols, subgroup_cols,
+                         n_boot=100, random_state=42):
+    """M10: ML-based heterogeneity of the gap change.
+
+    Fits a gradient-boosted outcome model per group x cohort cell and
+    forms tau(x) = mu_11(x) - mu_01(x) - mu_10(x) + mu_00(x) on every
+    student, then summarizes tau over interpretable subgroups with
+    stratified-bootstrap CIs. Descriptive heterogeneity - no
+    causal-forest asymptotics are claimed, and the paper must say so.
+    """
+    import numpy as np
+    import pandas as pd
+    from sklearn.ensemble import HistGradientBoostingRegressor
+
+    work = df.dropna(subset=[outcome_col]).reset_index(drop=True)
+    y = work[outcome_col].astype(float).to_numpy()
+    g = work[group_col].astype(int).to_numpy()
+    p = work[post_col].astype(int).to_numpy()
+    X = _did_design_matrix(work, covariate_cols)
+    Xv = X.to_numpy(dtype=float)
+    cell = g * 2 + p
+
+    def _tau_x(idx, predict_on):
+        taus = np.zeros(len(predict_on))
+        sign = {3: 1.0, 1: -1.0, 2: -1.0, 0: 1.0}
+        for c in (0, 1, 2, 3):
+            rows_c = idx[cell[idx] == c]
+            m = HistGradientBoostingRegressor(
+                max_iter=200, random_state=random_state)
+            m.fit(Xv[rows_c], y[rows_c])
+            taus += sign[c] * m.predict(Xv[predict_on])
+        return taus
+
+    all_idx = np.arange(len(work))
+    tau = _tau_x(all_idx, all_idx)
+
+    # subgroup summaries (levels of original columns; ses-style continuous
+    # subgroup columns are tercile-cut)
+    def _levels(colname):
+        col = work[colname]
+        if col.dtype == object or str(col.dtype) == "category":
+            return col.astype(object).where(col.notna(), "Missing")
+        v = pd.to_numeric(col, errors="coerce")
+        if v.nunique() <= 6:  # binary / small-integer codes: use as-is
+            return v.astype(object).where(v.notna(), "Missing")
+        return pd.qcut(v, 3, labels=["low", "mid", "high"],
+                       duplicates="drop").astype(object).where(
+                           v.notna(), "Missing")
+
+    rng = np.random.default_rng(random_state)
+    cell_idx = {c: all_idx[cell == c] for c in (0, 1, 2, 3)}
+    boot_taus = []
+    for _ in range(n_boot):
+        take = np.concatenate([
+            rng.choice(cell_idx[c], size=len(cell_idx[c]), replace=True)
+            for c in (0, 1, 2, 3)
+        ])
+        try:
+            boot_taus.append(_tau_x(take, all_idx))
+        except Exception:
+            continue
+    boot_taus = np.asarray(boot_taus) if boot_taus else None
+
+    # Per-level ABSOLUTE tau means are descriptive only: boosted-model
+    # regularization biases absolute levels in small cells (found in the
+    # did_het_gate null runs). CONTRASTS - level minus overall, and
+    # pairwise for two-level attributes - cancel the shared bias, so
+    # inference (CIs) is reported on contrasts only.
+    have_boot = boot_taus is not None and len(boot_taus) >= 25
+    overall_dist = boot_taus.mean(axis=1) if have_boot else None
+    subgroups = {}
+    for sc in subgroup_cols:
+        lv = _levels(sc)
+        per_level = {}
+        level_dists = {}
+        for lev in pd.unique(lv):
+            if str(lev) == "Missing":
+                # nonresponse is not a substantive subgroup; estimation
+                # keeps these rows, but reporting them invites artifact
+                # readings (cohort-asymmetric missingness).
+                continue
+            m = (lv == lev).to_numpy()
+            if m.sum() < 50:
+                continue
+            entry = {"tau_mean": float(np.mean(tau[m])), "n": int(m.sum())}
+            if have_boot:
+                dist = boot_taus[:, m].mean(axis=1)
+                level_dists[str(lev)] = dist
+                contrast = dist - overall_dist
+                entry["contrast_vs_overall"] = float(np.mean(tau[m])
+                                                     - np.mean(tau))
+                entry["contrast_ci"] = [float(np.percentile(contrast, 2.5)),
+                                        float(np.percentile(contrast, 97.5))]
+            per_level[str(lev)] = entry
+        block = {"levels": per_level}
+        if have_boot and len(level_dists) == 2:
+            (la, da), (lb, db) = sorted(level_dists.items())
+            diff = db - da
+            block["pairwise_difference"] = {
+                "levels": [lb, la],
+                "estimate": float(per_level[lb]["tau_mean"]
+                                  - per_level[la]["tau_mean"]),
+                "ci": [float(np.percentile(diff, 2.5)),
+                       float(np.percentile(diff, 97.5))],
+            }
+        subgroups[sc] = block
+
+    overall_ci = [None, None]
+    if boot_taus is not None and len(boot_taus) >= 40:
+        dist = boot_taus.mean(axis=1)
+        overall_ci = [float(np.percentile(dist, 2.5)),
+                      float(np.percentile(dist, 97.5))]
+
+    return {
+        "overall_tau_mean": float(np.mean(tau)),
+        "overall_ci": overall_ci,
+        "tau_sd_across_students": float(np.std(tau)),
+        "subgroups": subgroups,
+        "model": "HistGradientBoostingRegressor(max_iter=200) per cell",
+        "se_method": "stratified_bootstrap_refit",
+        "n": int(len(work)),
+        "caveat": ("descriptive heterogeneity; no causal-forest "
+                   "asymptotics claimed"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# V4 psychometrics wrappers (P1-P6) - 2026-07-08
+# ---------------------------------------------------------------------------
+# Certified by scripts/psychometric_gates.py. R-backed wrappers call the
+# fixed r_helpers/ scripts through src.r_bridge; generated code calls
+# THESE, never raw R and never the bridge directly.
+
+def _items_payload(items_df):
+    import numpy as np
+
+    out = {}
+    for c in items_df.columns:
+        v = items_df[c]
+        out[str(c)] = [None if (x is None or (isinstance(x, float) and
+                                              np.isnan(x))) else float(x)
+                       for x in v.tolist()]
+    return out
+
+
+def _num_or_none(x) -> float | None:
+    """float(x) unless it is missing/non-finite - then None.
+
+    CTT results are serialized into results.json; a bare NaN both breaks
+    strict JSON and reads as a number that nobody can interpret. Every
+    numeric field in psy_ctt goes through here.
+    """
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) else None
+
+
+def psy_ctt(
+    items_df: pd.DataFrame,
+    *,
+    min_pair_n: int = 30,
+    min_item_n: int = 30,
+    min_rest_items: int = 3,
+) -> dict:
+    """P1: classical test theory item analysis + Cronbach's alpha.
+
+    Pure Python. Items = numeric columns (Likert categories or 0/1).
+
+    PAIRWISE-PRESENT BY DEFAULT. Complete-case (listwise) CTT assumes a
+    near-complete persons x items matrix. Intelligent-tutor logs are
+    sparse BY DESIGN - a student only sees the items the skill path
+    assigns - so listwise deletion can leave ZERO usable rows (observed:
+    ASSISTments skill-builder, 1586 x 47 at 27.6% fill, max 45 items per
+    student => n_complete = 0 and every statistic NaN). Item means and
+    covariances are still perfectly estimable from the responses that
+    exist, so this helper estimates them pairwise and carries the n
+    behind every number.
+
+    What is returned (never a bare NaN - non-estimable numbers are None):
+      * ``estimable`` / ``method`` / ``not_estimable_reason`` - whether
+        alpha could be defended on this matrix and, if not, why.
+      * ``cronbach_alpha`` from the pairwise-present covariance matrix,
+        every entry of which uses >= ``min_pair_n`` jointly-observed
+        responses (items that cannot meet that are dropped from alpha
+        and listed in ``items_excluded``).
+      * ``alpha_listwise`` for comparability when complete cases exist.
+      * per item: ``n_used``, ``item_total_r`` + ``item_total_r_n``,
+        ``n_pair_min``, ``in_alpha``.
+      * ``matrix_fill_rate``, ``n_complete``, ``pair_n`` summary,
+        ``covariance_psd`` / ``min_eigenvalue``, ``caveats`` and a
+        ``summary`` sentence that states the result truthfully.
+
+    On a complete matrix this reproduces the classical listwise numbers
+    exactly (mean-of-rest is a positive linear transform of sum-of-rest,
+    and the covariance-matrix total equals the total-score variance).
+
+    Args:
+        items_df: persons x items frame; NaN = not administered/answered.
+        min_pair_n: minimum jointly-observed responses for a covariance
+            to enter alpha.
+        min_item_n: minimum observed responses for an item to be usable.
+        min_rest_items: minimum other items a person must have answered
+            to contribute to a corrected item-total correlation (capped
+            at the size of the rest pool, so short scales still work).
+
+    Returns:
+        dict as described above.
+    """
+    frame = pd.DataFrame(items_df)
+    caveats: list[str] = []
+    excluded: dict[str, str] = {}
+
+    numeric_cols = []
+    for c in frame.columns:
+        # bool is numeric here: 0/1 items are legitimate CTT items
+        if pd.api.types.is_numeric_dtype(frame[c]):
+            numeric_cols.append(c)
+        else:
+            excluded[str(c)] = "non-numeric column; not treated as an item"
+    X = frame[numeric_cols].astype(float)
+    obs = X.notna()
+
+    n_persons = int(len(frame))
+    n_items = int(X.shape[1])
+    cell_total = n_persons * n_items
+    fill_rate = (float(obs.to_numpy().sum()) / cell_total) if cell_total else 0.0
+    n_complete = int(obs.all(axis=1).sum()) if n_items else 0
+    n_used = {c: int(obs[c].sum()) for c in numeric_cols}
+
+    # ---- per-item descriptives (estimable from each item's own column)
+    base: dict[str, dict] = {}
+    for c in numeric_cols:
+        col = X[c].dropna()
+        mx = float(col.max()) if len(col) else float("nan")
+        base[str(c)] = {
+            "item": str(c),
+            "n_used": n_used[c],
+            "mean": _num_or_none(col.mean()) if len(col) else None,
+            "sd": _num_or_none(col.std(ddof=1)) if len(col) > 1 else None,
+            "max_observed": _num_or_none(mx),
+            "difficulty": (_num_or_none(col.mean() / mx)
+                           if len(col) and np.isfinite(mx) and mx else None),
+            "item_total_r": None,
+            "item_total_r_n": 0,
+            "n_pair_min": None,
+            "in_alpha": False,
+            "excluded_reason": None,
+        }
+
+    # ---- eligibility: enough responses AND some variance
+    eligible = []
+    for c in numeric_cols:
+        sd = base[str(c)]["sd"]
+        if n_used[c] < min_item_n:
+            excluded[str(c)] = (f"only {n_used[c]} observed responses "
+                                f"(< min_item_n={min_item_n})")
+        elif sd is None or sd <= 0:
+            excluded[str(c)] = "zero variance among observed responses"
+        else:
+            eligible.append(c)
+
+    # ---- corrected item-total r against the mean of each person's OTHER
+    #      observed eligible items (sparse-safe analogue of the rest score)
+    rest_needed = max(1, min(min_rest_items, max(len(eligible) - 1, 1)))
+    if len(eligible) >= 2:
+        E = X[eligible]
+        e_obs = obs[eligible]
+        row_sum = E.sum(axis=1, skipna=True)
+        row_cnt = e_obs.sum(axis=1)
+        for c in eligible:
+            rest_sum = row_sum - E[c].fillna(0.0)
+            rest_cnt = row_cnt - e_obs[c].astype(int)
+            keep = e_obs[c] & (rest_cnt >= rest_needed)
+            if int(keep.sum()) >= min_item_n:
+                x = E.loc[keep, c].to_numpy(dtype=float)
+                rest = (rest_sum[keep] / rest_cnt[keep]).to_numpy(dtype=float)
+                if x.std() > 0 and rest.std() > 0:
+                    r = float(np.corrcoef(x, rest)[0, 1])
+                    base[str(c)]["item_total_r"] = _num_or_none(r)
+                base[str(c)]["item_total_r_n"] = int(keep.sum())
+
+    def _result(estimable: bool, alpha: float | None, method: str,
+                kept: list, reason: str | None, pair_summary: dict,
+                psd: bool | None, min_eig: float | None,
+                alpha_listwise: float | None, summary: str) -> dict:
+        for c in numeric_cols:
+            base[str(c)]["in_alpha"] = c in kept
+            base[str(c)]["excluded_reason"] = excluded.get(str(c))
+        return {
+            "estimable": bool(estimable),
+            "method": method,
+            "not_estimable_reason": reason,
+            "cronbach_alpha": _num_or_none(alpha) if alpha is not None else None,
+            "alpha_listwise": (_num_or_none(alpha_listwise)
+                               if alpha_listwise is not None else None),
+            "items": [base[str(c)] for c in numeric_cols],
+            "items_excluded": [{"item": k, "reason": v}
+                               for k, v in excluded.items()],
+            "n_items": n_items,
+            "n_items_in_alpha": len(kept),
+            "n_persons": n_persons,
+            "n_complete": n_complete,
+            "matrix_fill_rate": _num_or_none(fill_rate),
+            "pair_n": pair_summary,
+            "covariance_psd": psd,
+            "min_eigenvalue": (_num_or_none(min_eig)
+                               if min_eig is not None else None),
+            "caveats": caveats,
+            "summary": summary,
+        }
+
+    sparse_note = (f"matrix fill rate {fill_rate:.3f} "
+                   f"({n_persons} persons x {n_items} items, "
+                   f"{n_complete} complete cases)")
+    empty_pairs = {"n_pairs": 0, "min": None, "median": None, "max": None,
+                   "threshold": int(min_pair_n)}
+
+    if len(eligible) < 2:
+        reason = (f"fewer than 2 usable items ({len(eligible)} of {n_items} "
+                  f"had >= {min_item_n} observed responses and non-zero "
+                  f"variance); Cronbach's alpha is undefined")
+        return _result(False, None, "not_estimable", [], reason, empty_pairs,
+                       None, None, None,
+                       f"Cronbach's alpha is not estimable: {reason}. "
+                       f"Item-level statistics come from each item's "
+                       f"available responses ({sparse_note}).")
+
+    # ---- pairwise co-observation counts, then prune items whose overlap
+    #      with the rest is too thin for a defensible covariance
+    o = obs[eligible].astype(float)
+    counts = pd.DataFrame(o.T.to_numpy() @ o.to_numpy(),
+                          index=eligible, columns=eligible)
+    kept = list(eligible)
+    while True:
+        sub = counts.loc[kept, kept].to_numpy()
+        thin = (sub < min_pair_n) & ~np.eye(len(kept), dtype=bool)
+        if not thin.any():
+            break
+        if len(kept) <= 2:
+            kept = []
+            break
+        per_item = thin.sum(axis=1)
+        drop_i = min(range(len(kept)),
+                     key=lambda i: (-int(per_item[i]), n_used[kept[i]],
+                                    str(kept[i])))
+        excluded[str(kept[drop_i])] = (
+            f"{int(per_item[drop_i])} of {len(kept) - 1} item pairs had "
+            f"< {min_pair_n} jointly-observed responses")
+        kept = kept[:drop_i] + kept[drop_i + 1:]
+
+    # min overlap of every eligible item with the retained alpha set
+    for c in eligible:
+        others = [o_ for o_ in kept if o_ != c]
+        if others:
+            base[str(c)]["n_pair_min"] = int(counts.loc[c, others].min())
+
+    if len(kept) < 2:
+        reason = (f"no set of >= 2 items has at least {min_pair_n} "
+                  f"jointly-observed responses for every item pair; the "
+                  f"persons x items matrix is too sparse for a defensible "
+                  f"internal-consistency estimate")
+        caveats.append("CTT assumes a near-complete persons x items matrix; "
+                       "this one is structurally sparse (adaptive item "
+                       "assignment). Use IRT/CDM, which model sparsity "
+                       "natively, for reliability-type claims.")
+        return _result(False, None, "not_estimable", [], reason, empty_pairs,
+                       None, None, None,
+                       f"Cronbach's alpha is not estimable: {reason} "
+                       f"({sparse_note}). Item-level statistics below are "
+                       f"computed from each item's available responses.")
+
+    k = len(kept)
+    sub = counts.loc[kept, kept].to_numpy()
+    off = sub[np.triu_indices(k, k=1)]  # unordered item pairs
+    pair_summary = {
+        "n_pairs": int(off.size),
+        "min": int(off.min()) if off.size else None,
+        "median": _num_or_none(np.median(off)) if off.size else None,
+        "max": int(off.max()) if off.size else None,
+        "threshold": int(min_pair_n),
+    }
+
+    S = X[kept].cov(min_periods=min_pair_n)
+    S_arr = S.to_numpy(dtype=float)
+    if not np.isfinite(S_arr).all():
+        reason = ("the pairwise covariance matrix has non-finite entries "
+                  "even after pruning thin item pairs")
+        return _result(False, None, "not_estimable", [], reason, pair_summary,
+                       None, None, None,
+                       f"Cronbach's alpha is not estimable: {reason} "
+                       f"({sparse_note}).")
+
+    item_var_sum = float(np.trace(S_arr))
+    total_var = float(S_arr.sum())
+    if not np.isfinite(total_var) or total_var <= 0:
+        reason = (f"the implied total-score variance is {total_var:.4g} "
+                  f"(<= 0), so alpha has no defensible value; pairwise "
+                  f"covariances estimated on different subsamples need not "
+                  f"form a valid covariance matrix")
+        return _result(False, None, "not_estimable", [], reason, pair_summary,
+                       None, None, None,
+                       f"Cronbach's alpha is not estimable: {reason} "
+                       f"({sparse_note}).")
+
+    alpha = (k / (k - 1)) * (1.0 - item_var_sum / total_var)
+
+    # PSD diagnostic: pairwise covariances come from different subsamples,
+    # so the assembled matrix can be indefinite - alpha is then only an
+    # approximation and the paper must say so.
+    psd: bool | None = None
+    min_eig: float | None = None
+    d_sd = np.sqrt(np.diag(S_arr))
+    if np.all(d_sd > 0):
+        R = S_arr / np.outer(d_sd, d_sd)
+        min_eig = float(np.linalg.eigvalsh((R + R.T) / 2.0).min())
+        psd = bool(min_eig >= -1e-8)
+
+    # listwise comparison over all numeric items, when it exists at all
+    alpha_listwise: float | None = None
+    if n_complete >= min_item_n and n_items > 1:
+        d = X.dropna()
+        tot = d.sum(axis=1)
+        tv = float(tot.var(ddof=1))
+        if np.isfinite(tv) and tv > 0:
+            alpha_listwise = float((n_items / (n_items - 1))
+                                   * (1.0 - float(d.var(ddof=1).sum()) / tv))
+
+    dropped_for_alpha = [c for c in numeric_cols if c not in kept]
+    if dropped_for_alpha:
+        caveats.append(
+            f"alpha is computed on {k} of {n_items} items; "
+            f"{len(dropped_for_alpha)} were excluded (see items_excluded).")
+    if k < 0.75 * n_items:
+        caveats.append(
+            f"alpha refers to a {k}-item subset, not the full {n_items}-item "
+            f"instrument; do not report it as the reliability of the whole "
+            f"scale.")
+    if n_complete == 0:
+        caveats.append(
+            "no person answered every item, so listwise-complete CTT is "
+            "impossible on this matrix; alpha is pairwise-present.")
+    if fill_rate < 0.9:
+        caveats.append(
+            "pairwise covariances are estimated on different subsamples of "
+            "students (who saw which items is not random under adaptive "
+            "assignment), so alpha is conditional on that mechanism and may "
+            "be biased if data are not missing at random.")
+    if psd is False:
+        caveats.append(
+            f"the pairwise covariance matrix is not positive semi-definite "
+            f"(minimum eigenvalue of the implied correlation matrix "
+            f"{min_eig:.3f}); no single covariance structure fits all "
+            f"pairwise estimates, so alpha is an approximation.")
+
+    scope = f"{k} items" if k == n_items else f"{k} of {n_items} items"
+    summary = (
+        f"Cronbach's alpha = {alpha:.3f} across {scope}, estimated by "
+        f"pairwise-present covariance ({sparse_note}); every covariance "
+        f"uses at least {pair_summary['min']} jointly-observed responses "
+        f"(median {pair_summary['median']:.0f})."
+    )
+    if n_complete == 0:
+        summary += (" Listwise-complete estimation is impossible here: no "
+                    "student answered all items.")
+    elif alpha_listwise is not None:
+        summary += (f" Listwise-complete alpha on {n_complete} students is "
+                    f"{alpha_listwise:.3f}.")
+    if psd is False:
+        summary += (" The assembled pairwise covariance matrix is not "
+                    "positive semi-definite, so treat the value as "
+                    "approximate.")
+
+    return _result(True, alpha, "pairwise_present", kept, None, pair_summary,
+                   psd, min_eig, alpha_listwise, summary)
+
+
+def psy_omega(cfa_result):
+    """P2: McDonald's omega-total from a psy_cfa result.
+
+    omega = (sum lambda)^2 / ((sum lambda)^2 + sum theta) using
+    standardized loadings (theta_i = 1 - lambda_i^2).
+    """
+    lams = [row["est_std"] for row in cfa_result["loadings"]]
+    s = sum(lams)
+    theta = sum(1.0 - l * l for l in lams)
+    return {"omega_total": s * s / (s * s + theta),
+            "n_items": len(lams),
+            "from_loadings": lams}
+
+
+def psy_cfa(items_df, model, estimator="MLR"):
+    """P3: single-group CFA (lavaan, FIML). Returns fit + std loadings."""
+    try:
+        from src.r_bridge import run_r_script
+    except ModuleNotFoundError:  # copied flat into a run output dir
+        from r_bridge import run_r_script
+
+    return run_r_script("cfa_fit.R", {
+        "items": _items_payload(items_df),
+        "model": model,
+        "estimator": estimator,
+    })
+
+
+def psy_invariance(items_df, group, model):
+    """P6: configural->metric->scalar ladder (lavaan, Chen 2007 rules)."""
+    try:
+        from src.r_bridge import run_r_script
+    except ModuleNotFoundError:  # copied flat into a run output dir
+        from r_bridge import run_r_script
+
+    return run_r_script("invariance_ladder.R", {
+        "items": _items_payload(items_df),
+        "group": [None if g is None else str(g) for g in list(group)],
+        "model": model,
+    }, timeout_s=1200)
+
+
+def psy_grm(items_df, itemtype="graded"):
+    """P4: IRT calibration (mirt GRM for Likert; "2PL" for binary)."""
+    import numpy as np
+
+    try:
+        from src.r_bridge import run_r_script
+    except ModuleNotFoundError:  # copied flat into a run output dir
+        from r_bridge import run_r_script
+
+    payload = {}
+    for c in items_df.columns:
+        v = items_df[c]
+        payload[str(c)] = [None if (isinstance(x, float) and np.isnan(x))
+                           else int(x) for x in v.tolist()]
+    return run_r_script("irt_grm.R", {"items": payload,
+                                      "itemtype": itemtype},
+                        timeout_s=1200)
+
+
+def psy_dif(items_df, group):
+    """P5: ordinal logistic DIF (McFadden-scaled effect bands .02/.05)."""
+    import numpy as np
+
+    try:
+        from src.r_bridge import run_r_script
+    except ModuleNotFoundError:  # copied flat into a run output dir
+        from r_bridge import run_r_script
+
+    payload = {}
+    for c in items_df.columns:
+        v = items_df[c]
+        payload[str(c)] = [None if (isinstance(x, float) and np.isnan(x))
+                           else int(x) for x in v.tolist()]
+    return run_r_script("dif_ordinal.R", {
+        "items": payload,
+        "group": [None if g is None else str(g) for g in list(group)],
+    }, timeout_s=1200)
+
+
+def psy_cdm(responses_df, q_matrix, attributes, model="DINA"):
+    """P7: cognitive diagnosis (DINA/GDINA via the R CDM package).
+
+    responses_df: binary (0/1/NaN) student x item frame.
+    q_matrix: {item_name: [1-based attribute indices]}.
+    Structural sparsity (NaN) is handled natively - never impute.
+    """
+    import numpy as np
+
+    try:
+        from src.r_bridge import run_r_script
+    except ModuleNotFoundError:  # copied flat into a run output dir
+        from r_bridge import run_r_script
+
+    payload = {}
+    for c in responses_df.columns:
+        v = responses_df[c]
+        payload[str(c)] = [None if (isinstance(x, float) and np.isnan(x))
+                           else int(x) for x in v.tolist()]
+    return run_r_script("cdm_fit.R", {
+        "responses": payload,
+        "q_matrix": {str(k): list(v) for k, v in q_matrix.items()},
+        "attributes": list(attributes),
+        "model": model,
+    }, timeout_s=1200)

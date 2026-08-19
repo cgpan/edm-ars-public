@@ -1,8 +1,11 @@
 # Raw data (large, not for version control)
 data/raw/
 
-# Pipeline run outputs — ignore everything
-output/
+# Pipeline run outputs — ignore the CONTENTS, but leave the directory
+# itself traversable: git cannot re-include a file whose PARENT DIRECTORY
+# is excluded, and the evidence negations at the end of this file depend
+# on being able to descend into runs/*/output*/.
+output/**
 
 # Findings memory — contents are local, only .gitkeep is tracked
 findings_memory/*
@@ -37,3 +40,42 @@ texput.log
 # OS
 .DS_Store
 Thumbs.db
+
+# Local working directory (not for version control)
+files/
+
+# Regression-run train/test CSVs can balloon when an LLM mis-encodes a
+# continuous predictor (one-hot of a near-unique-valued column produces
+# thousands of columns and hundreds of MB; observed at >1.6 GB on a
+# gpt-5.4 R3.5 run). Exclude them globally; the JSON artifacts and
+# figures are sufficient evidence for regression diffs.
+regression/**/train_X.csv
+regression/**/test_X.csv
+regression/**/train_y.csv
+regression/**/test_y.csv
+regression/**/test_protected.csv
+regression/**/train_school_ids.csv
+regression/**/test_school_ids.csv
+
+# Arc T idea tournaments (candidates, kills, rankings) — regenerable
+ideas/
+
+# Run outputs are ignored (line above), but the small JSON EVIDENCE inside them
+# is the input to scripts/audit_feasibility.py (the V1 gate) and
+# scripts/backtest_ranker.py (the V2 gate). Those files lived only inside a
+# git worktree until 2026-07-11, when deleting the worktree took the V1 gate's
+# entire 26-spec denominator with it -- the audit silently reported 0 canonical
+# specs and still exited 0. Evidence a gate depends on must be tracked.
+!runs/*/output*/
+!runs/*/output*/lsar_review/
+!runs/*/output*/lsar_review/cycle_*/
+!runs/*/output*/research_spec.json
+!runs/*/output*/checkpoint.json
+!runs/*/output*/data_report.json
+!runs/*/output*/results.json
+!runs/*/output*/literature_context.json
+!runs/*/output*/retrieved_literature.json
+!runs/*/output*/manuscript_lint.json
+!runs/*/output*/review_report.json
+!runs/*/output*/lsar_review/gate_summary.json
+!runs/*/output*/lsar_review/cycle_*/scores.json

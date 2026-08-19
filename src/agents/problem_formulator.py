@@ -82,6 +82,38 @@ def _jaccard_similarity(set_a: set[str], set_b: set[str]) -> float:
     return len(set_a & set_b) / len(set_a | set_b)
 
 
+_RANK_MISSING = 10 ** 6
+
+
+def _int_cfg(cfg: dict, key: str, default: int) -> int:
+    """Read an int config value, falling back to ``default`` on anything odd.
+
+    A typo in ``config.yaml`` must never abort literature retrieval — the
+    stage runs first and a crash here costs the whole pipeline run.
+    """
+    try:
+        value = cfg.get(key, default)
+        return default if value is None else int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _retrieval_rank_or_last(paper: dict) -> int:
+    """S2 relevance rank of a record; last place when absent or unusable.
+
+    Legacy pools (and arXiv records) carry no ``retrieval_rank`` at all, and
+    a pool round-tripped through JSON can carry it as a string. Both degrade
+    to "least relevant" rather than raising.
+    """
+    rank = paper.get("retrieval_rank")
+    if rank is None:
+        return _RANK_MISSING
+    try:
+        return int(rank)
+    except (TypeError, ValueError):
+        return _RANK_MISSING
+
+
 def _verify_paper_three_layers(
     paper: dict,
     real_ids: set[str],
@@ -139,6 +171,7 @@ class ProblemFormulator(BaseAgent):
         findings_memory_summary: str = "",
         n_candidate_specs: int = 1,
         studied_outcomes: list[str] | None = None,
+        locked_research_spec: dict | None = None,
         **kwargs: Any,
     ) -> dict:
         """
@@ -148,6 +181,10 @@ class ProblemFormulator(BaseAgent):
             findings_memory_summary: Summary of prior runs from FindingsMemory.
             n_candidate_specs: Number of candidate specs to generate (1 = current behavior).
             studied_outcomes: Outcome variables already studied in prior runs.
+            locked_research_spec: Phase 3b.5 / wiring unblock. When non-None,
+                threaded into _build_user_message so the causal_soo PF prompt
+                can refine the locked spec rather than complaining there's
+                no spec to refine.
 
         Returns:
             dict with keys ``research_spec`` and ``literature_context``.
@@ -167,6 +204,7 @@ class ProblemFormulator(BaseAgent):
                 findings_memory_summary=findings_memory_summary,
                 n_candidate_specs=n_candidate_specs,
                 studied_outcomes=studied_outcomes or [],
+                locked_research_spec=locked_research_spec,
             )
 
         return self._run_single(
@@ -177,6 +215,7 @@ class ProblemFormulator(BaseAgent):
             s2_context=s2_context,
             findings_memory_summary=findings_memory_summary,
             studied_outcomes=studied_outcomes or [],
+            locked_research_spec=locked_research_spec,
         )
 
     def _run_single(
@@ -188,6 +227,7 @@ class ProblemFormulator(BaseAgent):
         s2_context: dict,
         findings_memory_summary: str = "",
         studied_outcomes: list[str] | None = None,
+        locked_research_spec: dict | None = None,
     ) -> dict:
         """Single-branch generation — the original behavior."""
         user_message = self._build_user_message(
@@ -199,6 +239,7 @@ class ProblemFormulator(BaseAgent):
             findings_memory_summary=findings_memory_summary,
             prior_specs=[],
             studied_outcomes=studied_outcomes or [],
+            locked_research_spec=locked_research_spec,
         )
 
         llm_response = self.call_llm(user_message)
@@ -213,6 +254,11 @@ class ProblemFormulator(BaseAgent):
         return {
             "research_spec": research_spec,
             "literature_context": literature_context,
+            # Arc P3: keep the FULL retrieved pool, not just the 8-12 the
+            # model echoed. The Writer tops the reference list back up
+            # from this to reach venue citation norms; discarding it was
+            # the reason manuscripts carried 4-26 references.
+            "retrieved_literature": s2_context,
         }
 
     def _run_multi_branch(
@@ -224,6 +270,7 @@ class ProblemFormulator(BaseAgent):
         findings_memory_summary: str,
         n_candidate_specs: int,
         studied_outcomes: list[str],
+        locked_research_spec: dict | None = None,
     ) -> dict:
         """N-branch generation: generate N candidate specs and select the best."""
         candidates: list[dict] = []
@@ -240,6 +287,7 @@ class ProblemFormulator(BaseAgent):
                 findings_memory_summary=findings_memory_summary,
                 prior_specs=prior_specs,
                 studied_outcomes=studied_outcomes,
+                locked_research_spec=locked_research_spec,
             )
             # Increasing temperature for diversity: 0.7 → 0.85 → 1.0
             temp_override = min(0.7 + i * 0.15, 1.0)
@@ -293,6 +341,8 @@ class ProblemFormulator(BaseAgent):
         return {
             "research_spec": best_spec,
             "literature_context": best_lit,
+            # Arc P3: full retrieved pool (see _run_single).
+            "retrieved_literature": s2_context,
         }
 
     def _select_best_candidate(
@@ -397,21 +447,51 @@ class ProblemFormulator(BaseAgent):
             })
         return self._DEFAULT_S2_QUERIES
 
+    # Arc P5 (F-P5-DEPTH-RECENCY-SKEW): the ranking signals are requested
+    # here AND hand-mapped in the comprehension below. Adding a name to
+    # this string without extending the mapping is a silent no-op.
+    # All of these are free on /paper/search: no extra quota, no extra
+    # request, only a larger response payload. `tldr` is deliberately
+    # excluded (model-generated, sparse, duplicates `abstract`).
+    _S2_FIELDS: str = (
+        "paperId,title,authors,year,abstract,venue,externalIds,"
+        "citationCount,influentialCitationCount,referenceCount,"
+        "publicationDate,fieldsOfStudy,publicationTypes,isOpenAccess"
+    )
+
+    # Tag stamped on records retrieved by the unwindowed seminal-work
+    # query so the trim (and any downstream ranker) can tell them apart
+    # from the topical queries' records.
+    _SEMINAL_QUERY_TAG: str = "__seminal__"
+
     def _run_single_s2_query(
         self,
         query: str,
         base_url: str,
         limit: int,
-        year_start: int,
-        current_year: int,
         headers: dict[str, str],
         max_retries: int,
         backoff_base: float,
         backoff_factor: float,
         use_jitter: bool,
         delay_s: float,
+        year_range: str | None = None,
+        min_citation_count: int | None = None,
     ) -> list[dict]:
-        """Execute one S2 search query with retry/backoff. Returns list of paper dicts."""
+        """Execute one S2 search query with retry/backoff. Returns list of paper dicts.
+
+        Args:
+            year_range: S2 ``year`` filter value, or ``None`` to send no
+                year filter at all. S2 accepts ``"2019"``, ``"2016-2020"``
+                (inclusive), ``"2010-"`` (open forward) and ``"-2015"``
+                (open backward). ``None`` is what makes seminal work
+                reachable — a rolling "last N years" window can never
+                return it (F-P5-DEPTH-RECENCY-SKEW).
+            min_citation_count: server-side ``minCitationCount`` filter,
+                or ``None`` to omit. Used by the seminal-work query to
+                force a high-influence slice into the pool independent of
+                where relevance ranking happened to place it.
+        """
         last_exc: Exception | None = None
         retryable = True
 
@@ -430,14 +510,22 @@ class ProblemFormulator(BaseAgent):
                     })
                     time.sleep(delay)
 
+                params: dict[str, Any] = {
+                    "query": query,
+                    # Arc P3: `venue` is REQUIRED for honest BibTeX.
+                    # Without it every non-arXiv entry fell back to a
+                    # fabricated EDM-proceedings booktitle.
+                    "fields": self._S2_FIELDS,
+                    "limit": limit,
+                }
+                if year_range:
+                    params["year"] = year_range
+                if min_citation_count:
+                    params["minCitationCount"] = min_citation_count
+
                 resp = requests.get(
                     f"{base_url}/paper/search",
-                    params={
-                        "query": query,
-                        "fields": "paperId,title,authors,year,abstract",
-                        "limit": limit,
-                        "year": f"{year_start}-{current_year}",
-                    },
+                    params=params,
                     headers=headers,
                     timeout=15,
                 )
@@ -465,8 +553,29 @@ class ProblemFormulator(BaseAgent):
                         "authors": [a.get("name", "") for a in item.get("authors", [])],
                         "year": item.get("year"),
                         "abstract": item.get("abstract") or "",
+                        "venue": item.get("venue") or "",
+                        "doi": (item.get("externalIds") or {}).get("DOI") or "",
+                        # Arc P5 — ranking signals. None (not 0) when S2
+                        # omits them, so a ranker can tell "no data" from
+                        # "genuinely uncited"; a 0 default would rank every
+                        # record S2 has no counts for dead last.
+                        "citationCount": item.get("citationCount"),
+                        "influentialCitationCount": item.get("influentialCitationCount"),
+                        "referenceCount": item.get("referenceCount"),
+                        "publicationDate": item.get("publicationDate") or "",
+                        "fieldsOfStudy": item.get("fieldsOfStudy") or [],
+                        # Consumed by citations.classify_entry() to pick
+                        # @article vs @inproceedings from metadata instead
+                        # of guessing from the venue string.
+                        "publicationTypes": item.get("publicationTypes") or [],
+                        "isOpenAccess": item.get("isOpenAccess"),
+                        # Provenance: S2 returns RELEVANCE order and we must
+                        # not lose it again (F-P5-DEPTH-RECENCY-SKEW).
+                        "matched_query": query,
+                        "retrieval_rank": rank,
+                        "source": "s2",
                     }
-                    for item in data.get("data", [])
+                    for rank, item in enumerate(data.get("data", []))
                     if item.get("paperId")
                 ]
 
@@ -485,6 +594,139 @@ class ProblemFormulator(BaseAgent):
         })
         return []
 
+    @staticmethod
+    def _build_year_range(
+        year_filter: Any,
+        year_floor: Any,
+        current_year: int,
+    ) -> str | None:
+        """Return the S2 ``year`` param value for the topical queries.
+
+        ``year_filter`` is the legacy rolling window in years. A rolling
+        window is exactly what made foundational work unreachable
+        (F-P5-DEPTH-RECENCY-SKEW): with ``year_filter: 10`` the request
+        carried ``year=2016-2026``, so no client-side re-ranking could
+        ever surface a 1983 paper — the record was excluded by the
+        request itself.
+
+        Semantics:
+            ``year_filter`` > 0        -> ``"<current-N>-<current>"`` (legacy)
+            ``year_filter`` null/0     -> ``"<year_floor>-<current>"``
+            ...and ``year_floor`` null -> ``None`` (no year param at all)
+        """
+        try:
+            window = int(year_filter) if year_filter is not None else 0
+        except (TypeError, ValueError):
+            window = 0
+        if window > 0:
+            return f"{current_year - window}-{current_year}"
+        if year_floor is None:
+            return None
+        try:
+            floor = int(year_floor)
+        except (TypeError, ValueError):
+            return None
+        return f"{floor}-{current_year}"
+
+    @classmethod
+    def _trim_pool_preserving_seminal(
+        cls,
+        papers: list[dict],
+        max_results: int,
+        reserve: int,
+    ) -> list[dict]:
+        """Trim to ``max_results`` without discarding the seminal records.
+
+        The pool is trimmed off a year-descending sort, so the records the
+        seminal query exists to retrieve — the oldest ones — are the first
+        casualties. Retrieving them and then trimming them away would make
+        the whole retrieval change a no-op. Up to ``reserve`` seminal
+        records displace the *least relevant* non-seminal records (worst
+        ``retrieval_rank`` first) rather than the newest ones.
+        """
+        if max_results <= 0:
+            return []
+        if len(papers) <= max_results or reserve <= 0:
+            return papers[:max_results]
+
+        kept = list(papers[:max_results])
+        dropped_seminal = [
+            p for p in papers[max_results:]
+            if p.get("matched_query") == cls._SEMINAL_QUERY_TAG
+        ]
+        if not dropped_seminal:
+            return kept
+
+        n_kept_seminal = sum(
+            1 for p in kept if p.get("matched_query") == cls._SEMINAL_QUERY_TAG
+        )
+        promote = dropped_seminal[: max(0, reserve - n_kept_seminal)]
+        if not promote:
+            return kept
+
+        # Eviction order: worst retrieval_rank first, then latest position.
+        evictable = [
+            (i, p) for i, p in enumerate(kept)
+            if p.get("matched_query") != cls._SEMINAL_QUERY_TAG
+        ]
+        evictable.sort(key=lambda ip: (-_retrieval_rank_or_last(ip[1]), -ip[0]))
+        for paper in promote:
+            if not evictable:
+                break
+            idx, _ = evictable.pop(0)
+            kept[idx] = paper
+
+        kept.sort(key=lambda p: p.get("year") or 0, reverse=True)
+        return kept
+
+    def _run_seminal_s2_query(
+        self,
+        query: str,
+        sem_cfg: dict,
+        base_url: str,
+        headers: dict[str, str],
+        max_retries: int,
+        backoff_base: float,
+        backoff_factor: float,
+        use_jitter: bool,
+        delay_s: float,
+    ) -> list[dict]:
+        """One extra, deliberately UNWINDOWED S2 request for seminal work.
+
+        ``minCitationCount`` is a server-side filter, so this forces a
+        high-influence slice into the pool independent of where relevance
+        ranking happened to place it. Failure is non-fatal by contract:
+        the caller keeps whatever the topical queries returned.
+
+        Cost: +1 request and ~+1.5 s (1.0 s inter-query pause + the
+        existing ``request_delay_s``) per run. No added quota.
+        """
+        try:
+            time.sleep(1.0)
+            papers = self._run_single_s2_query(
+                query=query,
+                base_url=base_url,
+                limit=int(sem_cfg.get("limit", 20)),
+                headers=headers,
+                max_retries=max_retries,
+                backoff_base=backoff_base,
+                backoff_factor=backoff_factor,
+                use_jitter=use_jitter,
+                delay_s=delay_s,
+                year_range=None,  # explicitly unwindowed — the whole point
+                min_citation_count=int(sem_cfg.get("min_citations", 50)),
+            )
+        except Exception as exc:  # noqa: BLE001 — must never abort the search
+            self.ctx.log.append({
+                "timestamp": datetime.utcnow().isoformat(),
+                "agent": self.agent_name,
+                "message": f"S2 seminal query failed (non-fatal): {exc}",
+            })
+            return []
+        for paper in papers:
+            paper["matched_query"] = self._SEMINAL_QUERY_TAG
+        return papers
+
     def _search_semantic_scholar(self, user_prompt: str | None) -> dict:
         """Query S2 with multiple short keyword queries and return merged results.
 
@@ -493,19 +735,26 @@ class ProblemFormulator(BaseAgent):
         by year descending.  This avoids the zero-result problem caused by passing
         long natural-language prompts or dataset-specific identifiers to the S2
         full-text search endpoint.
+
+        Arc P5: the topical queries no longer carry a rolling recency floor,
+        and one extra unwindowed high-citation query runs after them, so
+        foundational work is reachable at all (F-P5-DEPTH-RECENCY-SKEW).
+        Cost: 4 S2 requests per run instead of 3, ~+1.5 s, no added quota.
         """
         cfg = self.config.get("semantic_scholar", {})
         base_url = cfg.get("base_url", "https://api.semanticscholar.org/graph/v1")
         max_results = int(cfg.get("max_results", 10))
-        year_filter = int(cfg.get("year_filter", 10))
         delay_s = float(cfg.get("request_delay_s", 0.5))
         max_retries = int(cfg.get("max_retries", 3))
         backoff_base = float(cfg.get("backoff_base_s", 1.0))
         backoff_factor = float(cfg.get("backoff_factor", 2.0))
         use_jitter = bool(cfg.get("backoff_jitter", True))
+        sem_cfg = cfg.get("seminal_query") or {}
 
         current_year = datetime.utcnow().year
-        year_start = current_year - year_filter
+        year_range = self._build_year_range(
+            cfg.get("year_filter", 10), cfg.get("year_floor", 1900), current_year
+        )
 
         s2_api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
         headers: dict[str, str] = {}
@@ -528,14 +777,13 @@ class ProblemFormulator(BaseAgent):
                 query=query,
                 base_url=base_url,
                 limit=per_query_limit,
-                year_start=year_start,
-                current_year=current_year,
                 headers=headers,
                 max_retries=max_retries,
                 backoff_base=backoff_base,
                 backoff_factor=backoff_factor,
                 use_jitter=use_jitter,
                 delay_s=delay_s,
+                year_range=year_range,
             )
             for paper in papers:
                 pid = paper.get("paperId", "")
@@ -551,9 +799,53 @@ class ProblemFormulator(BaseAgent):
                 ),
             })
 
-        # Sort by year descending, trim to max_results
+        # Arc P5 (F-P5-DEPTH-RECENCY-SKEW): one extra UNWINDOWED request so
+        # foundational work is reachable at all. Skipped when the topical
+        # queries produced a degenerate pool — that means S2 is failing or
+        # the queries are unusable, and spending another request would only
+        # compound 429 exposure for a pool that cannot be used anyway.
+        min_primary_pool = _int_cfg(sem_cfg, "min_primary_pool", 3)
+        if (
+            bool(sem_cfg.get("enabled", True))
+            and queries
+            and len(merged_papers) >= min_primary_pool
+        ):
+            seminal = self._run_seminal_s2_query(
+                query=queries[0],
+                sem_cfg=sem_cfg,
+                base_url=base_url,
+                headers=headers,
+                max_retries=max_retries,
+                backoff_base=backoff_base,
+                backoff_factor=backoff_factor,
+                use_jitter=use_jitter,
+                delay_s=delay_s,
+            )
+            n_new = 0
+            for paper in seminal:
+                pid = paper.get("paperId", "")
+                if pid and pid not in seen_ids:
+                    seen_ids.add(pid)
+                    merged_papers.append(paper)
+                    n_new += 1
+            self.ctx.log.append({
+                "timestamp": datetime.utcnow().isoformat(),
+                "agent": self.agent_name,
+                "message": (
+                    f"S2 seminal query (no year window, minCitationCount="
+                    f"{sem_cfg.get('min_citations', 50)}): {len(seminal)} results, "
+                    f"{n_new} new, {len(merged_papers)} unique total"
+                ),
+            })
+
+        # Sort by year descending, trim to max_results — but never trim away
+        # the seminal records, which by construction sort last.
         merged_papers.sort(key=lambda p: p.get("year") or 0, reverse=True)
-        final_papers = merged_papers[:max_results]
+        final_papers = self._trim_pool_preserving_seminal(
+            merged_papers,
+            max_results,
+            _int_cfg(sem_cfg, "reserved_pool_slots", _int_cfg(sem_cfg, "limit", 20)),
+        )
 
         if not final_papers:
             return {
@@ -704,9 +996,18 @@ class ProblemFormulator(BaseAgent):
         merged = s2_papers + new_papers
         merged.sort(key=lambda p: p.get("year") or 0, reverse=True)
 
-        # Trim to combined max
-        max_total = int(self.config.get("semantic_scholar", {}).get("max_results", 20))
-        merged = merged[:max_total]
+        # Trim to combined max. Second year-descending trim site: without
+        # the seminal reservation the arXiv preprints (all recent) would
+        # push the newly-retrieved old S2 records straight back out of the
+        # pool, making the retrieval change a no-op (F-P5-DEPTH-RECENCY-SKEW).
+        s2_cfg = self.config.get("semantic_scholar", {})
+        sem_cfg = s2_cfg.get("seminal_query") or {}
+        max_total = int(s2_cfg.get("max_results", 20))
+        merged = self._trim_pool_preserving_seminal(
+            merged,
+            max_total,
+            _int_cfg(sem_cfg, "reserved_pool_slots", _int_cfg(sem_cfg, "limit", 20)),
+        )
 
         self.ctx.log.append({
             "timestamp": datetime.utcnow().isoformat(),
@@ -736,6 +1037,7 @@ class ProblemFormulator(BaseAgent):
         findings_memory_summary: str = "",
         prior_specs: list[str] | None = None,
         studied_outcomes: list[str] | None = None,
+        locked_research_spec: dict | None = None,
     ) -> str:
         parts = [
             "## Dataset Registry (YAML)",
@@ -753,6 +1055,36 @@ class ProblemFormulator(BaseAgent):
             json.dumps(s2_context, indent=2),
             "```",
         ]
+        # V3.2 Arc D: deterministic design-feasibility report + gap
+        # matrix. Computed here (not at call sites) so every PF path —
+        # fresh generation, multi-candidate, and locked-spec refine —
+        # receives them. Both are pure functions of inputs this method
+        # already holds; failures are non-fatal (advisory context, and
+        # PF must still run on registries predating design_feasibility).
+        try:
+            from src.design_selector import format_design_report, select_design
+
+            task_type = getattr(self.ctx, "task_type", None)
+            report = select_design(
+                registry,
+                question=user_prompt,
+                intent=(
+                    "targeting"
+                    if task_type == "causal_itr"
+                    else "causal"
+                    if task_type == "causal_soo"
+                    else None
+                ),
+            )
+            parts += ["", format_design_report(report)]
+        except Exception:
+            pass
+        try:
+            from src.gap_miner import build_gap_matrix, format_gap_matrix
+
+            parts += ["", format_gap_matrix(build_gap_matrix(s2_context))]
+        except Exception:
+            pass
         if findings_memory_summary:
             parts += [
                 "",
@@ -783,18 +1115,49 @@ class ProblemFormulator(BaseAgent):
                 "## Revision Instructions from Critic",
                 revision_instructions,
             ]
-        parts += [
-            "",
-            "## Task",
-            (
-                "Design a prediction research question using the HSLS:09 dataset. "
-                "Select 8–12 of the most relevant papers from the retrieved literature "
-                "(copy their paperId, title, authors, year, abstract exactly) to populate "
-                "literature_context.papers. Ground the novelty claim using these papers. "
-                "Return ONLY a JSON object with 'research_spec' and 'literature_context' "
-                "keys, wrapped in a ```json code block."
-            ),
-        ]
+        # Phase 3b.5 (narrow exception #3): wire the locked research_spec
+        # through to the user message so the causal_soo PF prompt's
+        # "refine the locked spec" branch has the spec to refine.
+        if locked_research_spec is not None:
+            parts += [
+                "",
+                "## Locked Research Spec (refine, do not redesign)",
+                "```json",
+                json.dumps(locked_research_spec, indent=2),
+                "```",
+            ]
+            parts += [
+                "",
+                "## Task",
+                (
+                    "Refine the locked research_spec above per the system "
+                    "prompt's instructions. Apply the methodology skills (G1 "
+                    "DAG, G2 estimand definition, hsls09-causal-conventions) "
+                    "to the locked treatment, outcome, adjustment set, and "
+                    "method battery. Flag methodological concerns inline "
+                    "(ESC-07 median-split, IDF-02 post-treatment covariates, "
+                    "etc.). DO NOT redesign the study; the user has chosen "
+                    "the variables and methods deliberately. Select 8-12 of "
+                    "the most relevant papers from the retrieved literature "
+                    "to populate literature_context.papers (copy paperId, "
+                    "title, authors, year, abstract exactly). Return ONLY a "
+                    "JSON object with 'research_spec' and 'literature_context' "
+                    "keys, wrapped in a ```json code block."
+                ),
+            ]
+        else:
+            parts += [
+                "",
+                "## Task",
+                (
+                    "Design a prediction research question using the HSLS:09 dataset. "
+                    "Select 8-12 of the most relevant papers from the retrieved literature "
+                    "(copy their paperId, title, authors, year, abstract exactly) to populate "
+                    "literature_context.papers. Ground the novelty claim using these papers. "
+                    "Return ONLY a JSON object with 'research_spec' and 'literature_context' "
+                    "keys, wrapped in a ```json code block."
+                ),
+            ]
         return "\n".join(parts)
 
     def _filter_hallucinated_papers(self, literature_context: dict, s2_context: dict) -> dict:
