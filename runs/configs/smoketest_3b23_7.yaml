@@ -133,7 +133,7 @@ review_gate:
   median_samples: 3          # borderline-triggered median review (MAD 1.9)
   median_trigger_band: 1.5
   lsar_project_path: "${LSAR_HOME}"
-  lsar_config_path: "${LSAR_HOME}\\config.yaml"
+  lsar_config_path: "${LSAR_HOME}/config.yaml"
   venue: "EDM"
   max_cycles: 1
   pass_threshold: 5.5
