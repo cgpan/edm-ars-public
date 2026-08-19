@@ -102,7 +102,7 @@ def test_container_paths_are_not_flagged() -> None:
     [
         "someone@gmail.com",  # audit-allow-path
         "someone@outlook.com",  # audit-allow-path
-        "cp3280@tc.columbia.edu",  # audit-allow-path
+        "abc1234@tc.someuniversity.edu",  # audit-allow-path
         "a.person@sub.dept.university.ac.uk",  # audit-allow-path
         "first.last+tag@company.io",  # audit-allow-path
     ],
@@ -149,16 +149,26 @@ def test_reserved_tld_exclusion_survives_backtracking() -> None:
         assert match is None, f"matched a reserved domain as {match.group(0)!r}"
 
 
-def test_the_address_that_slipped_through_is_gone_from_the_templates() -> None:
-    """Regression pin for the specific value the audit failed to catch."""
+def test_paper_templates_carry_no_real_address() -> None:
+    """Regression pin for the byline that shipped a real institutional address.
+
+    Asserted as a PROPERTY, not as the literal string. Pinning the exact
+    address would mean re-publishing it in this file, which is precisely
+    what removing it was meant to stop -- and it would only ever catch
+    that one value, not the next one someone pastes into a byline.
+    """
     for rel in (
         "templates/paper_template_v2.tex",
         "skills/writing/acm-acmart-sigconf-template/paper_template_v2.tex",
+        "templates/paper_template_journal.tex",
+        "templates/paper_template.tex",
     ):
         path = REPO_ROOT / rel
         if not path.exists():
             continue
-        assert "cp3280" not in path.read_text(encoding="utf-8"), rel
+        hits = scan([path], REPO_ROOT)
+        emails = [h for h in hits if h[0] == "personal-email"]
+        assert not emails, f"{rel} carries a real address: {emails}"
 
 
 def test_env_var_form_is_not_flagged() -> None:
