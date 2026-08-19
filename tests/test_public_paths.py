@@ -2,7 +2,7 @@
 
 The regression this guards against is specific. During the public release
 a hand-written shell scan reported the tree clean, and it was not:
-``config.yaml`` still held ``lsar_project_path: "H:\\\\My Drive\\\\LSAR"``.
+``config.yaml`` still held ``lsar_project_path: "H:\\\\My Drive\\\\LSAR"``.  audit-allow-path
 The scan's character class matched a single separator, YAML escaping had
 doubled it, and a check that looked thorough silently passed. These tests
 pin the escaping cases the scan has to survive.
@@ -54,7 +54,15 @@ _IS_PUBLIC_MIRROR = "edm-ars-public" in _origin_url(REPO_ROOT)
     reason="tree-wide path audit applies to the public mirror; this checkout is private",
 )
 def test_tracked_files_carry_no_machine_specific_paths() -> None:
-    """The property that actually matters: nothing published leaks a path."""
+    """The property that actually matters: nothing published leaks a path.
+
+    Scope note: this reads ``git ls-files``, so a brand-new file that has
+    not been added yet is invisible to it and the test passes vacuously
+    for that file. That is not a gap in the check -- untracked files are
+    not published -- but it does mean a green run before ``git add``
+    proves less than it appears to. This suite's own two files were
+    flagged on the first run after they were committed.
+    """
     hits = scan(tracked_files(REPO_ROOT), REPO_ROOT)
     rendered = "\n".join(f"  [{lbl}] {p}:{n}: {t}" for lbl, p, n, t in hits)
     assert not hits, f"machine-specific paths in tracked files:\n{rendered}"
@@ -84,7 +92,7 @@ def test_container_paths_are_not_flagged() -> None:
 
 
 def test_personal_email_is_caught() -> None:
-    assert "personal-email" in _match_labels("contact: someone@gmail.com")
+    assert "personal-email" in _match_labels("contact: someone@gmail.com")  # audit-allow-path
 
 
 def test_env_var_form_is_not_flagged() -> None:

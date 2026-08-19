@@ -7,7 +7,7 @@ a config file leaks whether or not it is secret.
 
 The check is deliberately mechanical. An earlier hand-written scan used a
 character class that matched exactly ONE path separator, so a
-YAML-escaped ``H:\\\\My Drive`` -- two literal backslashes in the file --
+YAML-escaped ``H:\\\\My Drive`` -- two literal backslashes in the file --  audit-allow-path
 did not match, and ``config.yaml`` shipped with a real local path anyway.
 Separator runs are therefore matched with ``+``, not a single character,
 and the patterns are unit-tested against that exact escaping.
@@ -34,7 +34,7 @@ BS = chr(92)
 SEP = "[" + BS + BS + "/]+"
 
 PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    # A mapped Windows drive plus a cloud-sync folder: H:\My Drive\...
+    # A mapped Windows drive plus a cloud-sync folder: H:\My Drive\...  audit-allow-path
     ("drive-path", re.compile("[A-Za-z]:" + SEP + r"My Drive")),
     # Any Windows user profile directory.
     ("windows-home", re.compile("[A-Za-z]:" + SEP + "Users" + SEP + r"[A-Za-z0-9._-]+")),
