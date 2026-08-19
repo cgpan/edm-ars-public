@@ -97,8 +97,68 @@ def test_container_paths_are_not_flagged() -> None:
     assert not _match_labels("USER /home/user")
 
 
-def test_personal_email_is_caught() -> None:
-    assert "personal-email" in _match_labels("contact: someone@gmail.com")  # audit-allow-path
+@pytest.mark.parametrize(
+    "address",
+    [
+        "someone@gmail.com",  # audit-allow-path
+        "someone@outlook.com",  # audit-allow-path
+        "cp3280@tc.columbia.edu",  # audit-allow-path
+        "a.person@sub.dept.university.ac.uk",  # audit-allow-path
+        "first.last+tag@company.io",  # audit-allow-path
+    ],
+    ids=["freemail", "freemail-2", "institutional", "multi-label", "plus-tag"],
+)
+def test_real_email_is_caught_whatever_the_domain(address: str) -> None:
+    """The original pattern listed four freemail domains and missed the rest.
+
+    An institutional address is more identifying than a consumer one, not
+    less: it names an affiliation as well as a person.
+    """
+    assert "personal-email" in _match_labels(f"contact: {address}")  # audit-allow-path
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "email@institution.edu",
+        "you@example.com",
+        "t@example.invalid",
+        "user@yourdomain.org",
+        "dev@localhost.localdomain",  # audit-allow-path
+    ],
+    ids=["byline-placeholder", "rfc2606", "reserved-invalid", "generic", "localhost"],
+)
+def test_placeholder_addresses_are_not_flagged(address: str) -> None:
+    """Templates must still be able to show the shape of an address."""
+    assert "personal-email" not in _match_labels(f"contact: {address}")  # audit-allow-path
+
+
+def test_reserved_tld_exclusion_survives_backtracking() -> None:
+    """A trailing negative lookbehind is not an exclusion.
+
+    The first attempt ended the pattern with ``(?<!\\.localdomain)``. The
+    engine answered by letting the TLD match one character less, so
+    ``dev@localhost.localdomain`` matched as ``dev@localhost.localdomai``
+    and the exclusion never fired. Excluding at a fixed position after
+    the ``@`` is what actually holds, so assert on the FULL match text,
+    not merely on whether something matched.
+    """
+    pattern = dict(PATTERNS)["personal-email"]
+    for address in ("dev@localhost.localdomain", "svc@my.test", "n@box.local"):  # audit-allow-path
+        match = pattern.search(address)
+        assert match is None, f"matched a reserved domain as {match.group(0)!r}"
+
+
+def test_the_address_that_slipped_through_is_gone_from_the_templates() -> None:
+    """Regression pin for the specific value the audit failed to catch."""
+    for rel in (
+        "templates/paper_template_v2.tex",
+        "skills/writing/acm-acmart-sigconf-template/paper_template_v2.tex",
+    ):
+        path = REPO_ROOT / rel
+        if not path.exists():
+            continue
+        assert "cp3280" not in path.read_text(encoding="utf-8"), rel
 
 
 def test_env_var_form_is_not_flagged() -> None:
