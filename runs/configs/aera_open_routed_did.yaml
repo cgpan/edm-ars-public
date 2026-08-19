@@ -135,7 +135,7 @@ review_gate:
   median_samples: 3          # borderline-triggered median review (MAD 1.9)
   median_trigger_band: 1.5
   lsar_project_path: "${LSAR_HOME}"
-  lsar_config_path: "${LSAR_HOME}\\config.yaml"
+  lsar_config_path: "${LSAR_HOME}/config.yaml"
   # FIRST ROUTED LIVE RUN (Option C, owner decision 2026-07-11).
   # Causal work routes to the policy family; AERA_OPEN is calibrated at
   # P25 7.3 (n=11 anchors, LSAR a8290f1) - the strictest gate in the

@@ -133,7 +133,7 @@ findings_memory:
 review_gate:
   enabled: true
   lsar_project_path: "${LSAR_HOME}"
-  lsar_config_path: "${LSAR_HOME}\\config.yaml"
+  lsar_config_path: "${LSAR_HOME}/config.yaml"
   venue: "EDM"
   max_cycles: 1
   pass_threshold: 5.5

@@ -166,8 +166,8 @@ review_gate:
   calibration_path: '${LSAR_HOME}/calibration/anchors_edm.yaml'
   median_samples: 3          # borderline-triggered median review (MAD 1.9)
   median_trigger_band: 1.5
-  lsar_project_path: "H:\\My Drive\\LSAR"
-  lsar_config_path: "H:\\My Drive\\LSAR\\config.yaml"
+  lsar_project_path: "${LSAR_HOME}"
+  lsar_config_path: "${LSAR_HOME}/config.yaml"
   venue: "EDM"
   max_cycles: 2
   pass_threshold: 5.5        # minimum overall score to pass
