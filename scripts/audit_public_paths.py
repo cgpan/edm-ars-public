@@ -41,7 +41,28 @@ PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # A POSIX home directory. /home/sandbox and /home/user are container
     # paths that belong in a Dockerfile, so they are allowed by name.
     ("posix-home", re.compile(r"/(?:home|Users)/(?!sandbox\b|user\b)[a-z][a-z0-9._-]*")),
-    ("personal-email", re.compile(r"[A-Za-z0-9._%+-]+@(?:gmail|outlook|yahoo|hotmail)\.com")),
+    # Any real address, not just freemail. The original pattern listed four
+    # consumer domains and so sailed past a real institutional address -- which
+    # is more identifying than a consumer one, not less, since it names an
+    # affiliation too. Reserved and obviously-fake domains (RFC 2606)
+    # plus the repo's own byline placeholder are excluded by name, so a
+    # template can still show what an address looks like.
+    (
+        "personal-email",
+        re.compile(
+            r"[A-Za-z0-9._%+-]+@"
+            # Placeholder second-level domains, rejected at a fixed position.
+            r"(?!(?:example|localhost|institution|yourdomain|your-domain"
+            r"|domain|email|host|server)\.)"
+            # Reserved TLDs (RFC 2606 / RFC 6761) anywhere in the domain. This
+            # is a LOOKAHEAD, not a trailing lookbehind: a lookbehind at the end
+            # is defeated by backtracking -- the engine matches one character
+            # less of the TLD and the exclusion never applies.
+            r"(?![A-Za-z0-9.-]*\.(?:invalid|test|local|localdomain|localhost"
+            r"|example)(?![A-Za-z0-9-]))"
+            r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}"
+        ),
+    ),
 ]
 
 #: Directories never worth scanning even in --all mode.
