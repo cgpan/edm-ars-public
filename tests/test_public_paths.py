@@ -10,6 +10,7 @@ pin the escaping cases the scan has to survive.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -185,6 +186,143 @@ def test_allow_marker_suppresses_an_intentional_example() -> None:
         assert not scan([doc], REPO_ROOT)
     finally:
         doc.unlink()
+
+
+#: Where the copyright holder's real name is allowed to appear, and why.
+#: LICENSE: an MIT grant needs a named holder or it grants nothing.
+#: README.md: the BibTeX entry cites an external published paper, and
+#: anonymising a citation misattributes real work.
+_NAME_ALLOWED_IN = frozenset({"LICENSE", "README.md"})
+
+
+def _copyright_holder() -> str:
+    """Read the real name out of LICENSE rather than hardcoding it here.
+
+    Writing the name into this file would add a THIRD published copy of
+    the very string the anonymisation removed -- the same mistake as
+    pinning a real email address in the test that deletes it. Deriving it
+    also means the check follows the name if the holder ever changes.
+    """
+    match = re.search(
+        r"Copyright \(c\)\s+\d{4}\s+(.+)", (REPO_ROOT / "LICENSE").read_text(encoding="utf-8")
+    )
+    assert match, "LICENSE has no parseable copyright line"
+    return match.group(1).strip().rstrip(".")
+
+
+def _name_variants(full_name: str) -> list[str]:
+    """Forms the same person's name is written in across a repo."""
+    variants = [full_name]
+    parts = full_name.split()
+    if len(parts) >= 2:
+        variants.append(f"{parts[-1]}, {' '.join(parts[:-1])}")  # BibTeX "Last, First"
+        variants.append(parts[0])  # bare first name, as in "flagged for <first>"
+    return variants
+
+
+@pytest.mark.skipif(
+    not _IS_PUBLIC_MIRROR,
+    reason="author anonymisation applies to the public mirror; this checkout is private",
+)
+def test_owner_name_appears_only_where_it_must() -> None:
+    """The private repo keeps the real byline; the public mirror must not.
+
+    That divergence is deliberate -- the owner publishes papers under
+    their own name -- which is exactly why it needs a test. A future sync
+    that copies templates or the Writer's author assertion across would
+    otherwise reintroduce the name silently.
+    """
+    variants = _name_variants(_copyright_holder())
+    offenders: list[str] = []
+    for path in tracked_files(REPO_ROOT):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel in _NAME_ALLOWED_IN:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for variant in variants:
+            if variant in text:
+                offenders.append(f"{rel} (as {variant!r})")
+                break
+    assert not offenders, "owner name outside LICENSE/README: " + ", ".join(offenders)
+
+
+_TEMPLATES = [
+    "templates/paper_template_v2.tex",
+    "templates/paper_template_journal.tex",
+    "skills/writing/acm-acmart-sigconf-template/paper_template_v2.tex",
+]
+
+
+@pytest.mark.skipif(
+    not _IS_PUBLIC_MIRROR,
+    reason="placeholders are a public-mirror property; the private repo keeps real names",
+)
+@pytest.mark.parametrize("rel", _TEMPLATES)
+def test_paper_templates_use_author_placeholders(rel: str) -> None:
+    """A user of this repo fills these in; they must not ship someone else's name."""
+    path = REPO_ROOT / rel
+    if not path.exists():
+        pytest.skip(f"{rel} not in this checkout")
+    text = path.read_text(encoding="utf-8")
+    # On a compiled line the underscore is escaped, so accept either form.
+    for token in ("Human_Author_Name", "AI_Name"):
+        escaped = token.replace("_", BS + "_")
+        assert token in text or escaped in text, f"{rel} lost the {token} placeholder"
+
+
+@pytest.mark.parametrize("rel", _TEMPLATES)
+def test_placeholders_on_compiled_lines_escape_their_underscores(rel: str) -> None:
+    """An underscore is a math-mode character, and these templates get compiled.
+
+    ``\\authorsnames{EDM-ARS, AI_Name, Human_Author_Name}`` is not
+    commented out, and pdflatex answers a bare underscore there with
+    "Missing $ inserted" -- every journal-format paper would fail to
+    build. Verified both ways against a minimal document.
+
+    Scoped to the placeholder tokens on purpose. A blanket ban on bare
+    underscores flags ACM's own CCS concept XML (``<concept_id>``,
+    ``<concept_significance>``), where they are perfectly legal -- a
+    checker that cries wolf on correct content gets switched off.
+    Commented lines are exempt: nothing compiles them, and an escaped
+    underscore would only look wrong to someone reading the template.
+    """
+    path = REPO_ROOT / rel
+    if not path.exists():
+        pytest.skip(f"{rel} not in this checkout")
+
+    tokens = [
+        "AI_Name",
+        "AI_Institution",
+        "Human_Author_Name",
+        "Human_Author_Institution",
+        "Human_Author_City",
+        "Human_Author_State",
+        "Human_Author_Country",
+    ]
+    offenders: list[str] = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").split("\n"), start=1):
+        if line.lstrip().startswith("%"):
+            continue
+        for token in tokens:
+            if token in line:  # the bare, unescaped spelling
+                offenders.append(f"{rel}:{lineno}: {line.strip()[:70]}")
+                break
+    assert not offenders, (
+        "placeholder with an unescaped underscore on a compiled line "
+        "(pdflatex: Missing $ inserted):\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_acm_template_and_its_skill_copy_stay_identical() -> None:
+    """Two copies that drift are two chances to reintroduce a name."""
+    a = REPO_ROOT / "templates/paper_template_v2.tex"
+    b = REPO_ROOT / "skills/writing/acm-acmart-sigconf-template/paper_template_v2.tex"
+    if not (a.exists() and b.exists()):
+        pytest.skip("template pair not in this checkout")
+    assert a.read_text(encoding="utf-8") == b.read_text(encoding="utf-8")
 
 
 def _init_repo(path: Path) -> None:

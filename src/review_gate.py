@@ -526,7 +526,7 @@ class ReviewGate:
             _src = (cwd / tex_file).read_text(encoding="utf-8")
         except OSError:
             _src = ""
-        if "biblatex" in _src or "\addbibresource" in _src or "ddbibresource" in _src:
+        if "biblatex" in _src or "\\addbibresource" in _src:
             base = tex_file.replace(".tex", "")
             for c in ([*cmd], ["biber", base], [*cmd], [*cmd]):
                 try:

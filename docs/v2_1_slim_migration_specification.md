@@ -959,7 +959,7 @@ This is a sequencing question for 3b.22 / 3b.25 implementation. The scope doc su
 
 ## §10. Acceptance and approval
 
-This scope doc is a design artifact. The 3b.21 implementation phase MUST NOT begin until this doc is reviewed and approved by the project lead (Chenguang). Approval is signaled by:
+This scope doc is a design artifact. The 3b.21 implementation phase MUST NOT begin until this doc is reviewed and approved by the project lead. Approval is signaled by:
 
 1. **PR merge** of the 3b.20 commit landing this doc on `phase-3-causal-inference`, OR
 2. **Explicit approval message** from the project lead in the conversation thread following the 3b.20 hand-off completion.

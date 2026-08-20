@@ -540,7 +540,6 @@ class TestTemplateFile:
         assert r"\end{document}" in content
         # Fixed authors (per CLAUDE.md: never modified by agents)
         assert "EDM-ARS" in content
-        assert "Chenguang Pan" in content
         # Abstract must be inside \begin{document} and before \maketitle
         doc_start = content.index(r"\begin{document}")
         abstract_start = content.index(r"\begin{abstract}")
@@ -583,7 +582,7 @@ class TestValidateTemplateStructure:
             r"\maketitle" + "\n"
             r"\begin{acks}thanks\end{acks}" + "\n"
             r"\bibliographystyle{ACM-Reference-Format}" + "\n"
-            "Chenguang Pan\n"
+            "\\author{EDM-ARS}\n"
             r"\end{document}"
         )
         warnings = Writer._validate_template_structure(valid)
@@ -597,7 +596,7 @@ class TestValidateTemplateStructure:
             r"\begin{abstract}text\end{abstract}" + "\n"
             r"\begin{acks}thanks\end{acks}" + "\n"
             r"\bibliographystyle{ACM-Reference-Format}" + "\n"
-            "Chenguang Pan\n"
+            "\\author{EDM-ARS}\n"
         )
         warnings = Writer._validate_template_structure(bad)
         assert any("abstract" in w.lower() and "maketitle" in w.lower() for w in warnings)
@@ -610,7 +609,7 @@ class TestValidateTemplateStructure:
             r"\maketitle" + "\n"
             r"\begin{acks}thanks\end{acks}" + "\n"
             r"\bibliographystyle{ACM-Reference-Format}" + "\n"
-            "Chenguang Pan\n"
+            "\\author{EDM-ARS}\n"
         )
         warnings = Writer._validate_template_structure(tex_with_placeholder)
         assert any("PLACEHOLDER" in w for w in warnings)
@@ -637,7 +636,7 @@ class TestLatexQualityGate:
             rf"\section{{Results}}{phrase} \cite{{paper001}}" + "\n"
             r"\begin{acks}Thanks.\end{acks}" + "\n"
             r"\bibliographystyle{ACM-Reference-Format}" + "\n"
-            "Chenguang Pan\n"
+            "\\author{EDM-ARS}\n"
             r"\end{document}"
         )
 

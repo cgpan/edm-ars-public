@@ -189,7 +189,7 @@ Each SKILL.md has a `## Source provenance` section. Originals remain in place; P
 **Results:**
 - Total candidate skills: **39**
 - Breakdown by layer: task-type=8, dataset=7, methodology=10, writing=8, core-role=6
-- Top 3 decisions flagged for Chenguang:
+- Top 3 decisions flagged for the project lead:
   1. Canonical LaTeX template — keep `paper_template_v2.tex` (outline-first single body) and delete v1?
   2. Critic checklist — keep `prediction-critic-checklist` as one ~180-line skill, or split into 4 sub-skills (PF / DP / Analysis / Substantive)?
   3. SMOTE classification — `smote-imbalance-handling` stays as `task-type`, or promote to `methodology` for future fairness/causal reuse?

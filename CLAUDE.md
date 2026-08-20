@@ -118,7 +118,7 @@ Future work to slim the four remaining agent prompts:
 - When requirements-sandbox.txt changes, rebuild the image: `docker build -t edm-ars-sandbox:latest .`
 - subprocess.run() must ONLY appear in src/sandbox.py (SubprocessExecutor); never in agent or base code
 - Writer agent uses templates/paper_template.tex — NEVER generates LaTeX preamble from scratch
-- Paper authors are fixed (EDM-ARS, Claude AI, Chenguang Pan) — never modified by agents
+- Paper authors are fixed (EDM-ARS, AI_Name, Human_Author_Name) — never modified by agents. The two placeholder names are yours to fill in; the Writer asserts the block is still present, not what it says.
 
 ## IMPORTANT
 - NEVER put API keys in code. Use ANTHROPIC_API_KEY env variable.
