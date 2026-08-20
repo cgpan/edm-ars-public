@@ -131,7 +131,7 @@ NEVER place a footnote as `\noindent{\small ...}` after `\end{table}`.
 
 ## Font/size declarations (CRITICAL — declaration must be inside braces)
 
-`\small`, `ootnotesize`, `\large`, `\itshape`, etc. are *declarations*,
+`\small`, `\footnotesize`, `\large`, `\itshape`, etc. are *declarations*,
 not commands that take arguments. The declaration must be **inside** the
 group it scopes:
 

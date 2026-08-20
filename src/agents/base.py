@@ -177,7 +177,7 @@ class BaseAgent(ABC):
         elif provider == "deepseek":
             # Phase 3b.10.5: DeepSeek-V4-Pro provider integration.
             # API is OpenAI-compatible at https://api.deepseek.com.
-            # Replaces MiniMax as the project default per Chenguang's
+            # Replaces MiniMax as the project default per the project
             # instruction. The MiniMax branch (above) is retained for
             # backward-compat with 3b.5 / 3b.7 / 3b.9 run artifacts and
             # any pinned config that still references it.

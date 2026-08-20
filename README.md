@@ -357,9 +357,11 @@ For the methodology and system design, see the technical report:
 }
 ```
 
-Papers produced by this system carry a fixed author line (EDM-ARS, Claude AI,
-Chenguang Pan) and a Methods sentence disclosing automated generation. Please
-keep that disclosure in anything you publish from it.
+Papers produced by this system carry a fixed author line (EDM-ARS, AI_Name,
+Human_Author_Name) and a Methods sentence disclosing automated generation. Replace the
+two placeholder names with your own in `templates/paper_template_v2.tex` and
+`templates/paper_template_journal.tex`. Please keep the automated-generation
+disclosure in anything you publish from it.
 
 ## License
 

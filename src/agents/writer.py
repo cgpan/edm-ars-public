@@ -727,7 +727,12 @@ class Writer(BaseAgent):
             warnings.append("Missing \\begin{acks} environment (required by acmart)")
         if r"\bibliographystyle{ACM-Reference-Format}" not in latex:
             warnings.append("Missing \\bibliographystyle{ACM-Reference-Format}")
-        if "Chenguang Pan" not in latex:
+        # The invariant is that EDM-ARS remains credited as an author, not
+        # that any particular person is named. The human and AI author
+        # entries are placeholders a user of this repository fills in, so
+        # asserting on their literal text would flag every customised
+        # template as tampered with.
+        if "EDM-ARS" not in latex:
             warnings.append("Fixed author block appears to have been removed or modified")
 
         # AI-generated paper disclaimer and copyright suppression
