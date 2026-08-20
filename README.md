@@ -348,12 +348,14 @@ For the methodology and system design, see the technical report:
 > <https://arxiv.org/pdf/2603.18273>
 
 ```bibtex
-@article{pan2026edmars,
-  title  = {EDM-ARS: An Automated Research System for Educational Data Mining},
-  author = {Pan, Chenguang},
-  year   = {2026},
-  eprint = {2603.18273},
-  url    = {https://arxiv.org/pdf/2603.18273}
+@techreport{pan2026edmars,
+  title={{EDM-ARS}: A Domain-Specific Multi-Agent System for Automated Educational Data Mining Research},
+  author={Pan, Chenguang and Zhang, Zhou and Xiao, Weixuan and Yao, Chengyuan},
+  institution={arXiv},
+  number={arXiv:2603.18273},
+  type={Technical Report},
+  year={2026},
+  url={https://arxiv.org/abs/2603.18273}
 }
 ```
 
