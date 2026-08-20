@@ -63,10 +63,72 @@ PATTERNS: list[tuple[str, re.Pattern[str]]] = [
             r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}"
         ),
     ),
+    # --- Credentials -------------------------------------------------
+    # Vendor-prefixed keys. The character class MUST allow - and _:
+    # a previous version used [A-Za-z0-9] and therefore could not match
+    # a real key of the form sk-api-z-<mixed alnum, hyphens, underscores>.
+    ("api-key-prefixed", re.compile(
+        r"\b(?:sk|tvly|pk|rk|xox[baprs]|shpat|glpat|hf)[-_]"
+        r"[A-Za-z0-9_-]{16,}"
+    )),
+    ("github-token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}")),
+    ("aws-key-id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("google-api-key", re.compile(r"\bAIza[A-Za-z0-9_-]{30,}\b")),
+    ("private-key-block", re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----")),
+    # The one that actually matters. Two of the four leaked keys had no
+    # vendor prefix -- bare hex and base62 -- so only shape-in-context
+    # finds them: a credential-named variable assigned a long value.
+    # 20 chars is above every placeholder in use ("your-key-here" is 13)
+    # and below every real key seen (shortest was 40).
+    ("credential-assignment", re.compile(
+        r"(?i)\b[A-Z0-9_]*(?:API_?KEY|ACCESS_?TOKEN|AUTH_?TOKEN|SECRET|PASSWORD|PASSWD)"
+        r"\s*[=:]\s*[\"']?"
+        r"(?!your[-_]|<|\$\{|None\b|null\b|placeholder|xxx|changeme|example)"
+        r"[A-Za-z0-9_\-\.]{20,}"
+    )),
 ]
 
 #: Directories never worth scanning even in --all mode.
 SKIP_DIRS = frozenset({".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"})
+
+#: Labels whose hits are credentials rather than identifiers.
+CREDENTIAL_LABELS = frozenset(
+    {
+        "api-key-prefixed",
+        "github-token",
+        "aws-key-id",
+        "google-api-key",
+        "private-key-block",
+        "credential-assignment",
+    }
+)
+
+#: A credential-shaped string containing one of these is a test fixture.
+#: Applied to CREDENTIAL_LABELS only -- a path or an email containing the
+#: word "test" is still a real finding.
+_OBVIOUSLY_FAKE = (
+    "fake",
+    "dummy",
+    "placeholder",
+    "changeme",
+    "your-key",
+    "your_key",
+    "example",
+    "sample",
+    "notreal",
+    "for-unit-test",
+    "unit-testing",
+    "redacted",
+)
+
+
+def is_obvious_fixture(label: str, matched: str) -> bool:
+    """True when a credential-shaped match announces itself as fake."""
+    if label not in CREDENTIAL_LABELS:
+        return False
+    lowered = matched.lower()
+    return any(marker in lowered for marker in _OBVIOUSLY_FAKE)
+
 
 #: Documentation may need to SHOW a bad path to explain why it is bad.
 #: Such a line must say so explicitly, on the same line.
@@ -137,6 +199,8 @@ def scan_history(root: Path) -> list[tuple[str, Path, int, str]]:
                 lineno = text[: match.start()].count("\n")
                 if ALLOW_MARKER in lines[lineno]:
                     continue
+                if is_obvious_fixture(label, match.group(0)):
+                    continue
                 hits.append(
                     (label, Path(f"{sha[:8]}:{path}"), lineno + 1, match.group(0))
                 )
@@ -156,6 +220,8 @@ def scan(paths: list[Path], root: Path) -> list[tuple[str, Path, int, str]]:
             for match in pattern.finditer(text):
                 lineno = text[: match.start()].count("\n")
                 if ALLOW_MARKER in lines[lineno]:
+                    continue
+                if is_obvious_fixture(label, match.group(0)):
                     continue
                 hits.append((label, path.relative_to(root), lineno + 1, match.group(0)))
     return hits
@@ -191,7 +257,7 @@ def main() -> int:
     for label, rel, lineno, text in hits:
         print(f"[{label}] {rel}:{lineno}: {text}")
 
-    print(f"\n{len(hits)} machine-specific path(s) across {count} {scope}.")
+    print(f"\n{len(hits)} finding(s) across {count} {scope}.")
     if hits and args.history:
         print(
             "History cannot be cleaned by editing files -- it needs a rewrite "
@@ -200,8 +266,9 @@ def main() -> int:
         )
     if hits:
         print(
-            "Replace them with ${LSAR_HOME} (expanded by src.config.load_config) "
-            f"or a relative path. To keep an intentional example, add "
+            "Paths: replace with an environment variable or a relative path. "
+            "Credentials: move the value to an untracked .env and leave a "
+            "placeholder. To keep an intentional example, add "
             f"'{ALLOW_MARKER}' to that line."
         )
     return 1 if hits else 0
