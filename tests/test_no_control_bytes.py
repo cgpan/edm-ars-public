@@ -42,6 +42,24 @@ FORBIDDEN = {
 }
 
 
+#: Directories holding EXTRACTED or GENERATED document text rather than
+#: authored source. A form feed in a PDF-to-Markdown extraction is the
+#: page-break character doing its job, and NUL bytes turn up in text
+#: lifted out of real PDFs. Flagging those is a false positive, and a
+#: check that reports hundreds of them is a check nobody reads.
+DATA_DIR_PREFIXES = (
+    "outputs/",
+    "outputs_",
+    "Papers/",
+    "runs/",
+    "regression/",
+)
+
+
+def _is_authored_source(rel: str) -> bool:
+    return not any(rel.startswith(prefix) for prefix in DATA_DIR_PREFIXES)
+
+
 def _tracked_files() -> list[Path]:
     out = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "ls-files", "-z"],
@@ -49,7 +67,11 @@ def _tracked_files() -> list[Path]:
         text=True,
         check=True,
     )
-    return [REPO_ROOT / name for name in out.stdout.split("\0") if name]
+    return [
+        REPO_ROOT / name
+        for name in out.stdout.split("\0")
+        if name and _is_authored_source(name)
+    ]
 
 
 def test_no_tracked_text_file_contains_a_stray_control_byte() -> None:
@@ -66,6 +88,22 @@ def test_no_tracked_text_file_contains_a_stray_control_byte() -> None:
                     context = line.strip()[:70]
                     offenders.append(f"{rel}:{lineno} contains {name}: {context!r}")
     assert not offenders, "stray control bytes:\n  " + "\n  ".join(offenders)
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["outputs/x/paper.md", "outputs_minimax_era/y/paper.md", "Papers/z.md", "runs/r/out.md"],
+)
+def test_extracted_document_text_is_out_of_scope(rel: str) -> None:
+    """Page breaks in a PDF extraction are content, not corruption."""
+    assert not _is_authored_source(rel)
+
+
+@pytest.mark.parametrize(
+    "rel", ["lsar/utils/llm_client.py", "scripts/run_review.py", "docs/j1.md", "config.yaml"]
+)
+def test_authored_source_is_in_scope(rel: str) -> None:
+    assert _is_authored_source(rel)
 
 
 @pytest.mark.parametrize(

@@ -316,6 +316,24 @@ def test_placeholders_on_compiled_lines_escape_their_underscores(rel: str) -> No
     )
 
 
+@pytest.mark.skipif(
+    not _IS_PUBLIC_MIRROR,
+    reason="held-back fixtures live in the private repo; nothing to assert there",
+)
+def test_held_back_evaluation_fixtures_are_not_published() -> None:
+    """Some run specs are deliberately private and must stay that way.
+
+    The owner holds back the fixtures for an ongoing comparison study.
+    `.gitignore` covers them, but a gitignore rule is only load-bearing
+    until someone runs `git add -f` or edits the rule -- and the previous
+    release of this mirror was assembled by copying `runs/fixtures/`
+    wholesale, which is exactly the motion that would sweep them in.
+    """
+    published = [p.name for p in tracked_files(REPO_ROOT)]
+    leaked = [name for name in published if name.startswith("spec_3x3_")]
+    assert not leaked, f"held-back evaluation fixtures were published: {leaked}"
+
+
 def test_the_acm_template_and_its_skill_copy_stay_identical() -> None:
     """Two copies that drift are two chances to reintroduce a name."""
     a = REPO_ROOT / "templates/paper_template_v2.tex"
@@ -323,6 +341,60 @@ def test_the_acm_template_and_its_skill_copy_stay_identical() -> None:
     if not (a.exists() and b.exists()):
         pytest.skip("template pair not in this checkout")
     assert a.read_text(encoding="utf-8") == b.read_text(encoding="utf-8")
+
+
+#: The four SHAPES a previous secret scan missed. The values below are
+#: fabricated -- repeated character runs, no resemblance to any real key.
+#:
+#: The first draft of this list truncated the actual leaked keys instead,
+#: which would have published 44 real characters of a live credential
+#: inside the test written to prevent credential leaks. Shape is the only
+#: thing under test; never reach for the real value to express it.
+#:
+#: Two entries carry no vendor prefix at all -- bare hex and bare base62 --
+#: which is exactly why prefix-guessing fails and the
+#: credential-assignment rule has to exist. They also must not contain
+#: "fake", "dummy" or similar, or is_obvious_fixture would filter them and
+#: the test would pass vacuously.
+_LEAKED_SHAPES = [
+    ('MINIMAX_API_KEY= "sk-api-z-AAAABBBBCCCCDDDD_EEEEFFFFGGGG-HHHH"', "hyphens-and-underscores"),  # audit-allow-path
+    ('TAVILY_API_KEY= "tvly-dev-AAAABBBBCCCCDDDDEEEEFFFF"', "vendor-prefixed"),  # audit-allow-path
+    ('SERPAPI_API_KEY= "0123456789abcdef0123456789abcdef01234567"', "bare-hex-no-prefix"),  # audit-allow-path
+    ('SEMANTIC_SCHOLAR_API_KEY= "AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH"', "bare-base62-no-prefix"),  # audit-allow-path
+]
+
+
+@pytest.mark.parametrize(
+    ("line", "shape"), _LEAKED_SHAPES, ids=[s for _, s in _LEAKED_SHAPES]
+)
+def test_credentials_are_caught_whatever_their_shape(line: str, shape: str) -> None:
+    """Regression pin for a scan that cleared a file holding four live keys.
+
+    The scan was ``sk-[A-Za-z0-9]{16,}``. It cannot match a key containing
+    a hyphen or underscore, and it cannot match a key with no vendor
+    prefix. Guessing prefixes is the wrong strategy; what generalises is
+    a credential-NAMED variable assigned a long value.
+    """
+    assert _match_labels(line), f"missed a {shape} credential"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "ANTHROPIC_API_KEY=your-key-here",
+        "OPENAI_API_KEY=${OPENAI_API_KEY}",
+        'api_key = os.environ.get("OPENAI_API_KEY")',
+        'DEEPSEEK_API_KEY = ""',
+        "api_key: null",
+        "PASSWORD=changeme",
+    ],
+    ids=["placeholder", "env-interp", "env-lookup", "empty", "null", "changeme"],
+)
+def test_credential_check_does_not_fire_on_non_secrets(line: str) -> None:
+    """A scan that flags every .env.example gets switched off, and then
+    it is not there on the day a real key lands."""
+    assert "credential-assignment" not in _match_labels(line)
+    assert "api-key-prefixed" not in _match_labels(line)
 
 
 def _init_repo(path: Path) -> None:
