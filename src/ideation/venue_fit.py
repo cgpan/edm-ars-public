@@ -26,7 +26,7 @@ separate that pair, the table is not encoding what it claims to.
 
 ROUTING HOOK (H2 Option C, owner decision 2026-08-06)
 -----------------------------------------------------
-Under dual-targeting (docs/v5_arc_t_h2_capability_roadmap.md sec. 5.3),
+Under dual-targeting (the v5 capability roadmap (internal) sec. 5.3),
 VF-01 / VF2-01 (observational causal) and VF2-02 (national-survey
 extract) are venue facts, not idea defects. When the caller passes
 ``routing_family="policy-causal"`` (from
@@ -582,7 +582,7 @@ def score_venue_fit(
                 "; reclassified as a ROUTING SIGNAL (destination family "
                 f"{FAMILY_POLICY}): delta suppressed from "
                 f"{delta:+.2f} to +0.00 under Option C dual-targeting "
-                "(docs/v5_arc_t_h2_capability_roadmap.md sec. 5.3)"
+                "(the v5 capability roadmap (internal) sec. 5.3)"
             )
             delta = 0.0
         hits.append(

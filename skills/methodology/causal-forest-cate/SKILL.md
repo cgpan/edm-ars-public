@@ -208,7 +208,7 @@ An Analyst code artifact using this skill must produce:
 
 ## Source provenance
 
-Canonical source: `docs/v3_0_causal_skill_specification.md` §3.11
+Canonical source: the v3.0 causal-methods specification (internal) §3.11
 (M5 per-skill specification, including the `honest=True` mandate,
 the ATE-on-overlap-population label, BH FDR correction, and the
 cluster-bootstrap timing-risk note from audit Open Question #9).

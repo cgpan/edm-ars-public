@@ -294,7 +294,7 @@ class TestSlotAllocation:
     def test_slots_match_the_published_profile(
         self, venue: str | None, n: int, expected: list[int]
     ) -> None:
-        """Pins docs/f_p5_citation_recency_spec.md §1.5 exactly."""
+        """Pins the citation-recency specification (internal) §1.5 exactly."""
         slots = allocate_age_slots(n, composition_age_profile(venue))
         assert [slots[b] for b in AGE_BUCKETS] == expected
 

@@ -1,6 +1,6 @@
 """Arc T validation V2 - rank-inversion backtest, DETERMINISTIC terms only.
 
-Spec: ``docs/v5_arc_t_spec.md`` sec. 6 "V2". This is the falsification
+Spec: `the v5 ideation-layer specification (internal)` sec. 6 "V2". This is the falsification
 gate for Arc T's ranker and it runs BEFORE the judged tournament layer
 exists, so that an inverted ranker costs nothing further.
 

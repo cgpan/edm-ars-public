@@ -331,7 +331,7 @@ Stated plainly, because a research tool that hides them is worth less:
 - **Survey weights** are not applied by default. Where design-based estimates
   matter, that is a limitation to state, not a result to report.
 
-Open work is tracked in `docs/backlog.md`.
+Open work is tracked internally; this mirror ships the code and its tests rather than the planning documents behind them.
 
 ---
 

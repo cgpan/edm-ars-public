@@ -280,7 +280,7 @@ def test_post_3b2_stage_match_table(
 
 
 # Phase 3b.8: M1-M5 promoted from recommended to mandatory. The change
-# is documented in docs/v3_0_causal_skill_specification.md § "Phase 3b.8
+# is documented in the v3.0 causal-methods specification (internal) § "Phase 3b.8
 # amendment (post-3b.7 formatter discovery)". Original 3b.1/3b.2 mandatory
 # inventory was {G2, G3, G5, D1}; post-3b.8 it is that set ∪ {M1-M5}.
 EXPECTED_V3_MANDATORY: frozenset[str] = frozenset(

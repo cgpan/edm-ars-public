@@ -3,7 +3,7 @@
 `scripts/audit_feasibility.py` originally returned non-zero only on false
 kills, so a missed mutant printed "V1 GATE: FAIL" and still exited 0 — CI
 wired to the exit code would have waved through a regression that dulled
-the screen's teeth. The spec (docs/v5_arc_t_spec.md section 6, V1) makes
+the screen's teeth. The spec (the v5 ideation-layer specification (internal) section 6, V1) makes
 BOTH conditions blocking.
 """
 from __future__ import annotations

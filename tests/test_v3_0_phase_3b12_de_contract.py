@@ -248,7 +248,7 @@ class TestV3CausalSkillCount:
         """3b.12 brings the V3.0 causal-skill count to 12.
 
         Pre-3b.12 inventory (11): G1-G5 + D1 + M1-M5 — see
-        docs/v3_0_causal_skill_specification.md §4.5.
+        the v3.0 causal-methods specification (internal) §4.5.
 
         Post-3b.12 (12): the 11 above + causal-data-engineer-contract.
         """

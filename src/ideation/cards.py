@@ -3,7 +3,7 @@
 Three things live here and nothing else:
 
 1. :class:`IdeaCard` - the schema of Appendix A of
-   ``docs/v5_arc_t_spec.md``, minus one field (see C1 below).
+   `the v5 ideation-layer specification (internal)`, minus one field (see C1 below).
 2. :meth:`IdeaCard.render` - a FIXED template with a hard word cap. The
    template is fixed and the cap is hard for one reason: length carries
    no signal about idea quality, and a judge that sees a longer card

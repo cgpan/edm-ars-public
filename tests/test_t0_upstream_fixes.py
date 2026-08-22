@@ -8,7 +8,7 @@ Each defect is documented with the measured BEFORE value (taken against
 ``git show HEAD:`` copies of the pre-fix modules on 2026-07-25) so the
 regression is legible without re-running the forensics.
 
-Grounding: docs/v5_arc_t_spec.md §1.4, §3, §9 (T0).
+Grounding: the v5 ideation-layer specification (internal) §1.4, §3, §9 (T0).
 """
 from __future__ import annotations
 
@@ -531,7 +531,7 @@ class TestLoadLockedPredictionSpec:
 
 
 class TestNoFalseWarningsOnArchivedPredictionSpecs:
-    """docs/v5_arc_t_spec.md §6 V1: a real archived spec must never be
+    """the v5 ideation-layer specification (internal) §6 V1: a real archived spec must never be
     rejected by the new checks. Temporal + Tier-3 warnings must stay at
     zero on all archived prediction specs; only the known-broken
     analytic_n heuristic may fire (and it is advisory)."""

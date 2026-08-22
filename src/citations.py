@@ -245,7 +245,7 @@ def _jaccard(a: set[str], b: set[str]) -> float:
 # so a shipped bibliography had 62/62 references from 2024-2026. A
 # reference list is a *composition* with a target age distribution, not a
 # filter over individual papers. Bins and profiles are measured on 34 LSAR
-# anchors / 1,769 dated references (docs/f_p5_citation_recency_spec.md §1).
+# anchors / 1,769 dated references (the citation-recency specification (internal) §1).
 #
 # The bins live in ``manuscript_linter`` (docs §4) so the producer and the
 # checker cannot disagree about what "old" means — the same rule that

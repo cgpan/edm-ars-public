@@ -221,6 +221,6 @@ An Analyst code artifact using this skill must produce:
 
 ## Source provenance
 
-Canonical source: `docs/v3_0_causal_skill_specification.md` §3.8
+Canonical source: the v3.0 causal-methods specification (internal) §3.8
 (M2 per-skill specification, including the §3a.1 R3
 locked-mechanics block).

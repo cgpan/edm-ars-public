@@ -65,5 +65,5 @@ constructions are BANNED in the paper body:
 
 ## Source provenance
 
-Authored in V3.7 Arc S per docs/v4_roadmap.md §6 (the "signs of AI
+Authored in V3.7 Arc S per the v4 roadmap (internal) §6 (the "signs of AI
 writing" genre applied to EDM-ARS output).

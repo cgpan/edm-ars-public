@@ -19,8 +19,8 @@ Causal-inference capability phase COMPLETE: four task types (prediction,
 causal_soo, causal_itr, causal_did), ten certified estimation methods
 (M1-M10), three runnable datasets (hsls09_public, els_2002,
 did_els_hsls_panel), calibrated LSAR gate with median sampling. All task
-types have gate-passing papers. See `docs/v3_changelog.md` for the full
-change log and `docs/backlog.md` for every deferred job. Next phase:
+types have gate-passing papers. The full change log and the
+deferred-work backlog are kept internally and are not part of this mirror. Next phase:
 V4 psychometrics (plan in discussion).
 
 ## Authoritative Spec

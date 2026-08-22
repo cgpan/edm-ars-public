@@ -517,7 +517,7 @@ it. Both shapes are tolerated for backward compatibility with 3b.5 /
 
 ## Source provenance
 
-Canonical source: `docs/v3_0_causal_skill_specification.md` §3.5
+Canonical source: the v3.0 causal-methods specification (internal) §3.5
 (G5 per-skill specification, including the E-value interpretation
 table, the forbidden "robust" phrase, the Rosenbaum-bounds recipe
 for matched designs, and the DoWhy refuter list with the count

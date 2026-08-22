@@ -422,7 +422,7 @@ adjustment_set.
 
 ## Source provenance
 
-Canonical source: `docs/v3_0_causal_skill_specification.md` §3.6
+Canonical source: the v3.0 causal-methods specification (internal) §3.6
 (D1 per-skill specification). HSLS variable details cross-reference
 `data_registry/datasets/hsls09_public.yaml` and the existing V2.0
 skills `hsls09-temporal-ordering`, `hsls09-structural-mnar-outcomes`,

@@ -1,6 +1,6 @@
 """V3.1 Arc R (R2) — synthetic-DGP validation gate for the ITR battery.
 
-Standing discipline from docs/v4_roadmap.md: every new estimator
+Standing discipline from the v4 roadmap (internal): every new estimator
 battery must recover known ground truth on simulated data BEFORE any
 live run. ITR errors are silent without an oracle — this gate is the
 only place regret is observable.

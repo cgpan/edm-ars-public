@@ -16,7 +16,7 @@
 # This file is that re-derivation. It was written WITHOUT reading:
 #   evaluation/ledger.json, runs/** (gate_summary.json, lsar_review/**,
 #   scores.json, research_spec.json, REPORT.md, FINDINGS.md),
-#   docs/v5_arc_t_v2_backtest_verdict.md, or the v1 rules tagged
+#   the v5 ranker backtest verdict (internal), or the v1 rules tagged
 #   provenance: in_sample.
 # Every rule below is provenance: external.
 #
@@ -231,7 +231,7 @@ rules:
       - >-
         CONVERGENCE DISCLOSURE. v1 carries an in-sample rule pointed at
         roughly the same target. I was exposed to that rule's text through
-        docs/v5_arc_t_spec.md, which the task brief required me to read
+        the v5 ideation-layer specification (internal), which the task brief required me to read
         first. The evidence here is independent (corpus counts, no gate
         scores) and mechanically recomputable, but the CHOICE to measure
         this feature may not be independent. Treat the convergence as

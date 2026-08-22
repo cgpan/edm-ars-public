@@ -132,4 +132,4 @@ substantive guidance.
 
 v1.1 (2026-08-06, V5 Arc T H2): added outline rule 7 — the
 narrative_hook is never a feature-importance ranking (VF2-03,
-0/1,135 evidence in `docs/v5_arc_t_h2_capability_roadmap.md` §1).
+0/1,135 evidence in the v5 capability roadmap (internal) §1).
