@@ -302,7 +302,7 @@ _METHOD_ALIASES = {
 }
 
 # Designs that are certified on synthetic DGPs but have no executable
-# task type (docs/backlog.md: RD and IV are shelved).
+# task type (the internal backlog (internal): RD and IV are shelved).
 _SHELVED_DESIGNS = {"rd", "rdd", "regressiondiscontinuity", "iv", "2sls", "iv2sls"}
 
 
@@ -1044,7 +1044,7 @@ def check_estimator_certified(ctx: ScreenContext) -> CheckResult:
             code, KILL,
             f"Estimator(s) {', '.join(shelved)} are certified on synthetic "
             f"DGPs but shelved: no executable task type implements them.",
-            "docs/backlog.md - RD and IV are shelved; "
+            "the internal backlog (internal) - RD and IV are shelved; "
             + source,
         )
     if uncertified:

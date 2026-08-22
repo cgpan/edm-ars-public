@@ -193,7 +193,7 @@ An Analyst code artifact using this skill must produce:
 
 ## Source provenance
 
-Canonical source: `docs/v3_0_causal_skill_specification.md` §3.2
+Canonical source: the v3.0 causal-methods specification (internal) §3.2
 (G2 per-skill specification, including the estimand taxonomy, the
 method→estimand mapping table, the Writer prose template, the
 forbidden phrases, and the required hedges).

@@ -1,6 +1,6 @@
 """V3.4–V3.6 Arc Q — synthetic-DGP gates for RD, IV, and DiD.
 
-Per docs/v4_roadmap.md Arc Q and the standing synthetic-first rule:
+Per the v4 roadmap (internal) Arc Q and the standing synthetic-first rule:
 the estimator machinery for each quasi-experimental design must recover
 known ground truth (and stay honest on null DGPs) BEFORE any live use.
 On HSLS the design selector marks all three infeasible-with-reasons —

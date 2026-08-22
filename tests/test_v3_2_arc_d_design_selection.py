@@ -1,6 +1,6 @@
 """V3.2 Arc D — design selection + gap mining: offline verification.
 
-Exit probes per docs/v4_roadmap.md Arc D: the selector routes probe
+Exit probes per the v4 roadmap (internal) Arc D: the selector routes probe
 questions to {SOO, ITR, infeasible-with-reasons}; the gap matrix and
 design report reach the PF user message; the memo/gap/Critic skills
 match at their stages.
@@ -43,7 +43,7 @@ class TestSelectorRouting:
     def test_partner_cohort_alone_does_not_route_to_did(
         self, hsls_registry: dict
     ) -> None:
-        # Arc T / T0 (docs/v5_arc_t_spec.md §1.4, did_feasible row).
+        # Arc T / T0 (the v5 ideation-layer specification (internal) §1.4, did_feasible row).
         # A `multi_cohort_partner` pointer is a harmonization LEAD, not a
         # runnable design: causal_did executes on the harmonized panel
         # (both live DiD runs used did_els_hsls_panel), never on HSLS

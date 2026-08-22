@@ -1,6 +1,6 @@
 """V5 Arc T H2 — venue-independent framing fixes (offline).
 
-Covers the three fixes from docs/v5_arc_t_h2_capability_roadmap.md §1-2:
+Covers the three fixes from the v5 capability roadmap (internal) §1-2:
 
 - FIX 1 (VF2-03): feature-importance de-headlining. The abstract states
   the substantive finding and its use; SHAP/importance rankings are

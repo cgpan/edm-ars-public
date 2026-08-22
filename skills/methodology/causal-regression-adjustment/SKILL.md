@@ -234,6 +234,6 @@ An Analyst code artifact using this skill must produce:
 
 ## Source provenance
 
-Canonical source: `docs/v3_0_causal_skill_specification.md` §3.7
+Canonical source: the v3.0 causal-methods specification (internal) §3.7
 (M1 per-skill specification, including the §3a.1 R2 Path A
 extension that ties M1 to G4's regression-context branch).

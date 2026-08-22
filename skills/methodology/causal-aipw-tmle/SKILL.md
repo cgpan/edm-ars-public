@@ -279,7 +279,7 @@ An Analyst code artifact using this skill must produce:
 
 ## Source provenance
 
-Canonical source: `docs/v3_0_causal_skill_specification.md` §3.10
+Canonical source: the v3.0 causal-methods specification (internal) §3.10
 (M4 per-skill specification, including the dual library split,
 the `zEpid>=0.9.0` pin from audit Open Question #7, and the custom
 TMLE fallback path).

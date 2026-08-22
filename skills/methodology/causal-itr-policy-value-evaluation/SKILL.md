@@ -94,4 +94,4 @@ inequitable rules shipped without a parity table.
 
 ## Source provenance
 
-Authored in V3.1 Arc R (R1) per `docs/v3_1_causal_itr_scope.md`.
+Authored in V3.1 Arc R (R1) per the causal-ITR scope note (internal).

@@ -153,6 +153,6 @@ An Analyst code artifact using this skill must produce:
 
 ## Source provenance
 
-Canonical source: `docs/v3_0_causal_skill_specification.md` §3.3
+Canonical source: the v3.0 causal-methods specification (internal) §3.3
 (G3 per-skill specification, including the three-tier decision rule
 with the explicit thresholds).

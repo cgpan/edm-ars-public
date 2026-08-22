@@ -678,7 +678,7 @@ def _check_tex(report: LintReport, tex: str, bib: Optional[str]) -> None:
 # Abstract content  (V5 Arc T H2 framing fixes: VF2-03, VF2-07 tier 1)
 # ---------------------------------------------------------------------------
 #
-# Evidence base (docs/v5_arc_t_h2_capability_roadmap.md §1-2):
+# Evidence base (the v5 capability roadmap (internal) §1-2):
 #   VF2-03 — 0 of 1,135 measured abstracts (34 EDM/JEDM/JLA anchors +
 #   1,101 policy/ed-psych venue abstracts) and 0 of 30 AERA Open full
 #   texts headline a feature-importance ranking. Promoting SHAP output
@@ -833,7 +833,7 @@ def _check_split_contrast(report: LintReport, tex: str) -> None:
 # citation at all, because no paper older than two years was reachable.
 # A count is not a distribution. These checks measure the distribution.
 #
-# Profile source: docs/f_p5_citation_recency_spec.md §1, measured on 34
+# Profile source: the citation-recency specification (internal) §1, measured on 34
 # LSAR anchors / 1,769 dated references.
 
 _YEAR_FIELD = re.compile(r"\byear\s*=\s*[{\"']?\s*((?:19|20)\d{2})")

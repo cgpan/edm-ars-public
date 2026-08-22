@@ -1,6 +1,6 @@
 """Arc T / H2 Option C - deterministic venue routing (dual-target).
 
-Owner decision (2026-08-06, docs/v5_arc_t_h2_capability_roadmap.md
+Owner decision (2026-08-06, the v5 capability roadmap (internal)
 sec. 5.3, Option C): EDM-ARS dual-targets two venue families.
 
 * ``computational-edm`` - EDM / JEDM / JLA. Measurement, psychometrics,
@@ -178,7 +178,7 @@ _EVIDENCE_VF2_02 = (
 )
 _PROVENANCE = (
     "Option C dual-target routing, owner decision 2026-08-06 "
-    "(docs/v5_arc_t_h2_capability_roadmap.md sec. 5.3)"
+    "(the v5 capability roadmap (internal) sec. 5.3)"
 )
 
 

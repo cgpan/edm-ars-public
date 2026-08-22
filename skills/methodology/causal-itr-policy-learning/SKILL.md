@@ -105,7 +105,7 @@ degenerate near-constant rules reported as "targeting".
 
 ## Source provenance
 
-Authored in V3.1 Arc R (R1) per `docs/v3_1_causal_itr_scope.md`. The
+Authored in V3.1 Arc R (R1) per the causal-ITR scope note (internal). The
 weighted-classification reduction follows the standard
 policy-learning literature (offline evaluation via DR scoring); the
 sklearn-only constraint comes from `requirements-sandbox.txt`.

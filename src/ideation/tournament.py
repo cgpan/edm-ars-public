@@ -93,7 +93,7 @@ DEFAULT_SHUFFLE_REPLICATES = 40
 # The V2 verdict, carried in every artifact
 # --------------------------------------------------------------------------
 
-#: Read off ``docs/v5_arc_t_v2_backtest_verdict.md`` (2026-07-11), which
+#: Read off `the v5 ranker backtest verdict (internal)` (2026-07-11), which
 #: is the adversarial verification of ``scripts/backtest_ranker.py``.
 #: Every number here is a measurement with its n attached. None of them
 #: is an estimate.
@@ -181,7 +181,7 @@ V2_STATUS: dict[str, Any] = {
         "baseline printed beside the ranker, and require the out-of-sample "
         "half to measure above zero on a population with spread."
     ),
-    "source": "docs/v5_arc_t_v2_backtest_verdict.md (2026-07-11)",
+    "source": "the v5 ranker backtest verdict (internal) (2026-07-11)",
 }
 
 
@@ -1576,7 +1576,7 @@ def run_cascade(
         "venue_routing": {
             "policy": (
                 "Option C dual-target routing (owner decision 2026-08-06, "
-                "docs/v5_arc_t_h2_capability_roadmap.md sec. 5.3): causal "
+                "the v5 capability roadmap (internal) sec. 5.3): causal "
                 "and national-survey work routes to the policy-causal "
                 "family; measurement, psychometrics and prediction-method "
                 "work stays computational-edm. VF2-01/VF2-02 are routing "

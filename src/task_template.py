@@ -695,7 +695,7 @@ class PsychometricsTemplate(TaskTemplate):
 
     P-battery: P1 CTT, P2 omega, P3 CFA, P4 GRM, P5 DIF, P6 invariance -
     all through certified analysis_helpers.psy_* wrappers backed by the
-    R bridge (see docs/v4_psychometrics_scope.md).
+    R bridge (see the psychometrics scope note (internal)).
     """
 
     def get_name(self) -> str:

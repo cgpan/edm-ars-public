@@ -65,5 +65,5 @@ the outline's `narrative_hook`, and let it drive section emphasis.
 
 ## Source provenance
 
-Authored in V3.7 Arc S per docs/v4_roadmap.md §6; extends the
+Authored in V3.7 Arc S per the v4 roadmap (internal) §6; extends the
 OutlineAgent emphasis-trigger mechanism.

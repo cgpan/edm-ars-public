@@ -1,6 +1,6 @@
 # Arc T / T0 - deterministic venue-fit rule table.
 #
-# Mined from the 34-anchor LSAR corpus (docs/v5_arc_t_spec.md sec. 3 Stage 2b).
+# Mined from the 34-anchor LSAR corpus (the v5 ideation-layer specification (internal) sec. 3 Stage 2b).
 # There is NO LLM in this layer: every rule has a named predicate
 # implemented in src/ideation/venue_fit.py and an `evidence` string
 # recording the anchor fact that motivated it (design commitment C2).
@@ -14,7 +14,7 @@
 # guidance for the tournament's BT prior, not a predicted review score.
 
 schema_version: "1.0"
-source: docs/v5_arc_t_spec.md section 3 "Stage 2b" (34-anchor corpus)
+source: the v5 ideation-layer specification (internal) section 3 "Stage 2b" (34-anchor corpus)
 generated: 2026-07-25
 
 venues:

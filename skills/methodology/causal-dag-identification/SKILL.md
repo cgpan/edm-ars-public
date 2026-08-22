@@ -212,6 +212,6 @@ An Analyst code artifact using this skill must produce:
 
 ## Source provenance
 
-Canonical source: `docs/v3_0_causal_skill_specification.md` §3.1
+Canonical source: the v3.0 causal-methods specification (internal) §3.1
 (G1 per-skill specification, including back-door criterion, DoWhy
 implementation skeleton, dowhy version pin, and NetworkX fallback).

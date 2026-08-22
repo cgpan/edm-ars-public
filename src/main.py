@@ -27,7 +27,7 @@ _DEFAULT_DATASET = "hsls09_public"
 # specs (estimated n = 0 for five of them, 1,663 for the sixth) where the
 # executed runs carried analytic_n = 14,039 (ELS) and 17,335 (HSLS).
 # Escalating it to a hard load failure would reject every real prediction
-# spec, so it is printed and stepped over. docs/v5_arc_t_spec.md §1.4
+# spec, so it is printed and stepped over. the v5 ideation-layer specification (internal) §1.4
 # (task_template.py:146-167) replaces the rule with
 # ``feasibility.estimate_analytic_n()``; this list shrinks to () then.
 _ADVISORY_WARNING_MARKERS: tuple[str, ...] = ("Estimated analytic_n",)

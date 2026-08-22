@@ -61,7 +61,7 @@ Avoid titles that are generic or interchangeable with other EDM papers.
 The word budget alone is not sufficient. Three content rules
 (V5 Arc T H2; evidence base: 34 EDM/JEDM/JLA anchor papers, a
 1,101-abstract policy/ed-psych venue counter-corpus, and 30 AERA Open
-full texts — see `docs/v5_arc_t_h2_capability_roadmap.md` §1–2):
+full texts — see the v5 capability roadmap (internal) §1–2):
 
 1. **The abstract states the substantive finding and its use.
    Feature-importance output (SHAP rankings, top-predictor lists) is
@@ -211,6 +211,6 @@ de-headlining with the 0/1,135 evidence; VF2-07 tier 1
 final-sentence decision naming, anchors 7/34 vs ours 1/13) and the
 Results within/cross-context contrast rule for school-aware splits
 (VF2-06). Evidence and reframing templates:
-`docs/v5_arc_t_h2_capability_roadmap.md` §1–2. Enforced downstream by
+the v5 capability roadmap (internal) §1–2. Enforced downstream by
 the manuscript linter's abstract-content checks
 (`src/manuscript_linter.py`).
