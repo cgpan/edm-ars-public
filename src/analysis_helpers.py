@@ -370,7 +370,16 @@ def _grouping_series(column: "pd.Series") -> tuple["pd.Series", bool]:
 
     if binned.nunique(dropna=True) < 2:
         return column, False
-    return binned.astype(str), True
+
+    # astype(str) alone turns missing values into the literal string "nan",
+    # which groupby then treats as a band. A live run reported
+    # X1SES="nan" (n=440, AUC 0.651) alongside five real quintiles, as
+    # though "missing" were a socioeconomic group -- and fed it to the
+    # disparity range. Restore the NaN so groupby drops those rows; the
+    # caller reports how many were dropped.
+    labels = binned.astype(str)
+    labels[binned.isna()] = np.nan
+    return labels, True
 
 
 def run_subgroup_analysis(
@@ -448,6 +457,15 @@ def run_subgroup_analysis(
                 f"Subgroup attribute '{attr}' is continuous "
                 f"({protected[attr].nunique()} distinct values); grouped into "
                 f"{grouping.nunique()} quantile bins for subgroup reporting."
+            )
+        n_missing = int(grouping.isna().sum())
+        if n_missing:
+            # Never silent: these rows are absent from every band, so the
+            # subgroup n's will not sum to the test set and a reader is
+            # entitled to know why.
+            warnings_list.append(
+                f"Subgroup attribute '{attr}': {n_missing} test row(s) have no "
+                "value and are excluded from all subgroup bands."
             )
 
         too_small: list[str] = []

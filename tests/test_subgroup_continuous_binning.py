@@ -157,3 +157,58 @@ def test_a_missing_attribute_is_still_reported(_fixture) -> None:
         _Model(), test_X, test_y, path, ["X1RACE"], True, warnings
     )
     assert any("not found in test_protected.csv" in w for w in warnings)
+
+
+# --- missing values are not a group ------------------------------------
+
+def test_missing_values_do_not_become_a_band() -> None:
+    """A live run reported X1SES='nan' (n=440, AUC 0.651) as a sixth band.
+
+    astype(str) turns NaN into the literal string "nan", which groupby
+    then treats as a level -- so "missing" was reported alongside five
+    real quintiles as though it were a socioeconomic group, and its AUC
+    was eligible for the disparity range.
+    """
+    rng = np.random.default_rng(1)
+    values = pd.Series(rng.normal(size=3000))
+    values[:400] = np.nan
+    grouping, binned = _grouping_series(values)
+
+    assert binned
+    assert grouping.nunique(dropna=True) == SUBGROUP_QUANTILES
+    assert "nan" not in set(grouping.dropna().astype(str))
+    assert int(grouping.isna().sum()) == 400
+
+
+def test_excluded_rows_are_reported(tmp_path) -> None:
+    """Silent exclusion would make the band n's fail to add up unexplained."""
+    rng = np.random.default_rng(5)
+    n = 600
+    test_X = pd.DataFrame({"f1": rng.normal(size=n)})
+    test_y = rng.integers(0, 2, size=n)
+    ses = pd.Series(rng.normal(size=n))
+    ses[:80] = np.nan
+    path = tmp_path / "test_protected.csv"
+    pd.DataFrame({"X1SES": ses}).to_csv(path)
+
+    warnings: list[str] = []
+    out = run_subgroup_analysis(
+        _Model(), test_X, test_y, str(path), ["X1SES"], True, warnings
+    )
+    assert any("no value and are excluded" in w for w in warnings)
+    assert "nan" not in out["X1SES"]
+
+
+def test_a_complete_column_reports_no_exclusions(tmp_path) -> None:
+    rng = np.random.default_rng(6)
+    n = 600
+    test_X = pd.DataFrame({"f1": rng.normal(size=n)})
+    test_y = rng.integers(0, 2, size=n)
+    path = tmp_path / "test_protected.csv"
+    pd.DataFrame({"X1SES": rng.normal(size=n)}).to_csv(path)
+
+    warnings: list[str] = []
+    run_subgroup_analysis(
+        _Model(), test_X, test_y, str(path), ["X1SES"], True, warnings
+    )
+    assert not any("excluded from all subgroup bands" in w for w in warnings)
