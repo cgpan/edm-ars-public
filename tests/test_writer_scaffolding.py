@@ -136,9 +136,12 @@ def test_journal_template_has_no_hardcoded_byline() -> None:
     )
     match = re.search(r"\\authorsnames\{([^}]*)\}", tex)
     assert match, "journal template has no authorsnames line"
+    # Equality already excludes every possible name, so the old
+    # belt-and-braces list of specific leaked strings added nothing -- and
+    # one of them was the owner's real name, which made this file itself a
+    # place the name appeared. The public mirror's own hygiene test caught
+    # it once the file became tracked.
     assert match.group(1) == "%%PLACEHOLDER:AUTHORS%%"
-    for leaked in ("AI_Name", "AI\\_Name", "Human_Author_Name", "Chenguang"):
-        assert leaked not in match.group(1)
 
 
 def test_byline_defaults_to_the_system_alone(tmp_path: Path) -> None:
