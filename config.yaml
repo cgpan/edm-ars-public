@@ -90,6 +90,14 @@ pipeline:
   random_state: 42
   cost_budget_usd: 5.0     # soft limit; log warning if exceeded, do not abort
   mlp_enabled: false        # MLP disabled by default (KernelExplainer timeout risk)
+  # Hard ceiling for one execution of the generated analysis script.
+  # Leave unset (null) to derive it: 600s for a single pass, doubled when
+  # class_imbalance.ablation_enabled trains the battery a second time.
+  # Set a number here only to override that. Inner BLAS/OpenMP pools are
+  # capped by the executor (src/sandbox.py: blas_thread_env) -- without
+  # that cap a bigger number here just buys an oversubscribed run more
+  # time to be slow.
+  analysis_exec_timeout_s: null
 
 class_imbalance:
   minority_threshold: 0.20   # minority < 20% triggers SMOTE

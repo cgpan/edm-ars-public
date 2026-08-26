@@ -108,25 +108,47 @@ df_encoded = pd.get_dummies(df)
 # WRONG -- one-hots high-cardinality columns:
 df[col] = pd.get_dummies(df[col])  # if df[col].nunique() > 100, this is wrong
 
-# RIGHT -- gate one-hot on dtype AND cardinality:
-def safe_encode_column(df, col):
-    if df[col].dtype not in ("object", "category"):
-        # continuous; do not encode -- keep numeric column as-is
-        return df[col]
-    n_unique = df[col].nunique(dropna=False)
-    if n_unique > 100:
-        # high-cardinality; do not one-hot. Use label encoding instead.
-        from sklearn.preprocessing import LabelEncoder
-        le = LabelEncoder()
-        return le.fit_transform(df[col].fillna("_MISSING_").astype(str))
-    return pd.get_dummies(df[col], prefix=col)
+# WRONG -- mutating the list you are iterating. This one SHIPPED:
+onehot_cols = categorical_cols.copy()
+for col in onehot_cols:
+    if train_X[col].nunique() > 100:
+        onehot_cols.remove(col)   # skips the NEXT element every time
+# roughly half the high-cardinality columns evade the guard
+
+# RIGHT -- decide from the REGISTRY type, and build a new list:
+CONTINUOUS_TYPES = {"continuous"}
+
+def is_categorical(col, registry_types):
+    # The registry is the source of truth. Do NOT use the pandas dtype:
+    # replacing labelled sentinels ("Missing", "Unit non-response") with
+    # NaN turns a numeric column into object dtype, which makes a
+    # continuous theta score look categorical.
+    return registry_types.get(col, "categorical") not in CONTINUOUS_TYPES
+
+onehot_cols = [
+    c for c in predictor_cols
+    if is_categorical(c, registry_types) and train_X[c].nunique(dropna=False) <= 100
+]
+label_cols = [
+    c for c in predictor_cols
+    if is_categorical(c, registry_types) and train_X[c].nunique(dropna=False) > 100
+]
+# everything else stays numeric, untouched
 ```
 
-**Validation after encoding:** verify
-`train_X.shape[1] < 5 * len(predictor_set)` for typical HSLS predictor
-sets (≤30 raw variables → ≤150 encoded columns). A column count above
-1000 is structural corruption; abort with `validation_passed: false`
-and add a warning naming the offending column(s).
+**MANDATORY RULE — the ceiling is enforced, not advisory.** After
+encoding, `train_X` must have **at most 500 columns**. The orchestrator
+checks this after the DataEngineer stage and sends the stage back on a
+violation.
+
+This is not hypothetical. `X1TXMTSCOR` — a standardised maths theta score
+with 20,741 distinct values — was one-hot encoded into **16,705 dummy
+columns**. The design matrix reached 18,806 x 16,945 and 1.8 GB, no model
+could train inside any timeout, and three consecutive runs failed while
+being misdiagnosed as "slowness". A typical prediction spec (≤30 raw
+variables) encodes to roughly 50 columns; anything in the thousands is
+structural corruption, so abort with `validation_passed: false` and name
+the offending column.
 
 ## Snapshot original labels before encoding (for subgroup analysis)
 

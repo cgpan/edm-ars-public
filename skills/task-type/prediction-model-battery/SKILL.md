@@ -66,9 +66,27 @@ pulls in `model-logistic-regression`, `model-random-forest`,
 5. **Same SHAP explainer mapping** per family (table above). See
    `shap-explainer-selection` for the operational details and the
    StackingEnsemble exclusion.
-6. **Per-step timeout: 300s** for any single model training step;
-   600s for SHAP. Failed model → log in `results.errors`, continue
-   with remaining models.
+6. **Timeouts are the EXECUTOR's job — do not implement one.** The
+   budget is 300s per model-training step and 600s for SHAP, and the
+   executor enforces it around the whole script. A failed model → log in
+   `results.errors`, continue with remaining models.
+
+   **MANDATORY RULE — never emit a `signal`-based timeout.**
+
+   ```python
+   # WRONG. This SHIPPED and silently emptied the entire battery:
+   signal.signal(signal.SIGALRM, timeout_handler)
+   signal.alarm(timeout_seconds)
+   ```
+
+   Windows has neither `SIGALRM` nor `alarm`, so every wrapped model fit
+   raised `AttributeError` instantly and the run "succeeded" in seconds
+   with nothing trained. The executor rejects this code before it runs.
+
+   A thread-based replacement is not the answer either: a scikit-learn
+   fit does its work in C and never returns to the interpreter, so no
+   in-process mechanism can interrupt it. Rely on the executor's
+   subprocess timeout and emit no per-step guard at all.
 
 ## Build order
 

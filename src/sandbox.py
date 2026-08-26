@@ -9,6 +9,7 @@ Use create_executor(config) to get the appropriate executor based on config.yaml
 from __future__ import annotations
 
 import os
+import re
 import pathlib
 import subprocess
 import warnings
@@ -22,6 +23,126 @@ try:
 except ImportError:
     _DOCKER_AVAILABLE = False
     docker = None  # type: ignore[assignment]
+
+
+
+#: Constructs that fail on at least one supported host, mapped to what to
+#: do instead. Each entry earned its place by breaking a real run.
+UNPORTABLE_CONSTRUCTS: dict[str, str] = {
+    "signal.SIGALRM": (
+        "signal.SIGALRM is Unix-only and raises AttributeError on Windows. "
+        "The executor already enforces a hard timeout, so generated code "
+        "must not set its own."
+    ),
+    "signal.alarm": (
+        "signal.alarm is Unix-only. The executor already enforces a hard "
+        "timeout; remove the in-code timeout entirely."
+    ),
+    "signal.setitimer": (
+        "signal.setitimer is Unix-only. The executor enforces the timeout."
+    ),
+    "os.fork": (
+        "os.fork is unavailable on Windows. Use joblib or "
+        "concurrent.futures if parallelism is genuinely needed."
+    ),
+    "resource.setrlimit": (
+        "the resource module is Unix-only. Memory limits are enforced by "
+        "the sandbox, not by generated code."
+    ),
+}
+
+
+#: Patterns that run without error but do something other than what the
+#: surrounding code claims. Unlike UNPORTABLE_CONSTRUCTS these do not
+#: crash -- that is exactly why they need a machine to catch them.
+SILENT_MISBEHAVIOUR = [
+    (
+        # IterativeImputer models each feature from the OTHERS. Given one
+        # column there are no others, so it degenerates to the column
+        # mean -- while the surrounding code records the method as
+        # "IterativeImputer" and the manuscript repeats it. Five papers
+        # named a multivariate imputer and performed mean-fill on
+        # variables missing 28-36%.
+        re.compile(
+            r"IterativeImputer\([^)]*\)[\s\S]{0,400}?\.fit_transform\(\s*"
+            r"[A-Za-z_][A-Za-z0-9_]*\s*\[\s*\[\s*[A-Za-z_'\"]"
+        ),
+        "IterativeImputer appears to be fitted on a single-column "
+        "selection (df[[col]]). With one column it has no other features "
+        "to model from and silently degenerates to MEAN imputation, while "
+        "the recorded imputation_method still says IterativeImputer. Fit "
+        "it once on the full numeric predictor block (training rows only), "
+        "or record the method that actually ran.",
+    ),
+]
+
+
+#: BLAS/OpenMP thread-pool controls, read once at import time by the numeric
+#: backends. Setting them after numpy is imported is a no-op, which is why
+#: they are injected into the CHILD process environment rather than set here.
+BLAS_THREAD_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+
+#: Threads per worker process. 2 is deliberate, not tuned: the generated
+#: analysis code fits models with n_jobs=-1, so scikit-learn already spawns
+#: one worker per core. Leaving the inner pools uncapped means each of those
+#: workers spawns its own core-count of BLAS threads on top.
+DEFAULT_INNER_THREADS = 2
+
+
+def blas_thread_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Cap the inner BLAS/OpenMP pools for generated analysis code.
+
+    Observed on a 28-core Windows host: the generated script fits with
+    n_jobs=-1, scikit-learn spawns one worker per core, and each worker's
+    BLAS spawns its own threads inside that. 32 processes contended for 28
+    cores and the battery ran SLOWER than a capped run -- so the analysis
+    stage hit its execution timeout and burned all three retries, 21
+    minutes apart, without ever being genuinely compute-bound.
+
+    Capping the inner pools leaves n_jobs=-1 parallelising ACROSS models,
+    which is the level that actually helps, and stops the nesting.
+
+    This also matters under Docker: nano_cpus caps the container's CPU
+    quota, but scikit-learn still reads the host core count and sizes its
+    pool from that, so it oversubscribes inside the quota.
+
+    An operator who has already set any of these vars keeps their value.
+    """
+    env = dict(base if base is not None else os.environ)
+    threads = os.environ.get("EDMARS_INNER_THREADS", str(DEFAULT_INNER_THREADS))
+    for var in BLAS_THREAD_VARS:
+        env.setdefault(var, threads)
+    return env
+
+
+def check_silent_misbehaviour(code: str) -> list[str]:
+    """Return a message for each pattern that misreports what it does.
+
+    Separate from portability because the failure mode is the opposite:
+    these run cleanly and produce plausible output. Nothing downstream
+    can notice, which is why the check has to happen before execution.
+    """
+    return [msg for pattern, msg in SILENT_MISBEHAVIOUR if pattern.search(code)]
+
+
+def check_portability(code: str) -> list[str]:
+    """Return a message for every unportable construct found in *code*.
+
+    Empty list means nothing known-unportable was found. This is a
+    substring scan, not a parse: the point is to catch the handful of
+    idioms that have actually broken runs, cheaply, before execution.
+    """
+    findings: list[str] = []
+    for construct, guidance in UNPORTABLE_CONSTRUCTS.items():
+        if construct in code:
+            findings.append(f"{construct}: {guidance}")
+    return findings
 
 
 class SubprocessExecutor:
@@ -57,6 +178,40 @@ class SubprocessExecutor:
         """
         # Write code to a temp file instead of passing via -c to avoid
         # Windows command-line length limit (WinError 206, ~32k char cap).
+        problems = check_portability(code)
+        if problems:
+            # Fail loudly and early rather than letting each model raise
+            # AttributeError separately into results.errors, where the
+            # Analyst files them away and the pipeline writes a paper
+            # about an analysis that never ran.
+            detail = "; ".join(problems)
+            return {
+                "stdout": "",
+                "stderr": (
+                    "PORTABILITY CHECK FAILED before execution. "
+                    f"{detail} Rewrite the code without it and retry."
+                ),
+                "returncode": 2,
+            }
+
+        misbehaviour = check_silent_misbehaviour(code)
+        if misbehaviour:
+            # Blocked rather than warned. This code runs cleanly and
+            # produces plausible output while doing something other than
+            # what it records, so letting it proceed means a manuscript
+            # that misstates its own methods -- and nothing downstream can
+            # tell. The stage has a retry path; a clear message there is
+            # cheaper than a wrong paper.
+            detail = " ".join(misbehaviour)
+            return {
+                "stdout": "",
+                "stderr": (
+                    "SILENT-MISBEHAVIOUR CHECK FAILED before execution. "
+                    f"{detail}"
+                ),
+                "returncode": 3,
+            }
+
         script_path = os.path.join(output_dir, "_generated_script.py")
         try:
             with open(script_path, "w", encoding="utf-8") as fh:
@@ -67,6 +222,7 @@ class SubprocessExecutor:
                 text=True,
                 timeout=timeout_s,
                 cwd=output_dir,
+                env=blas_thread_env(),
             )
             return {
                 "stdout": result.stdout,
@@ -180,7 +336,9 @@ class DockerSandbox:
         volumes: dict[str, dict[str, str]] = {
             os.path.abspath(output_dir): {"bind": "/workspace", "mode": "rw"},
         }
-        environment: dict[str, str] = {"OUTPUT_DIR": "/workspace"}
+        # blas_thread_env with an explicit base: the container gets only
+        # OUTPUT_DIR plus the thread caps, never a copy of the host env.
+        environment: dict[str, str] = blas_thread_env({"OUTPUT_DIR": "/workspace"})
 
         if raw_data_path is not None:
             raw_data_abs = os.path.abspath(raw_data_path)

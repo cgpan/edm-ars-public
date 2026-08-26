@@ -9,6 +9,7 @@ REVISE/ABORT review_report without burning an Opus API call.
 from __future__ import annotations
 
 import csv
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -93,6 +94,7 @@ def run_pre_critic_checks(
     # Universal checks (run for every task type)
     _check_outcome_not_in_train_x(ctx, output_dir, result)
     _check_data_report_validation_passed(ctx, result)
+    _check_research_question_is_answered(ctx, result)
 
     if task_type == "prediction":
         # Prediction-shaped structural checks: model battery + SHAP +
@@ -130,6 +132,104 @@ def run_pre_critic_checks(
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
+
+
+#: Phrases in a research question that COMMIT the paper to a specific
+#: analysis, mapped to the evidence that analysis leaves behind.
+#:
+#: A9. The ordinal-attainment paper's entire premise was whether modelling
+#: attainment as ordered beats treating it as nominal. No ordinal model
+#: was ever fitted -- no proportional-odds, no ordinal forest -- and LSAR
+#: scored it 2/10 on Methodological Rigor and rejected it. Two other
+#: papers showed the same pattern more mildly: a stated
+#: incremental-validity test that was never directly implemented, and no
+#: nested-model comparison.
+#:
+#: Deliberately short. Each entry is a phrase whose presence makes a
+#: specific claim the reader will expect to see supported, paired with
+#: keys or substrings that show the work was actually done. Vague phrases
+#: are NOT listed: a check that fires on "explore" or "examine" would be
+#: noise, and noise is how a check gets ignored.
+_RQ_COMMITMENTS: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
+    (
+        ("ordinal", "ordered categor", "proportional odds", "ordered logit"),
+        ("ordinal", "proportional_odds", "polr", "ordered"),
+        "an ordinal model (proportional-odds or ordinal forest)",
+    ),
+    (
+        ("above and beyond", "over and above", "incremental valid",
+         "incremental predictive", "beyond baseline"),
+        ("incremental_validity", "nested_model", "delta_auc"),
+        "an incremental-validity / nested-model comparison",
+    ),
+    (
+        ("mediat",),
+        ("mediation", "indirect_effect"),
+        "a mediation analysis",
+    ),
+    (
+        ("moderat", "interaction effect", "varies by", "vary by"),
+        ("moderation", "interaction", "subgroup_heterogeneity",
+         "subgroup_performance"),
+        "a moderation / interaction analysis",
+    ),
+    (
+        ("calibrat",),
+        ("calibration",),
+        "a calibration analysis",
+    ),
+)
+
+
+def _check_research_question_is_answered(
+    ctx: object, result: PreCriticResult
+) -> None:
+    """pcc_07 (critical): the analysis must contain the test the RQ promises.
+
+    This is the single largest driver of low rigor scores that is
+    genuinely the system's fault. A paper whose central question is never
+    tested still compiles, still scores, and still reads fluently -- the
+    absence is invisible in the artifact and obvious to a reviewer.
+    """
+    spec = getattr(ctx, "research_spec", None) or {}
+    question = str(spec.get("research_question") or "").lower()
+    if not question:
+        return
+
+    results = getattr(ctx, "results_object", None) or {}
+    if not isinstance(results, dict):
+        return
+    # Evidence may sit at any depth (results.incremental_validity,
+    # results.all_models["OrdinalForest"], a key inside a sub-dict), so
+    # search the serialised object rather than a fixed set of top-level
+    # keys.
+    try:
+        haystack = json.dumps(results).lower()
+    except (TypeError, ValueError):
+        haystack = str(results).lower()
+
+    for phrases, evidence_keys, description in _RQ_COMMITMENTS:
+        if not any(p in question for p in phrases):
+            continue
+        if any(k.lower() in haystack for k in evidence_keys):
+            continue
+        matched = next(p for p in phrases if p in question)
+        result.failures.append(
+            CheckFailure(
+                check_id="pcc_07",
+                severity="critical",
+                message=(
+                    f"The research question says {matched!r}, which commits "
+                    f"the paper to {description}, but no such analysis "
+                    f"appears in results.json. Either run it, or change the "
+                    f"research question so it does not promise a test the "
+                    f"study never performed. A paper whose central question "
+                    f"is never tested reads fluently and is rejected on "
+                    f"rigor."
+                ),
+                target_agent="Analyst",
+            )
+        )
 
 
 def _check_refuters_attempted(ctx: object, result: PreCriticResult) -> None:
@@ -240,7 +340,25 @@ def _check_model_count(ctx: object, result: PreCriticResult) -> None:
     # StackingEnsemble is not an individual model
     stacking_keys = {k for k in all_models if "stack" in k.lower()}
     individual_count = len(all_models) - len(stacking_keys)
-    if individual_count < 4:
+    if individual_count == 0:
+        # Not "too few models" -- the analysis did not happen. A REVISE
+        # here spends its cycles and then writes an UNVERIFIED paper about
+        # an empty results object, which is the artifact this whole guard
+        # exists to prevent. Nothing downstream can rescue it, so it is
+        # critical and the run stops.
+        result.failures.append(
+            CheckFailure(
+                check_id="pcc_02",
+                severity="critical",
+                message=(
+                    "No individual models are present in results.json. The "
+                    "analysis stage produced no trained models at all, so "
+                    "there are no results to report on."
+                ),
+                target_agent="Analyst",
+            )
+        )
+    elif individual_count < 4:
         result.failures.append(
             CheckFailure(
                 check_id="pcc_02",

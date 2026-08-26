@@ -153,6 +153,54 @@ _MINIMAL_STUB_TEX = (
 )
 
 
+def strip_scaffolding(latex: str) -> tuple[str, dict[str, int]]:
+    """Remove writer scaffolding that must never reach the manuscript.
+
+    A7. Every one of five journal-track papers shipped with three
+    artefacts printed into the compiled PDF:
+
+      * ``SUMMARY:`` paragraphs — the sectionwise writer's own per-section
+        handoff notes ("This section motivated the study by ..."), six per
+        paper. The prompt ASKS for them, for the next section's context;
+        nothing was stripping them afterwards.
+      * markdown fences (```` ```latex ````), 6-11 per paper, pasted
+        straight into the .tex.
+      * a duplicated ``\\section{X}`` — emitted once by the assembler and
+        again inside the fenced block.
+
+    LSAR read them as "repeated auto-generated summaries" and
+    "placeholder-like text", which is exactly what a human reviewer would
+    have concluded.
+
+    Returns the cleaned text and a count per artefact, so callers can log
+    what was removed rather than cleaning silently.
+    """
+    stats = {"fences": 0, "summaries": 0, "duplicate_headings": 0}
+    if not latex:
+        return latex, stats
+
+    # 1. Markdown fences on their own line.
+    latex, stats["fences"] = re.subn(
+        r"^[ \t]*```(?:latex|tex|python)?[ \t]*$\n?", "", latex, flags=re.M
+    )
+
+    # 2. SUMMARY: handoff notes, to the next blank line or end of text.
+    latex, stats["summaries"] = re.subn(
+        r"^SUMMARY:.*?(?=\n[ \t]*\n|\Z)", "", latex, flags=re.M | re.S
+    )
+
+    # 3. A heading immediately repeated. Keep the first.
+    latex, stats["duplicate_headings"] = re.subn(
+        r"(\\(?:sub)*section\*?\{([^}]*)\})\s*\n(?:\s*\n)*\\(?:sub)*section\*?\{\2\}",
+        r"\1",
+        latex,
+    )
+
+    # Collapse the blank runs the removals leave behind.
+    latex = re.sub(r"\n{4,}", "\n\n\n", latex)
+    return latex, stats
+
+
 class Writer(BaseAgent):
     """Generates paper.tex (ACM acmart sigconf) and references.bib from pipeline outputs."""
 
@@ -488,8 +536,16 @@ class Writer(BaseAgent):
             if body == _MINIMAL_STUB_TEX:
                 body = ""
             if not body or "\\section" not in body:
-                # salvage: wrap raw text under the section heading
-                body = f"\\section{{{name}}}\n" + (body or resp)
+                # Salvage: wrap raw text under the section heading.
+                # A7: the raw response carries the SUMMARY: handoff line
+                # and any markdown fences, so it must be sanitised BEFORE
+                # a heading is prepended — otherwise the scaffolding is
+                # baked in and the heading may be duplicated.
+                salvaged, _ = strip_scaffolding(body or resp)
+                body = f"\\section{{{name}}}\n" + salvaged.lstrip()
+            body, sec_stats = strip_scaffolding(body)
+            if any(sec_stats.values()):
+                self._log_scaffolding(name, sec_stats)
             sections_tex.append(body)
             m = re.search(r"SUMMARY:\s*(.+)", resp)
             summaries.append(
@@ -552,6 +608,68 @@ class Writer(BaseAgent):
             return None
         return latex[start : i - 1]
 
+
+    #: Formal names for the acknowledgments block. The template used to
+    #: hardcode HSLS:09, which put a false provenance statement in every
+    #: paper built on another dataset -- and because the block lives in
+    #: the protected template region, the Writer could not fix it.
+    DATASET_CITATIONS = {
+        "hsls09_public": "High School Longitudinal Study of 2009 (HSLS:09) public-use",
+        "els_2002": "Education Longitudinal Study of 2002 (ELS:2002) public-use",
+        "did_els_hsls_panel": (
+            "Education Longitudinal Study of 2002 (ELS:2002) and High School "
+            "Longitudinal Study of 2009 (HSLS:09) public-use"
+        ),
+        "assistments_0910": "ASSISTments 2009-2010 skill-builder public",
+    }
+
+    def _author_line(self) -> str:
+        """Author names for the journal byline.
+
+        A7. The public template shipped
+        ``\\authorsnames{EDM-ARS, AI\\_Name, Human\\_Author\\_Name}`` and
+        those placeholder names printed, unfilled, in five compiled
+        manuscripts. A placeholder in a byline reads to a reviewer as an
+        unfinished draft.
+
+        Names come from ``config['paper']['authors']`` when set. The
+        default is EDM-ARS alone: the system genuinely is the author of
+        what it produced, and a human who wants credit should have to say
+        so rather than inherit a name from a template.
+        """
+        # getattr: reassembly is exercised on bare Writer instances built
+        # with object.__new__, which carry no config. A byline helper must
+        # not be the thing that breaks template reassembly.
+        config = getattr(self, "config", None) or {}
+        configured = (config.get("paper") or {}).get("authors")
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+        if isinstance(configured, (list, tuple)):
+            names = [str(a).strip() for a in configured if str(a).strip()]
+            if names:
+                return ", ".join(names)
+        return "EDM-ARS"
+
+    def _log_scaffolding(self, where: str, stats: dict[str, int]) -> None:
+        """Record what was stripped, so cleaning is never silent."""
+        removed = ", ".join(f"{k}={v}" for k, v in stats.items() if v)
+        self.ctx.log.append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent": self.agent_name,
+            "message": f"Stripped writer scaffolding from {where}: {removed}",
+        })
+
+    def _dataset_citation(self) -> str:
+        """Formal dataset name for the acknowledgments block.
+
+        Falls back to the raw dataset identifier rather than to a default
+        dataset name: an unfamiliar identifier in the acknowledgments is a
+        visible prompt to add an entry, whereas defaulting to HSLS:09
+        silently reintroduces the false-provenance bug this replaced.
+        """
+        name = getattr(self.ctx, "dataset_name", "") or ""
+        return self.DATASET_CITATIONS.get(name, name or "the study")
+
     def _reassemble_from_template(self, llm_latex: str, template: str) -> str:
         """Extract content from the LLM's LaTeX and insert it into the clean template.
 
@@ -590,6 +708,13 @@ class Writer(BaseAgent):
             re.DOTALL,
         )
         body = body_match.group(1).strip() if body_match else ""
+        # A7: last line of defence. The sectionwise path sanitises each
+        # section, but the single-shot path lands here directly, and a
+        # fence or SUMMARY: note in the compiled PDF is indistinguishable
+        # to a reviewer from a paper that was never finished.
+        body, body_stats = strip_scaffolding(body)
+        if any(body_stats.values()):
+            self._log_scaffolding("assembled body", body_stats)
 
         # --- Appendix (optional) ---
         appendix = ""
@@ -607,6 +732,10 @@ class Writer(BaseAgent):
         result = result.replace("%%PLACEHOLDER:ABSTRACT%%", abstract)
         result = result.replace("%%PLACEHOLDER:KEYWORDS%%", keywords)
         result = result.replace("%%PLACEHOLDER:PAPER_BODY%%", body)
+        result = result.replace(
+            "%%PLACEHOLDER:DATASET_CITATION%%", self._dataset_citation()
+        )
+        result = result.replace("%%PLACEHOLDER:AUTHORS%%", self._author_line())
         result = result.replace("%%PLACEHOLDER:APPENDIX%%", appendix)
 
         return result

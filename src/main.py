@@ -27,7 +27,7 @@ _DEFAULT_DATASET = "hsls09_public"
 # specs (estimated n = 0 for five of them, 1,663 for the sixth) where the
 # executed runs carried analytic_n = 14,039 (ELS) and 17,335 (HSLS).
 # Escalating it to a hard load failure would reject every real prediction
-# spec, so it is printed and stepped over. the v5 ideation-layer specification (internal) §1.4
+# spec, so it is printed and stepped over. docs/v5_arc_t_spec.md §1.4
 # (task_template.py:146-167) replaces the rule with
 # ``feasibility.estimate_analytic_n()``; this list shrinks to () then.
 _ADVISORY_WARNING_MARKERS: tuple[str, ...] = ("Estimated analytic_n",)
@@ -50,6 +50,71 @@ def _load_registry_for_dataset(dataset: str, registry_dir: str | None = None) ->
         f"{candidates}. A locked research_spec cannot be validated "
         f"without its dataset registry."
     )
+
+
+#: Top-level keys a locked research_spec may declare.
+#:
+#: A8. `--research-spec` accepts arbitrary JSON, but the ProblemFormulator
+#: rewrites the spec and preserves only a handful of fields. Everything
+#: else was dropped WITHOUT WARNING — a user writing careful constraints
+#: into a locked spec (`known_concerns_to_flag`, `required_reporting`) got
+#: a run that behaved as though they had never written them. Grepping the
+#: rendered DataEngineer prompt for those custom keys returned zero hits.
+#:
+#: Split into three groups so the warning can say WHY a key is being
+#: ignored, which is more useful than "unrecognised".
+SPEC_KEYS_HONOURED = {
+    # Core, every task type.
+    "task_type", "dataset", "research_question", "outcome_variable",
+    "outcome_type", "predictor_set", "subgroup_analyses",
+    "target_population", "additional_constraints",
+    # Causal (selection-on-observables, ITR).
+    "treatment", "outcome", "primary_method", "comparator_method",
+    "secondary_methods", "exclude_methods", "target_estimand_hint",
+    "subgroup_of_interest_for_m5", "confounder_guidance",
+    "adjustment_set", "adjustment_covariates", "rule_covariates",
+    "heterogeneity_subgroups",
+    # Difference-in-differences.
+    "estimand", "group_variable", "post_variable", "placebo_outcome",
+    # Psychometrics.
+    "method_battery", "item_columns", "factor_model", "grouping_vars",
+    "reverse_items", "response_labels", "response_codes", "scale_name",
+    "cdm_model", "item_construction",
+}
+
+#: Documentation and provenance. Read by humans, not by the pipeline.
+SPEC_KEYS_METADATA = {
+    "task_id", "study", "rationale_for_method_set", "rationale_for_PF",
+    "rationale_for_topic_selection", "grouping_notes", "known_concerns_to_flag",
+    "required_reporting", "cross_system_brief", "pct_missing_approx", "note",
+}
+
+
+def _warn_on_unrecognised_spec_keys(spec: dict, path: str) -> None:
+    """Say plainly which locked-spec keys will not influence the run.
+
+    Silence here is the trap: a spec that is read, validated and then
+    quietly stripped looks exactly like one that was honoured.
+    """
+    unknown = sorted(set(spec) - SPEC_KEYS_HONOURED - SPEC_KEYS_METADATA)
+    metadata = sorted(set(spec) & SPEC_KEYS_METADATA)
+
+    if unknown:
+        print(
+            f"WARNING: locked research_spec at {path!r} declares "
+            f"{len(unknown)} key(s) the pipeline does not recognise and "
+            f"will ignore: {', '.join(unknown)}. If they are meant to "
+            "steer the run, put the guidance in 'additional_constraints' "
+            "(free text, passed to the DataEngineer and Analyst prompts).",
+            file=sys.stderr,
+        )
+    if metadata:
+        print(
+            f"NOTE: {', '.join(metadata)} in {path!r} are recorded for "
+            "provenance but do NOT steer the run. Use "
+            "'additional_constraints' for guidance the agents must act on.",
+            file=sys.stderr,
+        )
 
 
 def load_locked_research_spec(
@@ -89,6 +154,8 @@ def load_locked_research_spec(
             "Locked research_spec must declare 'task_type' "
             "(e.g., 'causal_soo')"
         )
+
+    _warn_on_unrecognised_spec_keys(spec, path)
 
     resolved_dataset = spec.get("dataset") or dataset or _DEFAULT_DATASET
     # create_dataset_adapter raises ValueError on an unknown dataset —

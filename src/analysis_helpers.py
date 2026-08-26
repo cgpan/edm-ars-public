@@ -15,6 +15,8 @@ from typing import Callable
 import matplotlib
 matplotlib.use("Agg")  # headless backend; must be set before importing pyplot
 import matplotlib.pyplot as plt
+import warnings
+
 import numpy as np
 import pandas as pd
 import shap
@@ -31,6 +33,7 @@ def apply_smote(
     minority_threshold: float = 0.20,
     random_state: int = 42,
     k_neighbors: int = 5,
+    group_ids: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray, dict]:
     """Conditionally apply SMOTE to the training set if minority class < threshold.
 
@@ -40,13 +43,53 @@ def apply_smote(
         minority_threshold: Apply SMOTE when minority fraction < this value.
         random_state: Random seed for SMOTE reproducibility.
         k_neighbors: Number of nearest neighbours for SMOTE.
+        group_ids: Cluster membership (e.g. school IDs) when a group-aware
+            split or CV is in use. **If given, SMOTE is refused.**
 
     Returns:
         Tuple of ``(X_resampled, y_resampled, metadata)``.
         ``metadata`` contains: ``applied``, ``minority_pct_before``,
-        ``minority_pct_after``, ``n_before``, ``n_after``.
+        ``minority_pct_after``, ``n_before``, ``n_after``, and ``reason``
+        when SMOTE was declined.
+
+    Note:
+        SMOTE and group-aware cross-validation are incompatible, and not
+        as a coding detail. At an 11% base rate SMOTE oversampled X and y
+        to 33,266 rows and the original 18,717 school IDs were then passed
+        to a grouped splitter::
+
+            ValueError: Found input variables with inconsistent numbers of
+            samples: [33266, 33266, 18717]
+
+        Padding the group vector would be worse than the crash. A
+        synthetic row interpolated between two students has no school: any
+        label assigned to it is invented, and it would leak that school
+        across the train/test boundary the grouped split exists to
+        enforce. When grouping is active, prefer class weights, threshold
+        tuning and PR-AUC, and say so in the Methods text.
     """
     from imblearn.over_sampling import SMOTE  # local import: sandbox has imblearn
+
+    if group_ids is not None:
+        n_groups = len(np.unique(np.asarray(group_ids)))
+        return (
+            X_train,
+            np.asarray(y_train).ravel(),
+            {
+                "applied": False,
+                "reason": (
+                    "SMOTE declined: a group-aware split or CV is in use "
+                    f"({n_groups} groups). A synthetic row has no cluster "
+                    "membership, so there is no honest group label to give "
+                    "it, and inventing one would leak a cluster across the "
+                    "train/test boundary. Use class weights, threshold "
+                    "tuning and PR-AUC for the imbalance instead, and state "
+                    "that choice in Methods."
+                ),
+                "n_before": len(X_train),
+                "n_after": len(X_train),
+            },
+        )
 
     y_arr = np.asarray(y_train).ravel()
     unique, counts = np.unique(y_arr, return_counts=True)
@@ -412,6 +455,7 @@ def bootstrap_ci(
     metric_fn: Callable[[np.ndarray, np.ndarray], float],
     n_iter: int = 1000,
     random_state: int = 42,
+    **kwargs: object,
 ) -> tuple[float, float]:
     """Compute a 95% bootstrap confidence interval for a scalar metric.
 
@@ -424,7 +468,28 @@ def bootstrap_ci(
 
     Returns:
         ``(lower, upper)`` — the 2.5th and 97.5th percentile of bootstrap scores.
+
+    Note:
+        ``n_iterations`` is accepted as an alias for ``n_iter``. The
+        mandatory skill documenting this helper specified ``n_iterations``
+        for months, so Analyst code that followed it faithfully raised
+        TypeError and took the entire model battery down with it — twice,
+        seven weeks apart, each time leaving ``results.all_models`` empty
+        while the manuscript went on to describe comparisons that never
+        ran. A plausible synonym should cost a warning, not an analysis.
     """
+    if "n_iterations" in kwargs:
+        warnings.warn(
+            "bootstrap_ci: 'n_iterations' is a deprecated alias for 'n_iter'; "
+            "update the caller.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        n_iter = int(kwargs.pop("n_iterations"))  # type: ignore[arg-type]
+    if kwargs:
+        raise TypeError(
+            f"bootstrap_ci() got unexpected keyword arguments: {sorted(kwargs)}"
+        )
     rng = np.random.RandomState(random_state)
     y_true = np.asarray(y_true).ravel()
     y_pred = np.asarray(y_pred).ravel()
@@ -761,6 +826,31 @@ def reconstruct_school_ids(
         "cluster_size_median": round(float(sizes.median()), 1) if len(sizes) > 0 else 0.0,
         "cluster_size_min": int(sizes.min()) if len(sizes) > 0 else 0,
         "cluster_size_max": int(sizes.max()) if len(sizes) > 0 else 0,
+        # A10. The decisive credibility number, and the one nobody was
+        # reporting. Reviewers called this reconstruction "not credible as
+        # described" in four of five papers. A run recovered clusters of
+        # which ~80% held a single student -- a "school-aware" split over
+        # mostly-singleton clusters is close to a random split, and the
+        # design claim it supports is close to empty. Cluster counts and
+        # means hide that completely; the singleton share does not.
+        "singleton_cluster_pct": (
+            round(100.0 * float((sizes == 1).sum()) / len(sizes), 1)
+            if len(sizes) > 0 else 0.0
+        ),
+        "n_clusters_vs_expected_ratio": (
+            round(n_clusters / expected_n_schools, 2)
+            if expected_n_schools else None
+        ),
+        # Stated once, in the artifact, so a Writer cannot omit it by
+        # accident: SCH_ID is suppressed, so there is nothing to check
+        # the reconstruction against.
+        "validated_against_ground_truth": False,
+        "validation_note": (
+            "School identifiers are suppressed in the public-use file, so "
+            "this reconstruction cannot be verified against true school "
+            "membership. Claims of generalisation to unseen schools are "
+            "provisional on the reconstruction approximating it."
+        ),
         "fingerprint_vars_used": vars_used,
         "fingerprint_vars_missing": vars_missing,
         "validation_passed": True,
@@ -1392,6 +1482,103 @@ def run_moderation_analysis(X, y, focal_cols, moderator_col, n_boot=200,
         "interpretation": (
             "interaction significant at alpha=0.05" if p_value < 0.05
             else "no detectable moderation (interaction LRT p >= 0.05)"
+        ),
+    }
+
+
+def run_incremental_validity(train_X, train_y, test_X, test_y,
+                             focal_cols, baseline_cols=None,
+                             school_ids=None, n_boot=1000,
+                             random_state=42):
+    """Does the focal block add predictive power OVER a baseline block?
+
+    This answers "does X predict Y above and beyond A and B", which is
+    the contrast `prediction-research-question-design` asks formulators
+    to pose. It is NOT the same question as moderation: moderation asks
+    whether an effect varies with a third variable, incremental validity
+    asks whether a block of predictors buys anything a baseline did not
+    already have.
+
+    Two nested models are fit on the TRAINING set only and compared on
+    the HELD-OUT test set:
+        baseline : baseline_cols            (default: everything but focal)
+        full     : baseline_cols + focal_cols
+
+    Returns the held-out AUC of each, their difference, and a bootstrap
+    CI on that difference (cluster-aware when ``school_ids`` is given,
+    since students are nested in schools and an iid interval would be
+    too narrow).
+
+    A SHAP ranking inside a single fitted model does not establish
+    incremental validity -- a predictor can dominate a model's
+    attributions while adding nothing over a baseline that already
+    encodes the same information. Three EDM-ARS papers made exactly that
+    inference, which is why this helper exists.
+    """
+    import numpy as np
+    import pandas as pd
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+    from sklearn.preprocessing import StandardScaler
+
+    train_X = pd.DataFrame(train_X).reset_index(drop=True)
+    test_X = pd.DataFrame(test_X).reset_index(drop=True)
+    ytr = np.asarray(train_y).astype(float).ravel()
+    yte = np.asarray(test_y).astype(float).ravel()
+
+    focal = [c for c in focal_cols if c in train_X.columns]
+    if not focal:
+        return {"status": "skipped",
+                "reason": "no focal column present in the design matrix",
+                "focal_cols_requested": list(focal_cols)}
+
+    if baseline_cols is None:
+        base = [c for c in train_X.columns if c not in focal]
+    else:
+        base = [c for c in baseline_cols if c in train_X.columns]
+    if not base:
+        return {"status": "skipped",
+                "reason": "baseline block is empty; nothing to add over"}
+
+    if len(np.unique(yte)) < 2:
+        return {"status": "skipped", "reason": "test outcome is constant"}
+
+    def _auc(cols):
+        scaler = StandardScaler()
+        a = scaler.fit_transform(train_X[cols])
+        b = scaler.transform(test_X[cols])
+        model = LogisticRegression(max_iter=2000, random_state=random_state)
+        model.fit(a, ytr)
+        prob = model.predict_proba(b)[:, 1]
+        return float(roc_auc_score(yte, prob)), prob
+
+    auc_base, prob_base = _auc(base)
+    auc_full, prob_full = _auc(base + focal)
+
+    delta = bootstrap_auc_difference(
+        yte, prob_full, prob_base,
+        school_ids=school_ids, n_boot=n_boot, random_state=random_state,
+    )
+
+    return {
+        "status": "ok",
+        "baseline_auc": auc_base,
+        "full_auc": auc_full,
+        "delta_auc": delta["auc_diff"],
+        "ci_lower": delta["ci_lower"],
+        "ci_upper": delta["ci_upper"],
+        "significant": delta["significant"],
+        "se_method": delta["se_method"],
+        "n_boot_effective": delta["n_boot_effective"],
+        "n_focal_cols": len(focal),
+        "n_baseline_cols": len(base),
+        "focal_cols": focal,
+        "interpretation": (
+            "The focal block adds predictive power over the baseline."
+            if delta["ci_lower"] > 0 else
+            "The focal block does NOT add detectable predictive power "
+            "over the baseline; any 'above and beyond' claim is "
+            "unsupported by this comparison."
         ),
     }
 

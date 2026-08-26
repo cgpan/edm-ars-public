@@ -511,9 +511,17 @@ class TestRunWritesContractCheckedResults:
     def test_prediction_run_unaffected(self, tmp_path: Path) -> None:
         agent = _make_agent(tmp_path, PredictionTemplate())
         self._stub(agent)
+        prediction_results = _prediction_results()
         (tmp_path / "results.json").write_text(
-            json.dumps(_prediction_results()), encoding="utf-8"
+            json.dumps(prediction_results), encoding="utf-8"
         )
+        # A1: figures_generated is checked against disk, so a healthy run
+        # must actually have produced its figures. The fixture previously
+        # declared shap_summary.png without creating it, which a real
+        # prediction run never does — the file and the claim are written
+        # by the same code.
+        for figure in prediction_results.get("figures_generated", []):
+            (tmp_path / Path(figure).name).write_bytes(b"\x89PNG\r\n")
 
         results = agent.run(
             data_report={"validation_passed": True},

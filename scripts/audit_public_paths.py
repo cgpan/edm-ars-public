@@ -22,6 +22,7 @@ Exit code is 1 when anything is found, so CI can gate on it.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -122,6 +123,13 @@ _OBVIOUSLY_FAKE = (
 )
 
 
+#: Files where a personal name is the correct content, not a leak. A
+#: copyright line naming the author is the whole point of the file, and
+#: flagging it trains the reader to ignore the audit's output.
+IDENTITY_EXEMPT_FILES = frozenset({"LICENSE", "LICENSE.md", "LICENSE.txt",
+                                   "COPYRIGHT", "NOTICE", "CITATION.cff"})
+
+
 def is_obvious_fixture(label: str, matched: str) -> bool:
     """True when a credential-shaped match announces itself as fake."""
     if label not in CREDENTIAL_LABELS:
@@ -207,8 +215,95 @@ def scan_history(root: Path) -> list[tuple[str, Path, int, str]]:
     return hits
 
 
-def scan(paths: list[Path], root: Path) -> list[tuple[str, Path, int, str]]:
+IDENTITY_FILE = ".audit_identities"
+
+
+def identity_patterns(
+    root: Path, extra_names: list[str] | None = None
+) -> list[tuple[str, re.Pattern[str]]]:
+    """Patterns for names and affiliations that must not appear publicly.
+
+    The names are NOT written here. An audit script that hardcodes the
+    identity it is protecting publishes that identity to every reader of
+    the script -- the check would leak exactly what it exists to catch.
+
+    They are read instead from, in order: --identity arguments, the
+    EDMARS_AUDIT_IDENTITIES environment variable (os.pathsep-separated),
+    the gitignored .audit_identities file, and finally `git config
+    user.name`. A repository with none of these configured audits paths
+    and credentials as before and reports that name checking is off,
+    rather than silently passing.
+
+    This gap is why a mirror shipped a byline check keyed to a real
+    person's name, plus commented-out template blocks naming that person
+    and their institution, through an audit that reported clean.
+    """
+    names: list[str] = list(extra_names or [])
+
+    from_env = os.environ.get("EDMARS_AUDIT_IDENTITIES", "")
+    names.extend(part for part in from_env.split(os.pathsep) if part.strip())
+
+    identity_path = root / IDENTITY_FILE
+    if identity_path.exists():
+        try:
+            for line in identity_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    names.append(line)
+        except OSError:
+            pass
+
+    try:
+        configured = subprocess.run(
+            ["git", "config", "user.name"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if configured:
+            names.append(configured)
+    except OSError:
+        pass
+
+    return build_identity_patterns(names)
+
+
+#: Shortest identity worth matching. `git config user.name` is often an
+#: initial or a handle, and a one-character name compiled case-insensitively
+#: matches a letter inside ordinary words -- "T" hits the t in "path" -- so
+#: every file becomes a finding and the audit is worthless.
+MIN_IDENTITY_LENGTH = 4
+
+
+def build_identity_patterns(names: list[str]) -> list[tuple[str, re.Pattern[str]]]:
+    """Compile de-duplicated, word-bounded patterns for the given names."""
+    patterns: list[tuple[str, re.Pattern[str]]] = []
+    for name in dict.fromkeys(n.strip() for n in names if n.strip()):
+        if len(name.replace(" ", "")) < MIN_IDENTITY_LENGTH:
+            print(
+                f"NOTE: ignoring identity {name!r}: shorter than "
+                f"{MIN_IDENTITY_LENGTH} characters, which would match inside "
+                "ordinary words.",
+                file=sys.stderr,
+            )
+            continue
+        # Whitespace in a name may be any run of it once a file wraps.
+        escaped = r"\s+".join(re.escape(part) for part in name.split())
+        # Bounded so a name is not found inside a longer word.
+        patterns.append(
+            ("personal-name", re.compile(rf"\b{escaped}\b", re.IGNORECASE))
+        )
+    return patterns
+
+
+def scan(
+    paths: list[Path],
+    root: Path,
+    extra_patterns: list[tuple[str, re.Pattern[str]]] | None = None,
+) -> list[tuple[str, Path, int, str]]:
     """Return (label, path, line_number, matched_text) for every hit."""
+    patterns = PATTERNS + list(extra_patterns or [])
     hits: list[tuple[str, Path, int, str]] = []
     for path in paths:
         try:
@@ -216,12 +311,14 @@ def scan(paths: list[Path], root: Path) -> list[tuple[str, Path, int, str]]:
         except (UnicodeDecodeError, OSError):
             continue  # binary or unreadable: nothing textual to leak
         lines = text.split("\n")
-        for label, pattern in PATTERNS:
+        for label, pattern in patterns:
             for match in pattern.finditer(text):
                 lineno = text[: match.start()].count("\n")
                 if ALLOW_MARKER in lines[lineno]:
                     continue
                 if is_obvious_fixture(label, match.group(0)):
+                    continue
+                if label == "personal-name" and path.name in IDENTITY_EXEMPT_FILES:
                     continue
                 hits.append((label, path.relative_to(root), lineno + 1, match.group(0)))
     return hits
@@ -240,9 +337,30 @@ def main() -> int:
         action="store_true",
         help="scan every blob in git history instead of the working tree",
     )
+    parser.add_argument(
+        "--identity",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "a personal name or affiliation that must not appear in a "
+            "published file. Repeatable. Also read from "
+            "EDMARS_AUDIT_IDENTITIES, the gitignored .audit_identities "
+            "file, and git config user.name."
+        ),
+    )
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
+
+    identities = identity_patterns(root, extra_names=args.identity)
+    if not identities:
+        print(
+            "NOTE: no identities configured, so personal names and "
+            "affiliations were NOT checked. Set EDMARS_AUDIT_IDENTITIES, "
+            "add a .audit_identities file, or pass --identity.",
+            file=sys.stderr,
+        )
 
     if args.history:
         hits = scan_history(root)
@@ -250,7 +368,7 @@ def main() -> int:
         scope = "historical blobs"
     else:
         paths = all_files(root) if args.all else tracked_files(root)
-        hits = scan(paths, root)
+        hits = scan(paths, root, identities)
         count = len(paths)
         scope = "all files" if args.all else "tracked files"
 

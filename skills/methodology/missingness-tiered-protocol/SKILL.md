@@ -62,22 +62,55 @@ df = df.dropna(subset=[outcome_variable])
 # Step 2: per-column missingness on the analytic sample.
 pct_missing = df[predictor_columns].isna().mean() * 100
 
-# Step 3: pick imputer per column.
-for col in predictor_columns:
-    miss = pct_missing[col]
-    if miss < 5:
-        imputer = SimpleImputer(strategy="median")  # or "most_frequent"
-    else:
-        imputer = IterativeImputer(max_iter=5, random_state=42)
-    # Fit on train only; transform both partitions.
+# Step 3a: low-missingness columns get a per-column simple imputer.
+# A median or mode IS a column-wise statistic, so this loop is correct.
+low = [c for c in predictor_columns if pct_missing[c] < 5]
+for col in low:
+    imputer = SimpleImputer(strategy="median")  # or "most_frequent"
     train_X[[col]] = imputer.fit_transform(train_X[[col]])
     test_X[[col]] = imputer.transform(test_X[[col]])
-    if miss > 20:
+
+# Step 3b: everything at or above 5% goes through ONE IterativeImputer,
+# fitted on the WHOLE numeric block at once, on training rows only.
+high = [c for c in predictor_columns if pct_missing[c] >= 5]
+if high:
+    numeric_block = [c for c in predictor_columns
+                     if pd.api.types.is_numeric_dtype(train_X[c])]
+    imputer = IterativeImputer(max_iter=5, random_state=42)
+    train_X[numeric_block] = imputer.fit_transform(train_X[numeric_block])
+    test_X[numeric_block] = imputer.transform(test_X[numeric_block])
+
+for col in predictor_columns:
+    if pct_missing[col] > 20:
         data_report["warnings"].append(
-            f"High missingness: {col} has {miss:.1f}% missing values; "
-            "imputed but flagged as a limitation."
+            f"High missingness: {col} has {pct_missing[col]:.1f}% missing "
+            "values; imputed but flagged as a limitation."
         )
 ```
+
+**MANDATORY RULE — never fit `IterativeImputer` on a single column.**
+
+```python
+# WRONG. This SHIPPED, and the papers reported the wrong method.
+imputer = IterativeImputer(max_iter=5, random_state=RANDOM_STATE)
+train_imputed = imputer.fit_transform(train_X_raw[[col]])   # ONE column
+```
+
+`IterativeImputer` models each feature from the *other* features. Given a
+single column there are no other features, so it silently degenerates to
+**mean imputation**. The code then recorded
+`missingness_summary[col]["imputation_method"] = "IterativeImputer"` and
+the manuscript repeated it — so five papers named a multivariate imputer
+and performed mean-fill, on variables missing 28–36% (`X1PAREDEXPCT`
+36.1%, `X1PAREDU` 28.6%).
+
+This is a reporting-accuracy defect, not a preference. Either fit on the
+full matrix so the imputer can borrow strength across columns, or record
+what actually ran. **The recorded `imputation_method` must name the
+method that executed.**
+
+Fit on TRAINING ROWS ONLY — that discipline is already correct across
+runs (`fit_on_all = 0` in all five audited papers). Preserve it.
 
 ## What to record in `data_report.json`
 

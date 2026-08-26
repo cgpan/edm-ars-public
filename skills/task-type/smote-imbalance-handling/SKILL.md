@@ -144,6 +144,40 @@ The Critic verifies:
 3. When SMOTE was applied, F2 and balanced_accuracy must be reported
    for every model in primary and ablation results. Missing → major.
 
+## MANDATORY RULE — SMOTE and group-aware CV are incompatible
+
+If a school-aware split or any grouped cross-validator is in use, **do
+not oversample.** Pass `group_ids=` to `apply_smote` and it will decline,
+returning the training set unchanged with the reason recorded.
+
+```python
+X_res, y_res, smote_meta = analysis_helpers.apply_smote(
+    X_train, y_train,
+    group_ids=train_school_ids,   # present -> SMOTE declines
+)
+```
+
+This is conceptual, not a coding slip. At an 11% base rate SMOTE
+oversampled X and y to 33,266 rows; the original 18,717 school IDs then
+went to a grouped splitter:
+
+```
+ValueError: Found input variables with inconsistent numbers of samples:
+[33266, 33266, 18717]
+```
+
+Padding the group vector to match would be worse than the crash. A
+synthetic row interpolated between two students belongs to no school, so
+any label given to it is invented — and it would leak that school across
+the very train/test boundary the grouped split exists to enforce.
+
+**Use instead, when grouping is active:** class weights
+(`class_weight="balanced"`), decision-threshold tuning on the training
+folds, and PR-AUC alongside ROC-AUC. **State that choice in the generated
+Methods text** — "SMOTE was not applied because the evaluation uses a
+school-aware split" is a methodological decision a reader needs, not an
+implementation detail.
+
 ## Source provenance
 
 Canonical source: `agent_prompts/analyst.yaml` §"Class Imbalance

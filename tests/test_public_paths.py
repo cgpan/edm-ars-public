@@ -267,6 +267,18 @@ def test_paper_templates_use_author_placeholders(rel: str) -> None:
     if not path.exists():
         pytest.skip(f"{rel} not in this checkout")
     text = path.read_text(encoding="utf-8")
+    # The byline is filled from config at write time, so a template may
+    # carry the substitution marker INSTEAD of a named placeholder. That
+    # is strictly better than a baked-in fake name -- it cannot survive
+    # into a compiled paper unfilled -- and it satisfies the same rule:
+    # this repository ships nobody's name.
+    if "%%PLACEHOLDER:AUTHORS%%" in text:
+        # Derived from LICENSE, never written literally here: this file is
+        # itself scanned for the owner's name, so spelling it out would
+        # make the guard trip on its own guard.
+        for variant in _name_variants(_copyright_holder()):
+            assert variant not in text, f"{rel} names the owner"
+        return
     # On a compiled line the underscore is escaped, so accept either form.
     for token in ("Human_Author_Name", "AI_Name"):
         escaped = token.replace("_", BS + "_")

@@ -210,8 +210,36 @@ class Analyst(BaseAgent):
     """
 
     MAX_RETRIES = 3
-    # Generous timeout for code that includes SHAP computation (SPEC §4.3)
+    # Generous timeout for code that includes SHAP computation (SPEC §4.3).
+    # Class attribute so it stays patchable; the effective value comes from
+    # _exec_timeout_s(), which lets config.yaml raise it without an edit here.
     EXEC_TIMEOUT_S = 600
+
+    def _exec_timeout_s(self) -> int:
+        """Execution timeout, widened when the battery is trained twice.
+
+        600s fits one pass of the battery. It does NOT fit a journal-track
+        run where the minority class falls below
+        class_imbalance.minority_threshold, SMOTE triggers, and
+        ablation_enabled trains the whole battery a second time to compare
+        against it. That run timed out three times in a row -- three
+        analyst calls, 21 minutes apart -- and each retry regenerated code
+        that was never the problem.
+
+        Doubling the work is a known, inspectable condition, so the budget
+        follows it rather than making the operator discover the ceiling.
+        """
+        config = getattr(self, "config", None) or {}
+        pipeline = config.get("pipeline") or {}
+        configured = pipeline.get("analysis_exec_timeout_s")
+        if isinstance(configured, (int, float)) and configured > 0:
+            return int(configured)
+
+        timeout = int(self.EXEC_TIMEOUT_S)
+        imbalance = config.get("class_imbalance") or {}
+        if imbalance.get("ablation_enabled"):
+            timeout *= 2
+        return timeout
 
     def run(
         self,
@@ -262,7 +290,7 @@ class Analyst(BaseAgent):
 
         # Execute with up to MAX_RETRIES retry attempts on failure
         for attempt in range(self.MAX_RETRIES + 1):
-            exec_result = self.execute_code(code, timeout_s=self.EXEC_TIMEOUT_S)
+            exec_result = self.execute_code(code, timeout_s=self._exec_timeout_s())
             if exec_result["returncode"] == 0:
                 break
             if attempt == self.MAX_RETRIES:
@@ -281,7 +309,30 @@ class Analyst(BaseAgent):
                 # LLM returned no new code block — stop retrying
                 break
 
-        results = self._read_results(last_response)
+        # A1: execution status gates whether the model's own response may
+        # be used as a source of metrics. An empty stdout with a non-zero
+        # return code is what a timeout looks like, and it is precisely
+        # when the response text is least trustworthy.
+        execution_ok = exec_result["returncode"] == 0 and bool(
+            exec_result.get("stdout", "").strip()
+        )
+        execution_detail = (
+            f"returncode={exec_result['returncode']}, "
+            f"stdout={'empty' if not exec_result.get('stdout', '').strip() else 'present'}, "
+            f"stderr={exec_result.get('stderr', '')[:300]}"
+        )
+        if not execution_ok:
+            self.ctx.errors.append(
+                f"Analyst: analysis execution did not succeed ({execution_detail}). "
+                "Metrics were not taken from the response text."
+            )
+
+        results = self._read_results(
+            last_response,
+            execution_ok=execution_ok,
+            execution_detail=execution_detail,
+        )
+        results = self._verify_figures_on_disk(results)
         results = self._validate_results(results)
         # G3: deterministic post-Analyst scope assertion against the
         # locked spec (no-op unless the spec declares a method_battery).
@@ -557,21 +608,67 @@ class Analyst(BaseAgent):
             return match.group(1).strip()
         raise ValueError("No JSON block found in LLM response")
 
-    def _read_results(self, fallback_llm_response: str) -> dict:
-        """Read results.json written by the generated code, or fall back to LLM JSON."""
+    def _read_results(
+        self,
+        fallback_llm_response: str,
+        execution_ok: bool = True,
+        execution_detail: str = "",
+    ) -> dict:
+        """Read results.json written by the generated code.
+
+        The LLM-response fallback is a LAST RESORT and is refused outright
+        when the code did not run.
+
+        A1. The Analyst's script hit the executor timeout, so
+        ``subprocess.TimeoutExpired`` returned empty stdout and no
+        results.json was written. This method then parsed the JSON block
+        the LLM had helpfully appended after its code — a block the model
+        AUTHORED rather than computed. results.json went on to report five
+        trained models (AUC 0.823 / 0.83 / 0.81 / 0.79 / 0.78),
+        calibration, an ablation and eight figures, with zero figures on
+        disk, no model ever fitted, and ``errors: []``. The run looked
+        normal and a paper was written from it.
+
+        An earlier attempt of the same study failed honestly with
+        ``all_models: {}`` and was obviously unusable. The silent path is
+        far more dangerous than the crash, so when execution fails the
+        honest empty object is the ONLY acceptable output.
+        """
         results_path = os.path.join(self.ctx.output_dir, "results.json")
         if os.path.exists(results_path):
             with open(results_path, encoding="utf-8") as f:
                 return json.load(f)
 
-        # Try to parse the JSON block from the LLM response
+        if not execution_ok:
+            return self._failed_results(
+                "Analysis code did not execute successfully and wrote no "
+                "results.json. Metrics were NOT taken from the model's "
+                "response text, which would have reported computations that "
+                "never ran. "
+                + (execution_detail or "")
+            )
+
+        # Execution reported success but produced no results.json. The
+        # response block is accepted here only because the code did run;
+        # every figure it claims is still checked against disk downstream.
         try:
             raw_json = self._extract_json_block(fallback_llm_response)
-            return json.loads(raw_json)
+            parsed = json.loads(raw_json)
         except (ValueError, json.JSONDecodeError):
-            pass
+            return self._failed_results(
+                "results.json was not written and could not be parsed from "
+                "LLM output"
+            )
+        parsed.setdefault("warnings", []).append(
+            "results.json was absent; metrics were parsed from the analysis "
+            "response rather than read from an artifact written by the code. "
+            "Treat them as unverified."
+        )
+        return parsed
 
-        # Last resort: return a minimal failed results object
+    @staticmethod
+    def _failed_results(reason: str) -> dict:
+        """An honest empty results object carrying the reason it is empty."""
         return {
             "best_model": "",
             "best_metric_value": 0.0,
@@ -581,11 +678,37 @@ class Analyst(BaseAgent):
             "subgroup_performance": {},
             "figures_generated": [],
             "tables_generated": [],
-            "errors": [
-                "results.json was not written and could not be parsed from LLM output"
-            ],
+            "errors": [reason.strip()],
             "warnings": [],
         }
+
+    def _verify_figures_on_disk(self, results: dict) -> dict:
+        """Drop claimed figures that do not exist, and say so.
+
+        A1 again: the fabricated run listed eight figures, none of which
+        were on disk. A figure name in results.json is a claim about a
+        file, and it is cheap to check.
+        """
+        claimed = results.get("figures_generated")
+        if not isinstance(claimed, list) or not claimed:
+            return results
+
+        present, missing = [], []
+        for fig in claimed:
+            if not isinstance(fig, str):
+                continue
+            path = os.path.join(self.ctx.output_dir, os.path.basename(fig))
+            (present if os.path.exists(path) else missing).append(fig)
+
+        if missing:
+            results["figures_generated"] = present
+            results.setdefault("errors", []).append(
+                f"{len(missing)} figure(s) reported by the analysis do not "
+                f"exist on disk and were removed from results.json: "
+                f"{', '.join(sorted(missing)[:8])}"
+                + (" ..." if len(missing) > 8 else "")
+            )
+        return results
 
     # ------------------------------------------------------------------
     # Validation

@@ -74,6 +74,76 @@ _SKILL_CAPS_BY_TASK_TYPE: dict[str, dict[str, int]] = {
 }
 
 
+#: Encoded design matrices wider than this are structural corruption, not
+#: a modelling choice. A typical prediction spec of <=30 raw variables
+#: encodes to ~50 columns; the observed failure reached 16,945.
+MAX_ENCODED_COLUMNS = 500
+
+
+def check_design_matrix_width(
+    output_dir: str, max_columns: int = MAX_ENCODED_COLUMNS
+) -> str | None:
+    """Refuse a design matrix wide enough that nothing can train.
+
+    A2. A continuous maths theta score (X1TXMTSCOR, 20,741 distinct
+    values) was one-hot encoded into 16,705 dummy columns; the matrix
+    reached 18,806 x 16,945 and 1.8 GB, and no model trained inside any
+    timeout. Three consecutive runs failed, each misdiagnosed as
+    "slowness".
+
+    The generated guard existed and mutated the list it was iterating
+    (``onehot_cols.remove(col)`` inside ``for col in onehot_cols``), which
+    skips the next element and lets roughly half the offenders through.
+    Prose guidance did not hold, so the ceiling is enforced here, where a
+    violation triggers a targeted DataEngineer retry.
+
+    A module-level function rather than a method: the pre-flight is
+    exercised with lightweight stubs, and a new check should not require
+    every caller to grow an attribute.
+
+    Names the columns responsible rather than reporting only the total,
+    because the actionable fact is WHICH variable exploded -- the failure
+    presents as a timeout, which sends people to the model battery
+    instead of the encoder.
+    """
+    train_X_path = Path(output_dir) / "train_X.csv"
+    if not train_X_path.exists():
+        return None
+    try:
+        import pandas as _pd
+
+        header = _pd.read_csv(train_X_path, nrows=0)
+    except Exception:  # noqa: BLE001
+        # The pre-flight must never be the thing that breaks a healthy run.
+        return None
+
+    n_cols = len(header.columns)
+    if n_cols <= max_columns:
+        return None
+
+    from collections import Counter
+
+    parents = Counter(str(c).split("_")[0] for c in header.columns)
+    worst = ", ".join(
+        f"{name} -> {count} columns"
+        for name, count in parents.most_common(3)
+        if count > 1
+    )
+    return (
+        f"Encoded design matrix has {n_cols} columns, above the ceiling of "
+        f"{max_columns}. This is one-hot expansion of a CONTINUOUS "
+        f"variable, not a modelling choice, and no model will train. Worst "
+        f"offenders: {worst or 'unable to attribute'}. Decide categorical "
+        "vs continuous from the DECLARED TYPE in the dataset registry, not "
+        "from the pandas dtype after sentinel replacement -- mapping "
+        "labelled sentinels to NaN turns a numeric column into object "
+        "dtype and makes a continuous score look categorical. Build the "
+        "one-hot list with a comprehension "
+        "(`[c for c in cats if X[c].nunique() <= 100]`); never remove from "
+        "a list while iterating over it."
+    )
+
+
 def _resolve_skill_caps(task_type: str) -> dict[str, int]:
     """Return the per-layer skill cap for a given task type.
 
@@ -302,6 +372,16 @@ class Orchestrator:
         except Exception as e:
             self._abort(f"FORMULATING failed: {e}")
 
+    def _check_design_matrix_width(self) -> str | None:
+        """Refuse a design matrix wide enough that nothing can train.
+
+        Names the columns responsible rather than reporting only the
+        total, because the actionable fact is WHICH variable exploded --
+        the failure presents as a timeout, which sends people looking at
+        the model battery instead of the encoder.
+        """
+        return check_design_matrix_width(self.ctx.output_dir)
+
     def _run_post_de_preflight(self) -> str | None:
         """Run the causal-mode post-DE contract checks.
 
@@ -347,6 +427,24 @@ class Orchestrator:
                     "train_test_split(random_state=42) and do NOT attempt "
                     "school-cluster reconstruction."
                 )
+
+        # A2: hard ceiling on the encoded design matrix.
+        #
+        # A continuous maths theta score (X1TXMTSCOR, 20,741 distinct
+        # values) was one-hot encoded into 16,705 dummy columns; the
+        # design matrix reached 18,806 x 16,945 and 1.8 GB, and no model
+        # could train inside any timeout. Three consecutive runs failed
+        # and were each misdiagnosed as "slowness".
+        #
+        # The generated guard existed but mutated the list it was
+        # iterating (`onehot_cols.remove(col)` inside `for col in
+        # onehot_cols`), which skips the next element and lets roughly
+        # half the offenders through. Prose guidance alone clearly does
+        # not hold, so the ceiling is enforced here where a violation
+        # triggers a targeted retry.
+        violation = check_design_matrix_width(self.ctx.output_dir)
+        if violation:
+            return violation
 
         if spec.get("task_type") != "causal_soo":
             return None
