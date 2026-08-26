@@ -329,6 +329,50 @@ def save_pdp_plots(
 # ---------------------------------------------------------------------------
 
 
+#: Above this many distinct values, a numeric protected attribute is a
+#: measurement rather than a set of groups and must be binned.
+MAX_SUBGROUP_LEVELS = 12
+
+#: Quantile bins used for a continuous protected attribute. Quintiles match
+#: the registry's own X1SESQ5 coding, so the reported bands line up with the
+#: composite NCES already publishes.
+SUBGROUP_QUANTILES = 5
+
+
+def _grouping_series(column: "pd.Series") -> tuple["pd.Series", bool]:
+    """Return the series to group by, and whether it had to be binned.
+
+    Grouping a continuous protected attribute by raw value gives one group
+    per distinct float. X1SES did exactly that in a live run: 3,126 groups
+    of one or two students, every one of them skipped for being too small,
+    a subgroup table with nothing in it, and a "performance gap > 5%" flag
+    computed off the handful of bins that happened to clear the threshold.
+
+    Quantile bins are what the Critic asked for by name after seeing the
+    same failure: "using quartile or quintile bins, not raw continuous
+    values".
+    """
+    import pandas as pd  # local import, matching this module's style
+
+    distinct = column.nunique(dropna=True)
+    numeric = pd.api.types.is_numeric_dtype(column)
+    if not numeric or distinct <= MAX_SUBGROUP_LEVELS:
+        return column, False
+
+    try:
+        # duplicates="drop": a skewed composite can share bin edges, and
+        # raising there would lose the attribute entirely.
+        binned = pd.qcut(
+            column, SUBGROUP_QUANTILES, duplicates="drop", precision=2
+        )
+    except (ValueError, TypeError):
+        return column, False
+
+    if binned.nunique(dropna=True) < 2:
+        return column, False
+    return binned.astype(str), True
+
+
 def run_subgroup_analysis(
     model: object,
     test_X: pd.DataFrame,
@@ -398,14 +442,24 @@ def run_subgroup_analysis(
 
         results[attr] = {}
 
-        for group_val, group_idx_labels in protected.groupby(attr).groups.items():
+        grouping, binned = _grouping_series(protected[attr])
+        if binned:
+            warnings_list.append(
+                f"Subgroup attribute '{attr}' is continuous "
+                f"({protected[attr].nunique()} distinct values); grouped into "
+                f"{grouping.nunique()} quantile bins for subgroup reporting."
+            )
+
+        too_small: list[str] = []
+        for group_val, group_idx_labels in grouping.groupby(grouping).groups.items():
             # group_idx_labels are index labels in protected (0-based after reset_index)
             pos_idx = np.asarray(group_idx_labels, dtype=int)
             n = len(pos_idx)
             if n < 10:
-                warnings_list.append(
-                    f"Subgroup {attr}={group_val}: only {n} samples, skipping."
-                )
+                # Collected, not appended one-by-one. An unbinned continuous
+                # attribute produced 3,126 of these in a single run, which
+                # buried the three real warnings and bloated results.json.
+                too_small.append(f"{group_val} (n={n})")
                 continue
 
             gy_true = test_y_arr[pos_idx]
@@ -428,6 +482,14 @@ def run_subgroup_analysis(
                 warnings_list.append(
                     f"Subgroup {attr}={group_val}: metric computation failed — {exc}"
                 )
+
+        if too_small:
+            shown = ", ".join(too_small[:5])
+            more = f" (+{len(too_small) - 5} more)" if len(too_small) > 5 else ""
+            warnings_list.append(
+                f"Subgroup {attr}: {len(too_small)} level(s) had fewer than 10 "
+                f"samples and were skipped: {shown}{more}."
+            )
 
         # Flag gaps > 5 %
         if results.get(attr):

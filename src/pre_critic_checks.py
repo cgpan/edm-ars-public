@@ -401,15 +401,47 @@ def _check_top_features_present(ctx: object, result: PreCriticResult) -> None:
 
 
 def _check_subgroup_performance_present(ctx: object, result: PreCriticResult) -> None:
-    """pcc_05 (major): results.json.subgroup_performance must not be empty."""
+    """pcc_05 (major): every declared protected attribute must be reported.
+
+    Emptiness was the only thing checked, so a run that reported two of
+    three declared attributes passed. That is what happened live: the spec
+    declared [X1SEX, X1RACE, X1SES], the DataEngineer wrote a
+    test_protected.csv containing only X1RACE and X1SES, and the gender
+    analysis was skipped with a warning nobody had to act on. The paper
+    can still say subgroup analysis was conducted for protected
+    attributes, which is the kind of claim that must not be able to go
+    quietly half-true.
+    """
     results = getattr(ctx, "results_object", None) or {}
-    if not results.get("subgroup_performance"):
+    reported = results.get("subgroup_performance") or {}
+    if not reported:
         result.failures.append(
             CheckFailure(
                 check_id="pcc_05",
                 severity="major",
                 message="results.json.subgroup_performance is empty — subgroup analysis did not run.",
                 target_agent="Analyst",
+            )
+        )
+        return
+
+    spec = getattr(ctx, "research_spec", None) or {}
+    declared = spec.get("subgroup_analyses") or []
+    missing = [attr for attr in declared if attr not in reported]
+    if missing:
+        result.failures.append(
+            CheckFailure(
+                check_id="pcc_05",
+                severity="major",
+                message=(
+                    "research_spec.subgroup_analyses declares "
+                    f"{sorted(declared)} but results.json.subgroup_performance "
+                    f"reports only {sorted(reported)}. Missing: {sorted(missing)}. "
+                    "Every declared protected attribute must be carried into "
+                    "test_protected.csv and reported, or the fairness claim is "
+                    "only partly supported."
+                ),
+                target_agent="DataEngineer",
             )
         )
 

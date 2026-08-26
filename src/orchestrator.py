@@ -360,7 +360,9 @@ class Orchestrator:
                 # the causal "refine" branch that consumes this kwarg.
                 locked_research_spec=self.ctx.locked_research_spec,
             )
-            self.ctx.research_spec = result.get("research_spec")
+            self.ctx.research_spec = self._carry_locked_guidance(
+                result.get("research_spec")
+            )
             self.ctx.literature_context = result.get("literature_context")
             self.ctx.retrieved_literature = result.get("retrieved_literature")
             self._save_formulating_outputs()
@@ -608,6 +610,44 @@ class Orchestrator:
             self._check_cost()
         except Exception as e:
             self._abort(f"ANALYZING failed: {e}")
+
+    def _carry_locked_guidance(self, spec: dict | None) -> dict | None:
+        """Keep the locked spec's free-text guidance in the emitted spec.
+
+        The locked spec is handed to the ProblemFormulator, which returns
+        a research_spec of its own, and that replaces the locked one
+        wholesale. Anything the PF does not echo back is gone by the time
+        the DataEngineer runs.
+
+        A study spec proved what that costs. It carried an ENCODING
+        CONTRACT -- "do NOT pass them to get_dummies ... under any
+        circumstance" -- naming five continuous predictors. The prompts
+        show it reached the ProblemFormulator (6 mentions) and NOTHING
+        downstream: DataEngineer, Analyst and Critic all saw zero. X1SES
+        was one-hot encoded into 5,514 columns and X1TXMTSCOR into 9,350,
+        giving 15,008 features for 12,918 students, and SHAP for
+        X1TXMTSCOR summed to 0.0 across its 9,350 dummies.
+
+        The unrecognised-key warning tells authors to move such guidance
+        into `additional_constraints`. That advice was itself broken
+        until this function existed, because that key died at the same
+        boundary as the ones it was recommending a retreat from.
+        """
+        if not isinstance(spec, dict):
+            return spec
+        locked = getattr(self.ctx, "locked_research_spec", None)
+        if not isinstance(locked, dict):
+            return spec
+        carried = locked.get("additional_constraints")
+        if carried and not spec.get("additional_constraints"):
+            spec["additional_constraints"] = carried
+            self._log(
+                "Orchestrator",
+                "Carried 'additional_constraints' from the locked spec into "
+                "the ProblemFormulator's research_spec so it reaches the "
+                "DataEngineer, Analyst and Critic.",
+            )
+        return spec
 
     def _run_critiquing(self) -> None:
         self._log("Orchestrator", f"Starting CRITIQUING stage (cycle {self.ctx.revision_cycle})")
@@ -1009,7 +1049,9 @@ class Orchestrator:
         else:
             result = agent.run(revision_instructions=revision_instructions)
         if agent_name == "ProblemFormulator":
-            self.ctx.research_spec = result.get("research_spec")
+            self.ctx.research_spec = self._carry_locked_guidance(
+                result.get("research_spec")
+            )
             self.ctx.literature_context = result.get("literature_context")
             self.ctx.retrieved_literature = result.get("retrieved_literature")
             self._save_formulating_outputs()

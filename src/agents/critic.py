@@ -153,6 +153,43 @@ class Critic(BaseAgent):
     # Message builders
     # ------------------------------------------------------------------
 
+    #: Config settings that checklist rows are written as conditions on.
+    #: Each earned its place by appearing in a rule the Critic is asked to
+    #: apply: an_01 keys off mlp_enabled, the SMOTE rows off
+    #: minority_threshold and ablation_enabled.
+    CHECKLIST_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
+        ("pipeline", "mlp_enabled"),
+        ("class_imbalance", "minority_threshold"),
+        ("class_imbalance", "ablation_enabled"),
+        ("pipeline", "random_state"),
+        ("pipeline", "task_type"),
+    )
+
+    def _checklist_relevant_config(self) -> dict:
+        """Report the settings the checklist's conditional rows depend on.
+
+        The checklist says "at least 5 individual model families ... (When
+        `mlp_enabled: false`, 4 individual + Stacking = 5 total is
+        acceptable.)". The shipped default IS false, so four models is the
+        correct outcome -- but the only occurrence of `mlp_enabled` in the
+        rendered prompt was inside that rule's own text. The Critic was
+        handed a condition and never told whether it held, so it could not
+        apply the carve-out and flagged an_01 major on a run that had done
+        nothing wrong. Every prediction run on the default config earned
+        the same unavoidable finding.
+
+        This is the same shape as guidance that reaches one agent and no
+        other: the rule existed, the fact needed to evaluate it did not
+        arrive.
+        """
+        config = getattr(self, "config", None) or {}
+        relevant: dict = {}
+        for section, key in self.CHECKLIST_CONFIG_KEYS:
+            block = config.get(section)
+            if isinstance(block, dict) and key in block:
+                relevant[f"{section}.{key}"] = block[key]
+        return relevant
+
     def _build_user_message(
         self,
         research_spec: dict | None,
@@ -166,10 +203,21 @@ class Critic(BaseAgent):
         findings_memory_summary: str = "",
         pre_critic_failures: list | None = None,
     ) -> str:
+        """Assemble the Critic's user message.
+
+        See ``_checklist_relevant_config`` for why the run's configuration
+        is included: several checklist rows are conditional on settings the
+        Critic could not otherwise observe.
+        """
         max_cycles = self.ctx.max_revision_cycles
         at_max = revision_cycle >= max_cycles
 
         parts = [
+            "## Run Configuration (settings this run's checklist depends on)",
+            "```json",
+            json.dumps(self._checklist_relevant_config(), indent=2),
+            "```",
+            "",
             "## research_spec.json",
             "```json",
             json.dumps(research_spec or {}, indent=2),
