@@ -97,13 +97,20 @@ def _render_critic_prompt(
 
 class TestCriticSlimApplied:
     def test_slim_line_count(self, slim_critic_prompt: str) -> None:
-        """V1 was 235 lines; the applied slim is 140 (staged 123 + the
-        harvested Revision-Instructions block + the novelty_review
-        output contract)."""
+        """V1 was 235 lines; the slim form must stay well under it.
+
+        The ceiling was 150 until 2026-09-20, when the writer_obligations
+        contract (~32 lines) was added -- the channel that carries Critic
+        findings addressed to the Writer, 41 of which were previously
+        deleted before the report was saved. That is content the slim
+        form is supposed to carry, not residue it is supposed to shed,
+        and the sibling test below is what guards against the V1
+        checklist coming back.
+        """
         line_count = slim_critic_prompt.count("\n") + 1
-        assert line_count <= 150, (
+        assert line_count <= 190, (
             f"Critic system_prompt has {line_count} lines; expected the "
-            f"slim form ≤ 150. The slim apply may have been reverted."
+            f"slim form ≤ 190. The slim apply may have been reverted."
         )
 
     def test_slim_does_not_contain_v1_checklist_residue(
@@ -268,7 +275,13 @@ class TestCriticCrossTaskPreserved:
             ("lens-a", "LENS A — METHODOLOGIST"),
             ("lens-b", "LENS B — SKEPTIC"),
             ("lens-c", "LENS C — SYNTHESIZER"),
-            ("verdict-exhausted-pass", "orchestrator will mark the paper UNVERIFIED"),
+            # Was ("verdict-exhausted-pass", "orchestrator will mark the
+            # paper UNVERIFIED") -- that marker was the tail of an
+            # instruction telling the Critic to relabel REVISE as PASS
+            # once cycles ran out. The instruction is gone; what must
+            # survive is the cycles-exhausted guidance itself, which
+            # now says to report the true verdict.
+            ("verdict-exhausted-truthful", "Never soften REVISE to PASS"),
             ("verdict-never-abort", "Never"),
             ("severity-critical", "Invalidates the study"),
             ("revision-null-semantics", "Set to null for agents that do not need to revise"),

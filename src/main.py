@@ -181,7 +181,13 @@ def load_locked_research_spec(
     return spec
 
 
-def main() -> None:
+def main() -> int:
+    """Run the pipeline and return the process exit code.
+
+    The annotation matters: a batch harness branches on 0 / 2 / 3, and
+    ``-> None`` said the opposite of the thing this return value exists
+    to provide.
+    """
     parser = argparse.ArgumentParser(
         description="EDM-ARS: Educational Data Mining Automated Research System"
     )
@@ -309,7 +315,7 @@ def main() -> None:
             matched = orchestrator._match_skills_for_stage(stage)
             names = [s.name for s in matched]
             print(f"  skills @ {stage}: {len(matched)} -> {names}")
-        return
+        return 0
 
     result_ctx = orchestrator.run(user_prompt=args.prompt)
 
@@ -318,6 +324,44 @@ def main() -> None:
     if result_ctx.errors:
         print(f"Errors: {result_ctx.errors}", file=sys.stderr)
 
+    # Say out loud what the run decided about itself, and exit non-zero
+    # when it decided against release.
+    #
+    # This process used to exit 0 unconditionally, with no sys.exit
+    # anywhere in the file, so a run whose quality gate said
+    # ``passed: false`` was indistinguishable from a clean one to any
+    # wrapper script, CI job or batch harness. 23 archived runs carry a
+    # failing gate under ``current_state: "COMPLETED"``.
+    status_path = os.path.join(result_ctx.output_dir, "run_status.json")
+    if os.path.exists(status_path):
+        try:
+            with open(status_path, encoding="utf-8") as f:
+                status = json.load(f)
+            counts = status.get("invariant_counts") or {}
+            print(
+                f"Release: {'YES' if status.get('released') else 'NO'} "
+                f"({status.get('reason')})"
+            )
+            print(
+                f"Invariant findings: {counts.get('critical', 0)} critical, "
+                f"{counts.get('major', 0)} major, {counts.get('minor', 0)} minor"
+            )
+        except (OSError, ValueError):
+            pass
+
+    return _exit_code_for(result_ctx)
+
+
+#: Exit codes a batch harness can branch on.
+#: 0 released, 2 finished but not releasable, 3 aborted.
+def _exit_code_for(ctx) -> int:
+    state = str(getattr(ctx, "current_state", ""))
+    if state.endswith("ABORTED"):
+        return 3
+    if state.endswith("INCOMPLETE"):
+        return 2
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

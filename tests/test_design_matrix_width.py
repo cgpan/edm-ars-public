@@ -92,3 +92,57 @@ def test_scales_to_the_observed_magnitude(tmp_path: Path, n: int) -> None:
     violation = check_design_matrix_width(str(tmp_path))
     assert violation is not None
     assert str(n) in violation
+
+
+# ---------------------------------------------------------------------------
+# The same lesson, one stage later: a column with no variance in TEST
+# ---------------------------------------------------------------------------
+
+
+class TestConstantTestColumns:
+    """`encode_categoricals` prevents this, and the agent does not call it.
+
+    The A/B measured which of this arc's skill-level instructions the
+    DataEngineer adopted. Two of three took; `encode_categoricals` did
+    not, in either arm. So the guard lives in orchestrator code, next to
+    the width ceiling, which exists for exactly the same reason: the
+    generated one-hot guard mutated the list it was iterating and let
+    half the offenders through.
+    """
+
+    @staticmethod
+    def _write(tmp_path, header, rows):
+        p = tmp_path / "test_X.csv"
+        p.write_text(
+            ",".join(header) + "\n" + "\n".join(",".join(r) for r in rows) + "\n",
+            encoding="utf-8",
+        )
+        return str(tmp_path)
+
+    def test_a_matrix_of_constant_columns_is_refused(self, tmp_path):
+        from src.orchestrator import check_constant_test_columns
+
+        header = ["a", "b", "c", "d", "e"]
+        rows = [["1", "0", "0", "0", "0"], ["2", "0", "0", "0", "0"]]
+        msg = check_constant_test_columns(self._write(tmp_path, header, rows))
+        assert msg is not None
+        assert "4 of 5 columns" in msg
+        assert "encode_categoricals" in msg
+
+    def test_a_couple_of_sparse_levels_do_not_abort_a_healthy_run(self, tmp_path):
+        from src.orchestrator import check_constant_test_columns
+
+        header = ["a", "b", "c", "d", "e"]
+        rows = [["1", "1", "0", "0", "1"], ["2", "0", "0", "0", "2"]]
+        assert check_constant_test_columns(self._write(tmp_path, header, rows)) is None
+
+    def test_a_missing_matrix_is_not_a_violation(self, tmp_path):
+        from src.orchestrator import check_constant_test_columns
+
+        assert check_constant_test_columns(str(tmp_path)) is None
+
+    def test_an_empty_matrix_is_not_a_violation(self, tmp_path):
+        from src.orchestrator import check_constant_test_columns
+
+        (tmp_path / "test_X.csv").write_text("a,b\n", encoding="utf-8")
+        assert check_constant_test_columns(str(tmp_path)) is None

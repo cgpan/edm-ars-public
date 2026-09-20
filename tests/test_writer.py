@@ -767,3 +767,67 @@ def test_writer_full_run(tmp_path: Path) -> None:
     # --- references.bib ---
     bib_text = (tmp_path / "references.bib").read_text(encoding="utf-8")
     assert bib_text, "references.bib must not be empty"
+
+
+class TestTruncatedWriterResponse:
+    """A response cut off at the token ceiling must not become an empty paper.
+
+    The reassembler's body regex needs a closing structural boundary --
+    \end{document}, \bibliographystyle, \appendix. A truncated
+    response has none, so the match failed, the body became "", and a
+    287-byte paper.tex shipped as COMPLETED while the model had in fact
+    written 69 KB.
+    """
+
+    @staticmethod
+    def _writer(tmp_path):
+        import types
+
+        from src.agents.writer import Writer
+
+        w = Writer.__new__(Writer)
+        w.agent_name = "Writer"
+        w.ctx = types.SimpleNamespace(
+            output_dir=str(tmp_path), log=[], errors=[]
+        )
+        return w
+
+    TEMPLATE = (
+        "\documentclass{acmart}\n\title{%%PLACEHOLDER:TITLE%%}\n"
+        "%%PLACEHOLDER:SHORTTITLE%%%%PLACEHOLDER:KEYWORDS%%"
+        "%%PLACEHOLDER:DATASET_CITATION%%%%PLACEHOLDER:AUTHORS%%\n"
+        "\begin{abstract}%%PLACEHOLDER:ABSTRACT%%\end{abstract}\n"
+        "\begin{document}\maketitle\n%%PLACEHOLDER:PAPER_BODY%%\n"
+        "%%PLACEHOLDER:APPENDIX%%\end{document}\n"
+    )
+
+    def test_a_truncated_response_keeps_its_body(self, tmp_path, monkeypatch):
+        w = self._writer(tmp_path)
+        monkeypatch.setattr(w, "_dataset_citation", lambda: "", raising=False)
+        monkeypatch.setattr(w, "_author_line", lambda: "", raising=False)
+        truncated = (
+            "\title{Predicting Dropout}\n"
+            "\begin{abstract}An abstract.\end{abstract}\n"
+            "\begin{document}\maketitle\n"
+            "\section{Introduction}\nThe analysis proceeded in four stages "
+            "and the final one was cut off mid-sent"
+        )
+        out = w._reassemble_from_template(truncated, self.TEMPLATE)
+        assert "The analysis proceeded in four stages" in out
+        assert w.ctx.errors, "a truncated response must be recorded, not swallowed"
+        assert "truncated" in w.ctx.errors[0]
+
+    def test_a_complete_response_records_no_truncation(self, tmp_path, monkeypatch):
+        w = self._writer(tmp_path)
+        monkeypatch.setattr(w, "_dataset_citation", lambda: "", raising=False)
+        monkeypatch.setattr(w, "_author_line", lambda: "", raising=False)
+        complete = (
+            "\title{Predicting Dropout}\n"
+            "\begin{abstract}An abstract.\end{abstract}\n"
+            "\begin{document}\maketitle\n"
+            "\section{Introduction}\nA complete body.\n"
+            "\bibliographystyle{ACM-Reference-Format}\n\end{document}\n"
+        )
+        out = w._reassemble_from_template(complete, self.TEMPLATE)
+        assert "A complete body." in out
+        assert not w.ctx.errors

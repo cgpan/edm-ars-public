@@ -3,7 +3,15 @@
 % Built on the apa7 document class + biblatex (APA style).
 % Replace every placeholder marked << ... >> with your content.
 %=========================================================
-\documentclass[man,floatsintex,longtable]{apa7}
+\documentclass[man,floatsintext,longtable]{apa7}
+% NOTE: this option was spelled `floatsintex` until 2026-09-20 -- a typo
+% LaTeX reports as "Unused global option(s): [floatsintex]" and then
+% ignores. Every journal paper therefore shipped under apa7 `man`
+% defaults, i.e. endfloat: every table and figure moved to the END of
+% the document, after the reference list, in paper.ttt/paper.fff. That
+% is also past the point where the LSAR reviewer truncates the paper,
+% so the reviewer read sentences pointing at Table 1 and never got
+% Table 1. Do not "simplify" this back.
 % Document-class options (apa7):
 %   man          -- manuscript format (title page, double spacing)
 %   jou          -- typeset like a printed journal article

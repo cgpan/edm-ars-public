@@ -1,25 +1,20 @@
-# V3.8 Arc E pilot config - PREDICTION task, full PF generation (no locked spec).
-# First prediction paper of the slim era; exercises Arc D gap matrix + design memo
-# in generation mode and the Arc S archetype/ban skills.
-# Phase 3b.23.7 (V4 Arc H) smoke-test config — ALL-DEEPSEEK per user
-# instruction 2026-07-03: "As for the LLM calling API, please use
-# deepseek-v4-pro or deepseek-v4-flash."
+# A/B config -- V6 quality arc.
 #
-# Diffs from smoketest_3b11.yaml (kept unchanged for comparability of
-# prior runs):
-#   - per_stage_providers: openai overrides for analyst + writer REMOVED
-#     -> all six stages resolve to the default provider (deepseek) with
-#     deepseek-v4-pro per the deepseek.models block.
-#   - per_stage_max_tokens: analyst/writer 32000 -> 16000 (the openai
-#     budgets do not carry over; 16000 is the deepseek-proven ceiling
-#     used by PF/Critic in this repo).
+# ONE config used by BOTH arms, so the only difference between them is
+# the code. Arm A is a git worktree at the pre-arc commit; Arm B is the
+# working tree. Anything set here is set identically for both.
 #
-# NOTE for run manifests: any run on this config has a provider Δ for
-# Analyst+Writer vs all 3b.5-3b.23.5 baselines (which used gpt-5.4 for
-# those stages). LSAR comparisons across that boundary are confounded
-# by the provider switch; in-run acceptance criteria (DE pre-flight,
-# refuters, positivity) are unaffected (DE/Analyst-adjacent stages were
-# already deepseek / are deterministic checks).
+# Every stage runs on `deepseek-flash`. Note this differs from the archived runs,
+# which used `deepseek-v4-pro` for the six reasoning stages -- so numbers
+# here are NOT comparable to archived LSAR scores or costs. They are
+# comparable arm-to-arm, which is the only comparison being made.
+#
+# review_gate is OFF in both arms, deliberately. A gate that prevents
+# production changes the object the study measures, and an LSAR score on
+# a paper LSAR helped revise is not a measurement of that paper.
+#
+# verification runs but does not block: the battery is the instrument,
+# and an instrument that halts the run it is measuring stops measuring.
 
 llm_provider: deepseek
 
@@ -33,13 +28,17 @@ models:
 deepseek:
   base_url: https://api.deepseek.com
   models:
-    problem_formulator: deepseek-v4-pro
-    data_engineer: deepseek-v4-pro
-    analyst: deepseek-v4-pro  # ACTIVE (3b.23.7: openai override removed)
-    critic: deepseek-v4-pro
-    writer: deepseek-v4-pro  # ACTIVE (3b.23.7: openai override removed)
-    revision_writer: deepseek-v4-pro
-    outline_agent: deepseek-flash  # tiered 2026-07-11
+    problem_formulator: deepseek-flash
+    data_engineer: deepseek-flash
+    analyst: deepseek-flash
+    critic: deepseek-flash
+    writer: deepseek-flash
+    revision_writer: deepseek-flash
+    outline_agent: deepseek-flash
+    # V6: post-Writer manuscript verification. Needs vision --
+    # it inspects each embedded figure against its caption, and
+    # nothing in this project has ever looked at a figure.
+    verifier: deepseek-flash  # tiered 2026-07-11
 
 minimax:
   # Retained for backward-compat / quick rollback. NOT active under this
@@ -73,7 +72,13 @@ per_stage_providers: {}
 default_max_tokens: 8000
 per_stage_max_tokens:
   analyst: 16000
-  writer: 16000
+  # 16000 was not enough. The first A/B run produced a complete 69 KB
+  # manuscript that was CUT OFF mid-sentence at the ceiling; the
+  # reassembler's body regex needs a closing structural boundary, a
+  # truncated response has none, and the run shipped a 287-byte
+  # paper.tex as COMPLETED. deepseek-flash accepts 64000; 32000 is twice
+  # the observed requirement. Applies to BOTH arms.
+  writer: 32000
   critic: 16000
   problem_formulator: 16000
   data_engineer: 12000
@@ -129,7 +134,7 @@ findings_memory:
   n_candidate_specs: 1
 
 review_gate:
-  enabled: true
+  enabled: false
   # Arc L (user decision 2026-07-03): calibrated P25 gate; the file is
   # rewritten by LSAR calibration_analyze.py under the CURRENT provider.
   calibration_path: '${LSAR_HOME}/calibration/anchors_edm.yaml'
@@ -149,7 +154,23 @@ writer:
 
 paths:
   data_registry: data_registry/
+  # Both arms must read the same bytes for the comparison to mean
+  # anything. If you run the two arms from separate checkouts, make
+  # this an absolute path to one shared copy of the raw CSV rather
+  # than letting each checkout resolve it to its own.
   raw_data: data/raw/
   output_base: output/
   agent_prompts: agent_prompts/
   paper_template: templates/paper_template.tex
+
+verification:
+  enabled: true
+  blocking: false
+  # The LLM judge over the finished manuscript (src/agents/verifier.py).
+  # OFF by default: it costs a call per run plus one per figure, and an
+  # A/B that measures whether the pipeline PRODUCES fewer defects must
+  # not have a judge in one arm FINDING more of them. Its marginal
+  # recovery over the deterministic battery is measured separately,
+  # offline, against the answer key.
+  judge_enabled: false
+  blocking_codes: []

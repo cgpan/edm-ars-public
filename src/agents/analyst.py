@@ -682,16 +682,32 @@ class Analyst(BaseAgent):
             "warnings": [],
         }
 
-    def _verify_figures_on_disk(self, results: dict) -> dict:
-        """Drop claimed figures that do not exist, and say so.
+    #: Images in the output dir that are not analysis figures.
+    _NON_FIGURE_PNG_PREFIXES: tuple[str, ...] = ("lsar_", "_tmp", "thumb_")
 
-        A1 again: the fabricated run listed eight figures, none of which
-        were on disk. A figure name in results.json is a claim about a
-        file, and it is cheap to check.
+    def _verify_figures_on_disk(self, results: dict) -> dict:
+        """Reconcile ``figures_generated`` against the output directory.
+
+        BOTH directions, and that is the point.
+
+        Outward: a figure name in results.json is a claim about a file.
+        The fabricated run listed eight figures with none on disk.
+
+        Inward: a PNG on disk that nothing claims is a figure the paper
+        will never show. This half used to be missing, and it cost a
+        whole paper. One causal run wrote ``love_plot.png``,
+        ``propensity_overlap.png`` and ``cate_distribution.png``, then a
+        revision cycle re-ran the analysis and returned a results.json
+        with ``figures_generated: []``. The early return on an empty
+        list meant nothing noticed; the Writer reads the same list
+        (writer.py), so the delivered paper carried zero figures --
+        a causal paper whose headline number is a balance statistic and
+        whose own checklist requires a balance plot. The files were on
+        disk the whole time.
         """
         claimed = results.get("figures_generated")
-        if not isinstance(claimed, list) or not claimed:
-            return results
+        if not isinstance(claimed, list):
+            claimed = []
 
         present, missing = [], []
         for fig in claimed:
@@ -701,13 +717,39 @@ class Analyst(BaseAgent):
             (present if os.path.exists(path) else missing).append(fig)
 
         if missing:
-            results["figures_generated"] = present
             results.setdefault("errors", []).append(
                 f"{len(missing)} figure(s) reported by the analysis do not "
                 f"exist on disk and were removed from results.json: "
                 f"{', '.join(sorted(missing)[:8])}"
                 + (" ..." if len(missing) > 8 else "")
             )
+
+        claimed_names = {os.path.basename(f) for f in present}
+        try:
+            on_disk = sorted(
+                f
+                for f in os.listdir(self.ctx.output_dir)
+                if f.lower().endswith((".png", ".pdf", ".jpg", ".jpeg"))
+                and not f.startswith(self._NON_FIGURE_PNG_PREFIXES)
+                and not f.startswith("paper")
+            )
+        except OSError:
+            on_disk = []
+
+        unclaimed = [f for f in on_disk if f not in claimed_names]
+        if unclaimed:
+            present = present + unclaimed
+            results.setdefault("warnings", [])
+            if not isinstance(results["warnings"], list):
+                results["warnings"] = [str(results["warnings"])]
+            results["warnings"].append(
+                f"{len(unclaimed)} figure(s) were on disk but absent from "
+                f"figures_generated and have been added so the Writer can "
+                f"use them: {', '.join(unclaimed[:8])}"
+                + (" ..." if len(unclaimed) > 8 else "")
+            )
+
+        results["figures_generated"] = present
         return results
 
     # ------------------------------------------------------------------

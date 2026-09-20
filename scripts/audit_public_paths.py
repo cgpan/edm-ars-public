@@ -297,6 +297,25 @@ def build_identity_patterns(names: list[str]) -> list[tuple[str, re.Pattern[str]
     return patterns
 
 
+#: Names of run directories in the private evaluation archive. The shape
+#: is ``edmars[_<venue>]__<topic>__attempt<N>``, and every part of it is
+#: something publication gives away: the venue a paper was written for,
+#: its topic, how many attempts it took, and -- for three of them -- that
+#: the run is an arm of a blind-review study whose specs are held back.
+#:
+#: NOT in PATTERNS, because the private repository is where that evidence
+#: belongs; the mirror-gated test passes these as extra patterns, exactly
+#: as the tree-wide path assertion is gated. A published detector can only
+#: ever describe a SHAPE: any pattern that spelled out the distinctive
+#: numbers from a withheld manuscript would publish them itself.
+STUDY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "archive-run-name",
+        re.compile(r"\bedmars(?:_[a-z0-9]+)?__[a-z0-9]+__(?:attempt|dryrun)[0-9]*"),
+    ),
+]
+
+
 def scan(
     paths: list[Path],
     root: Path,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import shutil
@@ -141,6 +142,71 @@ def check_design_matrix_width(
         "one-hot list with a comprehension "
         "(`[c for c in cats if X[c].nunique() <= 100]`); never remove from "
         "a list while iterating over it."
+    )
+
+
+#: A handful of all-zero dummies is a rare category; a matrix where most
+#: of them are constant is a broken encoding. The threshold exists so a
+#: single sparse level does not abort a healthy run.
+MAX_CONSTANT_TEST_COLUMNS = 3
+
+
+def check_constant_test_columns(
+    output_dir: str, max_constant: int = MAX_CONSTANT_TEST_COLUMNS
+) -> str | None:
+    """Refuse a test matrix whose columns carry no information.
+
+    Returns a retry message naming the offending columns, or ``None``.
+
+    A module-level function rather than a method, matching
+    ``check_design_matrix_width``: the pre-flight is exercised with
+    lightweight stubs and a new check should not require every caller to
+    grow an attribute.
+    """
+    path = Path(output_dir) / "test_X.csv"
+    if not path.exists():
+        return None
+    try:
+        with open(path, encoding="utf-8", newline="") as f:
+            rd = csv.reader(f)
+            header = next(rd)
+            firsts: list[str | None] = [None] * len(header)
+            varies = [False] * len(header)
+            n = 0
+            for row in rd:
+                n += 1
+                for i in range(min(len(row), len(header))):
+                    if varies[i]:
+                        continue
+                    if firsts[i] is None:
+                        firsts[i] = row[i]
+                    elif row[i] != firsts[i]:
+                        varies[i] = True
+    except (OSError, StopIteration, ValueError):
+        # The pre-flight must never be the thing that breaks a healthy run.
+        return None
+    if not n:
+        return None
+
+    constant = [header[i] for i in range(len(header)) if not varies[i]]
+    if len(constant) <= max_constant:
+        return None
+
+    return (
+        f"{len(constant)} of {len(header)} columns in test_X.csv are CONSTANT "
+        f"across all {n} test rows: {', '.join(constant[:10])}"
+        + (" ..." if len(constant) > 10 else "")
+        + ". A column with no variance in the test set cannot move a test "
+        "prediction, yet it reaches the model and then a SHAP ranking the "
+        "paper writes about. This is one-hot encoding fitted SEPARATELY on "
+        "train and test and reconciled with reindex: the two splits drop "
+        "different reference categories, so surviving columns land on the "
+        "wrong labels and absent categories become all-zero. Fit the "
+        "encoding ONCE on train and apply the same category mapping to "
+        "test -- analysis_helpers.encode_categoricals(train_df, test_df, "
+        "cat_cols) does this and returns an encoding_report naming each "
+        "reference category. Compute constancy on BOTH splits, not just "
+        "train."
     )
 
 
@@ -286,7 +352,13 @@ class Orchestrator:
                 self._run_writing()
             elif state == PipelineState.REVIEWING:
                 self._run_reviewing()
-            elif state in (PipelineState.COMPLETED, PipelineState.ABORTED):
+            elif state == PipelineState.VERIFYING:
+                self._run_verifying()
+            elif state in (
+                PipelineState.COMPLETED,
+                PipelineState.INCOMPLETE,
+                PipelineState.ABORTED,
+            ):
                 break
             else:
                 self._log("Orchestrator", f"Unknown state: {state}. Aborting.")
@@ -445,6 +517,16 @@ class Orchestrator:
         # not hold, so the ceiling is enforced here where a violation
         # triggers a targeted retry.
         violation = check_design_matrix_width(self.ctx.output_dir)
+        if violation:
+            return violation
+
+        # A column with no variance in TEST cannot move a test
+        # prediction, yet it reaches the model and then a SHAP ranking
+        # the paper writes about. `encode_categoricals` prevents this,
+        # and the A/B measured that the DataEngineer does not call it --
+        # so the guard lives here, in code, next to the width ceiling,
+        # which exists for the same reason.
+        violation = check_constant_test_columns(self.ctx.output_dir)
         if violation:
             return violation
 
@@ -768,6 +850,29 @@ class Orchestrator:
                 self._abort(f"Unknown critic verdict: {verdict}")
                 return
 
+            # Re-persist now that the effective verdict and the
+            # `unverified` flag are settled. Without this the on-disk
+            # review_report.json keeps only the LLM's raw verdict, and
+            # every downstream reader -- Writer, linter, audit, archive
+            # -- is looking at a record the orchestrator has already
+            # superseded in memory.
+            self.ctx.review_report["effective_verdict"] = verdict
+            self.ctx.review_report.setdefault(
+                "unverified", bool(eval_result.unverified)
+            )
+            self.ctx.review_report["verdict_evaluation"] = {
+                "llm_verdict": eval_result.llm_verdict,
+                "deterministic_verdict": eval_result.deterministic_verdict,
+                "llm_disagreement": bool(eval_result.llm_disagreement),
+                "rationale": eval_result.rationale,
+                "revision_cycle": self.ctx.revision_cycle,
+                "max_revision_cycles": self.ctx.max_revision_cycles,
+            }
+            try:
+                self.critic.persist_review_report(self.ctx.review_report)
+            except Exception as exc:  # noqa: BLE001 - never lose the stage over a write
+                self._log("Orchestrator", f"Could not re-persist review_report.json: {exc}")
+
             self._save_checkpoint()
             self._check_cost()
         except Exception as e:
@@ -799,7 +904,7 @@ class Orchestrator:
             if rg_enabled and "REVIEWING" not in self.ctx.completed_stages:
                 self.ctx.current_state = PipelineState.REVIEWING
             else:
-                self.ctx.current_state = PipelineState.COMPLETED
+                self.ctx.current_state = PipelineState.VERIFYING
             return
         self._log("Orchestrator", "Starting WRITING stage")
         try:
@@ -823,9 +928,22 @@ class Orchestrator:
                     self.ctx.paper_outline = outline
                     self._log("Orchestrator", "OutlineAgent complete")
                 except Exception as e:
+                    # Non-fatal, but NOT invisible. This branch used to
+                    # leave one log line and nothing else, and a config
+                    # pointing the outline stage at a retired model id
+                    # (`deepseek-v4-flash`, which the API stopped serving)
+                    # therefore degraded ten shipped configs to the v1
+                    # placeholder-filling template path with no record
+                    # anywhere that the outline-first design had not run.
+                    # A degradation the run does not disclose is the D7
+                    # defect this project writes papers about.
                     self._log(
                         "Orchestrator",
                         f"OutlineAgent failed (non-fatal, falling back to v1): {e}",
+                    )
+                    self.ctx.errors.append(
+                        f"OutlineAgent failed; paper written via the v1 "
+                        f"template path instead of outline-first: {e}"
                     )
                     outline = None
 
@@ -855,14 +973,16 @@ class Orchestrator:
 
             self.ctx.completed_stages.append("WRITING")
 
-            # Transition to REVIEWING if the review gate is enabled, else COMPLETED
+            # Transition to REVIEWING if the review gate is enabled, else
+            # straight to VERIFYING. Neither branch ends the run: VERIFYING
+            # is what decides between COMPLETED and INCOMPLETE.
             rg_enabled = self.config.get("review_gate", {}).get("enabled", False)
             if rg_enabled:
                 self.ctx.current_state = PipelineState.REVIEWING
                 self._log("Orchestrator", "WRITING stage complete → REVIEWING")
             else:
-                self.ctx.current_state = PipelineState.COMPLETED
-                self._log("Orchestrator", "WRITING stage complete → COMPLETED")
+                self.ctx.current_state = PipelineState.VERIFYING
+                self._log("Orchestrator", "WRITING stage complete → VERIFYING")
             self._save_checkpoint()
             self._check_cost()
             if not rg_enabled:
@@ -958,7 +1078,7 @@ class Orchestrator:
 
     def _run_reviewing(self) -> None:
         if "REVIEWING" in self.ctx.completed_stages:
-            self.ctx.current_state = PipelineState.COMPLETED
+            self.ctx.current_state = PipelineState.VERIFYING
             return
         self._log("Orchestrator", "Starting REVIEWING stage (LSAR quality gate)")
         try:
@@ -986,19 +1106,251 @@ class Orchestrator:
                 "cycles_used": 0,
             }
 
-        # Always proceed to COMPLETED — the gate is diagnostic, not blocking
+        # The gate records a verdict; VERIFYING is what decides whether
+        # the run is releasable. Proceeding unconditionally here is fine
+        # now -- it was not, when COMPLETED was the next state and
+        # nothing anywhere read summary["passed"].
         self.ctx.completed_stages.append("REVIEWING")
-        self.ctx.current_state = PipelineState.COMPLETED
-        self._log("Orchestrator", "REVIEWING stage complete → COMPLETED")
+        self.ctx.current_state = PipelineState.VERIFYING
+        self._log("Orchestrator", "REVIEWING stage complete → VERIFYING")
         self._save_checkpoint()
         self._check_cost()
         self._update_findings_memory()
+
+    # ------------------------------------------------------------------
+    # VERIFYING — hold the finished manuscript against the run's own files
+    # ------------------------------------------------------------------
+
+    def _run_verifying(self) -> None:
+        """Run the deterministic invariant battery and record a verdict.
+
+        This is the first stage in the pipeline that sees the finished
+        manuscript and the artifacts at the same time. The Critic runs
+        before the Writer and has never seen a paper; the LSAR gate runs
+        after but reads a 48,000-character head-slice with no figures in
+        it, and until now nothing anywhere read its ``passed`` field.
+
+        The stage always writes ``invariants.json`` and
+        ``run_status.json``. Whether a critical finding actually stops
+        the run is ``verification.blocking`` in config, default False --
+        every one of the fourteen archived papers fails at least one of
+        these checks, so switching it on globally on day one would
+        terminate every run INCOMPLETE and teach nobody anything.
+        Promote checks to blocking individually, on evidence.
+        """
+        if "VERIFYING" in self.ctx.completed_stages:
+            self.ctx.current_state = PipelineState.COMPLETED
+            return
+        self._log("Orchestrator", "Starting VERIFYING stage (invariant battery)")
+
+        cfg = self.config.get("verification", {}) or {}
+        enabled = cfg.get("enabled", True)
+        blocking = bool(cfg.get("blocking", False))
+        blocking_codes = set(cfg.get("blocking_codes") or [])
+
+        payload: dict[str, Any] = {"enabled": bool(enabled)}
+        findings: list = []
+        if enabled:
+            try:
+                from src.invariants import findings_to_json, run_invariants
+
+                findings = run_invariants(self.ctx.output_dir)
+                payload = {**payload, **findings_to_json(findings)}
+            except Exception as exc:  # noqa: BLE001
+                # A broken detector must not look like a clean run.
+                payload["error"] = f"{type(exc).__name__}: {exc}"
+                self._log("Orchestrator", f"VERIFYING battery failed: {exc}")
+
+        try:
+            with open(
+                os.path.join(self.ctx.output_dir, "invariants.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(payload, f, indent=2, default=str)
+        except OSError as exc:
+            self._log("Orchestrator", f"Could not write invariants.json: {exc}")
+
+        # Instruction compliance. Nothing in this pipeline has ever been
+        # able to say whether a Critic instruction was acted on: the one
+        # archived instruction whose disposition is documented was
+        # applied WITHOUT DISCLOSURE, and two others were ignored, and
+        # none of the three left a trace anywhere. An obligation closes
+        # when its own test passes against the produced manuscript, never
+        # because an agent reported compliance.
+        obligations_summary: dict = {}
+        try:
+            from src.obligations import (
+                derive_obligations,
+                evaluate_obligations,
+                summarize,
+            )
+
+            obligations = derive_obligations(self.ctx.review_report)
+            if obligations:
+                paper_path = os.path.join(self.ctx.output_dir, "paper.tex")
+                paper = None
+                if os.path.exists(paper_path):
+                    with open(paper_path, encoding="utf-8", errors="replace") as f:
+                        paper = f.read()
+                obligations_summary = summarize(
+                    evaluate_obligations(obligations, paper)
+                )
+                with open(
+                    os.path.join(self.ctx.output_dir, "obligations.json"),
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+                    json.dump(obligations_summary, f, indent=2, default=str)
+                by = obligations_summary["by_status"]
+                self._log(
+                    "Orchestrator",
+                    f"Writer obligations: {obligations_summary['n_obligations']} "
+                    f"({', '.join(f'{k}={v}' for k, v in sorted(by.items()))})",
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._log("Orchestrator", f"Obligation evaluation failed: {exc}")
+
+        # Optional LLM judge over the finished manuscript. Strictly
+        # opt-in (`verification.judge_enabled`), and OFF by default.
+        #
+        # Off is the honest default for two reasons. It costs a call per
+        # run plus one per figure, and -- more importantly -- an A/B that
+        # measures whether the pipeline PRODUCES fewer defects must not
+        # have a judge in one arm FINDING more of them. Its marginal
+        # recovery over the deterministic battery is measured separately,
+        # offline, against the answer key.
+        verification_report: dict = {}
+        if cfg.get("judge_enabled", False):
+            try:
+                from src.agents.verifier import Verifier
+
+                verifier = Verifier(self.ctx, self.config)
+                verifier.skills = self._match_skills_for_stage("Verifier")
+                verification_report = verifier.run()
+                vf = verification_report.get("findings") or []
+                self._log(
+                    "Orchestrator",
+                    f"Verifier: {len(vf)} finding(s) kept, "
+                    f"{verification_report.get('n_dropped_by_validator', 0)} "
+                    "dropped by the validator",
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._log("Orchestrator", f"Verifier failed (non-fatal): {exc}")
+                verification_report = {"ran": False, "error": str(exc)}
+
+        criticals = [f for f in findings if f.severity == "critical"]
+        gate = self.ctx.review_gate_result or {}
+        gate_failed = gate.get("passed") is False
+        review = self.ctx.review_report or {}
+        unverified = bool(review.get("unverified"))
+
+        if blocking_codes:
+            blockers = [f for f in criticals if f.code in blocking_codes]
+        elif blocking:
+            blockers = criticals
+        else:
+            blockers = []
+
+        released = not blockers
+        status = {
+            "released": released,
+            "reason": (
+                "clean"
+                if released and not criticals and not gate_failed and not unverified
+                else "; ".join(
+                    filter(
+                        None,
+                        [
+                            f"{len(criticals)} critical invariant finding(s)"
+                            if criticals
+                            else "",
+                            "review gate did not pass" if gate_failed else "",
+                            "critic verdict was not PASS" if unverified else "",
+                        ],
+                    )
+                )
+                or "clean"
+            ),
+            "blocking_mode": "codes" if blocking_codes else ("all" if blocking else "advisory"),
+            "invariant_counts": payload.get("counts", {}),
+            "invariant_codes": payload.get("codes", []),
+            "blocking_findings": [f.code for f in blockers],
+            "review_gate_passed": gate.get("passed"),
+            "review_gate_score": gate.get("final_score"),
+            "critic_verdict": review.get("effective_verdict") or review.get("overall_verdict"),
+            "critic_unverified": unverified,
+            "writer_obligations": {
+                k: obligations_summary.get(k)
+                for k in ("n_obligations", "by_status", "compliance_rate")
+            }
+            if obligations_summary
+            else None,
+            "verifier": {
+                "ran": bool(verification_report.get("ran")),
+                "n_findings": len(verification_report.get("findings") or []),
+                "n_dropped_by_validator": verification_report.get(
+                    "n_dropped_by_validator"
+                ),
+            }
+            if verification_report
+            else None,
+            "run_dir": self.ctx.output_dir,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        try:
+            with open(
+                os.path.join(self.ctx.output_dir, "run_status.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump(status, f, indent=2, default=str)
+        except OSError as exc:
+            self._log("Orchestrator", f"Could not write run_status.json: {exc}")
+
+        counts = payload.get("counts", {})
+        self._log(
+            "Orchestrator",
+            "Invariant battery: "
+            f"{counts.get('critical', 0)} critical, {counts.get('major', 0)} major, "
+            f"{counts.get('minor', 0)} minor "
+            f"({', '.join(payload.get('codes', [])) or 'none'})",
+        )
+
+        self.ctx.completed_stages.append("VERIFYING")
+        if blockers:
+            self.ctx.current_state = PipelineState.INCOMPLETE
+            self.ctx.errors.append(
+                "Release blocked by "
+                f"{len(blockers)} critical invariant finding(s): "
+                + ", ".join(sorted({f.code for f in blockers}))
+            )
+            self._log(
+                "Orchestrator",
+                f"VERIFYING: release BLOCKED → INCOMPLETE ({status['reason']})",
+            )
+        else:
+            self.ctx.current_state = PipelineState.COMPLETED
+            self._log(
+                "Orchestrator",
+                f"VERIFYING stage complete → COMPLETED ({status['reason']})",
+            )
+        self._save_checkpoint()
 
     # ------------------------------------------------------------------
     # Revision cascade (SPEC §5.3)
     # ------------------------------------------------------------------
 
     def _execute_revisions(self) -> None:
+        """Re-run the targeted agent and everything downstream of it.
+
+        ``revision_instructions`` may now carry a ``Writer`` key, which
+        this loop deliberately ignores: CRITIQUING precedes WRITING, so
+        at revision time the Writer has not run and there is nothing to
+        re-run. Those instructions are obligations on the manuscript the
+        Writer is about to produce, and they are delivered at WRITING by
+        :meth:`_writer_obligations`.
+        """
         if not self.ctx.review_report:
             return
         agent_order = self.task_template.get_agent_order()

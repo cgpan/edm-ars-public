@@ -94,13 +94,35 @@ dataset + question
         v
   review gate           calibrated venue threshold (optional)
         v
+  verification          deterministic checks over the finished manuscript
+        v
   paper.tex + references.bib + PDF
 ```
 
-The orchestrator is a ten-state machine (`INITIALIZED` → `FORMULATING` →
+The orchestrator is a twelve-state machine (`INITIALIZED` → `FORMULATING` →
 `ENGINEERING` → `ANALYZING` → `CRITIQUING` → `[REVISING]` → `WRITING` →
-`REVIEWING` → `COMPLETED` / `ABORTED`). It checkpoints after every stage, so
-`--resume` picks up where an interrupted run stopped.
+`[REVIEWING]` → `VERIFYING` → `COMPLETED` / `INCOMPLETE` / `ABORTED`). It
+checkpoints after every stage, so `--resume` picks up where an interrupted run
+stopped.
+
+**Verification.** `VERIFYING` holds the finished manuscript against the run's
+own artifacts and writes `invariants.json`, `obligations.json` and
+`run_status.json` beside the paper. The checks in `src/invariants.py` are
+deterministic and use no model. The 37 of them recompute arithmetic the paper
+states, try to bind every numeral in the prose to a number the run actually
+produced, catch a macro-averaged score described as a positive-class one, catch
+a limitation claiming a variable was unavailable when the run used it, and
+check that every figure on disk is referenced and every figure referenced
+exists. `verification.blocking` ships
+`false` — a critical finding is recorded, not fatal — because a check has no
+business stopping a run until somebody has measured its false-positive rate.
+Set `blocking_codes` to promote individual checks once you have.
+
+An optional LLM judge (`src/agents/verifier.py`, `verification.judge_enabled`)
+reads the manuscript with vision and reports what the deterministic checks
+cannot reach. It is off by default: it costs a call per run plus one per
+figure, and its findings are opinions that a validator has to filter before
+they are worth anything.
 
 **Skills.** Methodology, dataset quirks, task workflows and writing conventions
 live in 70 `SKILL.md` files under `skills/`, matched at runtime and injected

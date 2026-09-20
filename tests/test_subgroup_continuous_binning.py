@@ -150,13 +150,55 @@ def test_small_levels_are_summarised_not_enumerated(_fixture) -> None:
 
 
 def test_a_missing_attribute_is_still_reported(_fixture) -> None:
-    """The gender analysis was silently skipped in a live run; keep it loud."""
+    """The gender analysis was silently skipped in a live run; keep it loud.
+
+    The message must also name the columns that ARE present, and say the
+    limitation belongs to this run rather than to the dataset. The bare
+    form ("not found ... skipping") was transcribed into delivered papers
+    as a property of HSLS:09 -- "sex was not carried into the
+    protected-attributes file" -- while the file held it all along.
+    """
     test_X, test_y, path = _fixture
     warnings: list[str] = []
     run_subgroup_analysis(
         _Model(), test_X, test_y, path, ["X1RACE"], True, warnings
     )
-    assert any("not found in test_protected.csv" in w for w in warnings)
+    hits = [w for w in warnings if "X1RACE" in w and "not a column" in w]
+    assert len(hits) == 1, warnings
+    assert "columns present:" in hits[0]
+    assert "NOT of the dataset" in hits[0]
+
+
+def test_first_protected_column_is_not_eaten_by_the_reader(tmp_path) -> None:
+    """X1SEX must survive the read of test_protected.csv.
+
+    The reader was pd.read_csv(path, index_col=0) followed by
+    reset_index(drop=True), while the DataEngineer writes the file with
+    index=False. So the FIRST protected attribute became the index and
+    was then discarded -- invariably X1SEX -- and the run emitted
+    "Subgroup attribute 'X1SEX' not found", which four delivered papers
+    reported as a limitation of the data.
+    """
+    import pandas as pd
+
+    n = 40
+    path = tmp_path / "test_protected.csv"
+    pd.DataFrame(
+        {
+            "X1SEX": ["Male", "Female"] * (n // 2),
+            "X1RACE": ["White, non-Hispanic"] * n,
+        }
+    ).to_csv(path, index=False)
+
+    test_X = pd.DataFrame({"f": np.arange(n, dtype=float)})
+    test_y = np.array([0, 1] * (n // 2))
+    warnings: list[str] = []
+    results = run_subgroup_analysis(
+        _Model(), test_X, test_y, str(path), ["X1SEX"], True, warnings
+    )
+    assert "X1SEX" in results, warnings
+    assert set(results["X1SEX"]) == {"Male", "Female"}
+    assert not any("not a column" in w for w in warnings), warnings
 
 
 # --- missing values are not a group ------------------------------------

@@ -38,7 +38,7 @@ deepseek:
     critic: deepseek-v4-pro
     writer: deepseek-v4-pro  # ACTIVE (3b.23.7: openai override removed)
     revision_writer: deepseek-v4-pro
-    outline_agent: deepseek-v4-flash  # tiered 2026-07-11
+    outline_agent: deepseek-flash  # tiered 2026-07-11
 
 minimax:
   # Retained for backward-compat / quick rollback. NOT active under this

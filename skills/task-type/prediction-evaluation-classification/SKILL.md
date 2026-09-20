@@ -36,12 +36,42 @@ through `analysis_helpers.bootstrap_ci()`. See
 
 ## Secondary metrics (all reported per model)
 
-| Metric | sklearn fn |
+Compute them with ONE certified call, never by hand:
+
+```python
+results["all_models"][name].update(
+    analysis_helpers.classification_metrics(test_y_arr, y_pred))
+```
+
+It returns every metric under a name that says which averaging produced
+it:
+
+| Key | sklearn equivalent |
 |---|---|
-| Accuracy | `accuracy_score` |
-| Precision (macro) | `precision_score(average='macro')` |
-| Recall (macro) | `recall_score(average='macro')` |
-| F1 (macro) | `f1_score(average='macro')` |
+| `accuracy` | `accuracy_score` |
+| `balanced_accuracy` | `balanced_accuracy_score` |
+| `precision_macro` / `recall_macro` / `f1_macro` | `average='macro'` |
+| `precision_positive` / `recall_positive` / `f1_positive` | `average='binary'` |
+| `confusion_matrix` | `{tn, fp, fn, tp}` |
+| `n_positive_true`, `n_flagged` | counts the paper quotes |
+
+**MANDATORY RULE — never store a bare `precision`, `recall` or `f1`.**
+Those keys held the *macro* values, and every reader downstream took
+them for positive-class values. One delivered paper reported precision
+0.576 where the positive class was 0.212, called a model that catches
+10 of 545 true cases (1.8%) a "precision-favouring operating point that
+flags about half of true episodes", and the word "macro" appeared
+nowhere in it. Six of that paper's twelve catalogued defects trace to
+this one naming choice.
+
+`recall_macro` IS balanced accuracy. If a results.json shows `recall`
+equal to `balanced_accuracy` to the last floating-point digit, the
+"recall" is macro under a positive-class name, and the deterministic
+check `INV_MACRO_METRIC_MISLABEL` fails the run.
+
+When the paper discusses early-warning behaviour it must quote the
+`*_positive` keys and say so; a macro figure in that sentence is wrong
+by roughly the class imbalance.
 
 Imbalanced-classification additions (when SMOTE is applied — see
 `smote-imbalance-handling`):

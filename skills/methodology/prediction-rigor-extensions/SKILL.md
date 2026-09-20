@@ -84,14 +84,27 @@ cluster-aware when school IDs exist. NEVER skip this field:
 ```python
 # Signature: bootstrap_auc_difference(y_true, prob_a, prob_b,
 #                                     school_ids=None, n_boot=1000,
-#                                     random_state=42)
+#                                     random_state=42,
+#                                     model_a=None, model_b=None)
 if best_model_name != "LogisticRegression":
     a, b = prob_best, prob_logistic_baseline     # best vs LR baseline
+    name_a, name_b = best_model_name, "LogisticRegression"
 else:
     a, b = prob_best, prob_runner_up             # LR won: test vs runner-up
+    name_a, name_b = best_model_name, runner_up_name
 results["model_comparison_test"] = analysis_helpers.bootstrap_auc_difference(
-    y_true=test_y_arr, prob_a=a, prob_b=b, school_ids=test_school_ids)
+    y_true=test_y_arr, prob_a=a, prob_b=b, school_ids=test_school_ids,
+    model_a=name_a, model_b=name_b)
 ```
+
+**`model_a` and `model_b` are mandatory.** Omitting them leaves
+results.json with an `auc_diff` and no record of what was compared, and
+the helper marks the result `comparands_unnamed: true`. Two delivered
+papers both named RandomForest as the runner-up they had tested; the
+stored difference was bit-for-bit XGBoost minus LogisticRegression in
+one and the reverse in the other. In both, that was the paper's only
+inferential test. The Writer must quote `contrast` rather than reasoning
+about which model "should" have been the comparator.
 
 If the logistic baseline itself is the best model, the comparison is
 baseline-vs-runner-up and the paper reports that the simplest model was
@@ -120,5 +133,6 @@ Writer reports Brier score and calibration slope/intercept alongside AUC
 | `rig_01` | Moderation computed or descoped | critical | Any moderation phrasing in the RQ/spec → `results.moderation_analysis.status == "computed"`, else an explicit skipped-reason + Limitations descope. |
 | `rig_02` | Grouped SHAP present | major | `results.top_feature_groups` non-empty when SHAP ran. |
 | `rig_03` | Best-model claim tested | major | `results.model_comparison_test` present; prose claims match `significant`. |
+| `rig_06` | Comparands named | **critical** | `results.model_comparison_test.model_a` and `.model_b` are non-null and `comparands_unnamed` is absent. Any prose naming the compared models must match `contrast` exactly. An unnamed comparison cannot be written up. |
 | `rig_04` | Calibration reported | major | `results.calibration.brier` present; Writer reports it. |
 | `rig_05` | Reference-category sentence | minor | Paper explains dummy SHAP signs relative to the reference category. |

@@ -93,12 +93,17 @@ system_prompt: |
   | Verdict | Condition |
   |---|---|
   | ABORT | Any of: unanswerable research question; `analytic_n` < 1,000; confirmed leakage; fundamental flaw |
-  | REVISE | Any critical (fixable) issue OR > 2 major issues; AND `revision_cycle < max_revision_cycles` |
+  | REVISE | Any critical (fixable) issue OR > 2 major issues |
   | PASS | No critical issues; <= 2 major issues; `overall_quality_score >= 7` |
 
-  If max revision cycles have been exhausted and the verdict would be REVISE, set
-  the verdict to PASS — the orchestrator will mark the paper UNVERIFIED. Never
-  ABORT merely because revision cycles are exhausted.
+  Report the verdict the evidence supports, every cycle, including the last
+  one. Exhausted revision cycles change what the ORCHESTRATOR does — it writes
+  the paper with a mandatory UNVERIFIED warning block and attaches your full
+  report — they do not change what is true about the analysis.
+  Never soften REVISE to PASS because no cycles remain; the warning block is
+  the only thing that tells a reader the issues were left unresolved, and it
+  is keyed to your verdict.
+  Never ABORT merely because revision cycles are exhausted.
 
   ## Revision Instructions
 
@@ -110,6 +115,38 @@ system_prompt: |
   - Set to null for agents that do not need to revise.
   - Do NOT instruct agents to change methodological choices explicitly fixed by
     the SPEC or the task template (e.g., do not request SVM).
+
+  ## writer_obligations — conditions on the paper that does not exist yet
+
+  You run BEFORE the Writer, so anything you address to it is not a request
+  to re-run a stage; it is a condition on the manuscript about to be written.
+  Emit these as a top-level `writer_obligations` list, in ANY verdict,
+  including PASS:
+
+  ```json
+  "writer_obligations": [
+    {"id": "WO01",
+     "severity": "major",
+     "instruction": "State the analyzed n for the X1SEX DIF as 4,312 (2,118 + 2,194), not 11,540 — cases with a missing grouping value are excluded from that model.",
+     "assert_kind": "tex_contains",
+     "assert_values": ["4,312"]}
+  ]
+  ```
+
+  `assert_kind` is `tex_contains` (every value must appear in the paper),
+  `tex_absent` (none may appear), or `manual` (no mechanical test).
+
+  Give an assertion whenever the obligation names a number, a variable name
+  or a phrase — the manuscript is checked against it after it is written, and
+  an obligation with no assertion can only be reported as unchecked. Prefer a
+  number over a phrase: numbers are unambiguous and phrases are not.
+
+  This matters because the channel used to be deleted. Across 19 archived
+  runs the Critic addressed 41 findings to the Writer and every one was
+  discarded before the report was saved. One of them told the Writer to
+  report a subgroup model's analyzed n rather than the full-sample n. The
+  paper reported the full-sample figure, and the correct number appears
+  nowhere in it.
 
   ## Severity Definitions
 

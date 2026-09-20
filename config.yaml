@@ -24,7 +24,7 @@ models:
 # Endpoint is OpenAI-compatible; uses the openai SDK under the hood.
 #
 # Model tiering (2026-07-11): each agent routes independently, so
-# reasoning-light stages can run on the cheap tier (deepseek-v4-flash)
+# reasoning-light stages can run on the cheap tier (deepseek-flash)
 # while reasoning-heavy stages keep deepseek-v4-pro. Current tiers:
 #   flash — outline_agent: structured outline from precomputed numbers;
 #     no code generation, no scientific judgment.
@@ -44,7 +44,11 @@ deepseek:
     critic: deepseek-v4-pro
     writer: deepseek-v4-pro
     revision_writer: deepseek-v4-pro
-    outline_agent: deepseek-v4-flash
+    outline_agent: deepseek-flash
+    # V6: post-Writer manuscript verification. Needs vision --
+    # it inspects each embedded figure against its caption, and
+    # nothing in this project has ever looked at a figure.
+    verifier: deepseek-flash
 
 # MiniMax model config (legacy; preserved for 3b.5/3b.7/3b.9 reproducibility)
 # Requires MINIMAX_API_KEY in environment.
@@ -79,7 +83,12 @@ pricing:
       input: 0.28
       cached_input: 0.028   # DeepSeek prices a prompt-cache hit ~10x lower
       output: 0.42
-    deepseek-v4-flash:
+    # NOT VERIFIED against the current price list. These rates were
+    # carried over from the retired `deepseek-v4-flash` key when the id
+    # changed; the flash tier's real rates may differ. A wrong rate here
+    # is silent -- run_cost.json will report a number, just the wrong
+    # one. Confirm before quoting a figure externally.
+    deepseek-flash:
       input: 0.07
       cached_input: 0.007
       output: 0.28
@@ -160,6 +169,28 @@ findings_memory:
   enabled: true                        # opt-in; false = all prior behavior unchanged
   path: findings_memory/memory.yaml
   n_candidate_specs: 3                  # number of candidate specs generated before selecting best
+
+# VERIFYING stage: the deterministic invariant battery (src/invariants.py)
+# held against the finished manuscript and the run's own artifacts.
+#
+# Always runs and always writes invariants.json + run_status.json.
+# `blocking` decides whether a critical finding also sets the terminal
+# state to INCOMPLETE. It ships False on purpose: every one of the
+# fourteen archived papers fails at least one of these checks, so
+# switching it on globally would terminate every run and teach nothing.
+# Promote individual codes with `blocking_codes` once each has a
+# false-positive rate somebody has actually measured.
+verification:
+  enabled: true
+  blocking: false
+  # The LLM judge over the finished manuscript (src/agents/verifier.py).
+  # OFF by default: it costs a call per run plus one per figure, and an
+  # A/B that measures whether the pipeline PRODUCES fewer defects must
+  # not have a judge in one arm FINDING more of them. Its marginal
+  # recovery over the deterministic battery is measured separately,
+  # offline, against the answer key.
+  judge_enabled: false
+  blocking_codes: []   # e.g. [INV_MACRO_METRIC_MISLABEL, INV_COMPARATOR_UNNAMED]
 
 review_gate:
   # Requires LSAR (separate repository) and LSAR_HOME set.

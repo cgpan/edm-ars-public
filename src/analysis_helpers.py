@@ -382,6 +382,41 @@ def _grouping_series(column: "pd.Series") -> tuple["pd.Series", bool]:
     return labels, True
 
 
+def _read_protected_csv(path: str) -> pd.DataFrame:
+    """Read ``test_protected.csv`` without eating its first data column.
+
+    This used to be ``pd.read_csv(path, index_col=0)`` followed by
+    ``reset_index(drop=True)``. The DataEngineer writes the file with
+    ``index=False``, so ``index_col=0`` consumed the first *protected
+    attribute* as the index and ``reset_index(drop=True)`` then threw it
+    away. The column was invariably ``X1SEX``, so every run silently lost
+    sex from its fairness analysis and emitted "Subgroup attribute
+    'X1SEX' not found in test_protected.csv" -- which two delivered
+    papers then reported, four times over, as a *data limitation* of
+    HSLS:09. It is not a data fact; it was this line.
+
+    Read positionally, then drop a leading column only if it really is an
+    unnamed positional index (pandas names it ``Unnamed: 0``), or if it is
+    an unnamed column whose values are exactly ``0..n-1``.
+    """
+    df = pd.read_csv(path)
+    if df.shape[1] < 2:
+        return df
+    first = df.columns[0]
+    if not (isinstance(first, str) and first.startswith("Unnamed:")):
+        return df
+    col = df[first]
+    looks_positional = False
+    try:
+        looks_positional = bool(
+            pd.api.types.is_integer_dtype(col)
+            and (col.to_numpy() == np.arange(len(col))).all()
+        )
+    except Exception:  # noqa: BLE001 - a weird dtype is simply not an index
+        looks_positional = False
+    return df.drop(columns=[first]) if looks_positional else df
+
+
 def run_subgroup_analysis(
     model: object,
     test_X: pd.DataFrame,
@@ -424,7 +459,7 @@ def run_subgroup_analysis(
         )
         return results
 
-    protected = pd.read_csv(test_protected_path, index_col=0)
+    protected = _read_protected_csv(test_protected_path)
 
     # Both test_X and test_protected were produced by the same train/test split
     # and have matching positional order.  Reset both to 0-based integer index.
@@ -444,8 +479,19 @@ def run_subgroup_analysis(
 
     for attr in subgroup_attrs:
         if attr not in protected.columns:
+            # Name the columns that ARE present. The bare form of this
+            # message ("not found ... skipping") was transcribed into two
+            # delivered papers as a *property of the data* -- "sex was not
+            # carried into the protected-attributes file" -- when the file
+            # held it all along and a reader bug had eaten it. A pipeline
+            # warning about a missing column is a statement about this
+            # run, never about the dataset, and it has to say so.
             warnings_list.append(
-                f"Subgroup attribute '{attr}' not found in test_protected.csv; skipping."
+                f"PIPELINE: subgroup attribute '{attr}' is not a column of "
+                f"test_protected.csv (columns present: "
+                f"{', '.join(map(str, protected.columns))}); subgroup "
+                f"analysis for '{attr}' skipped. This is a limitation of "
+                f"this run's data preparation, NOT of the dataset."
             )
             continue
 
@@ -1689,11 +1735,23 @@ def group_shap_by_parent(feature_names, shap_mean_abs, sep="_"):
 
 
 def bootstrap_auc_difference(y_true, prob_a, prob_b, school_ids=None,
-                             n_boot=1000, random_state=42):
+                             n_boot=1000, random_state=42,
+                             model_a=None, model_b=None):
     """Paired bootstrap test of AUC(a) - AUC(b) on the same test rows.
 
     Cluster-aware when ``school_ids`` is given (resamples clusters).
     Guards "the best model outperforms the baseline" claims.
+
+    ``model_a`` and ``model_b`` name the two comparands and are written
+    into the result. PASS THEM. They were not parameters at all until
+    2026-09-20, so the returned dict carried a bare ``auc_diff`` and the
+    identity of what had been compared existed nowhere in results.json.
+    Two delivered papers independently named RandomForest as the tested
+    runner-up; in one the difference was bit-for-bit XGBoost minus
+    LogisticRegression, in the other LogisticRegression minus XGBoost.
+    In both it was the only inferential test the paper reported. An
+    unnamed comparison is an invitation to the Writer to guess, and it
+    guessed wrong both times.
     """
     import numpy as np
     from sklearn.metrics import roc_auc_score
@@ -1724,13 +1782,206 @@ def bootstrap_auc_difference(y_true, prob_a, prob_b, school_ids=None,
             boots.append(roc_auc_score(y[idx], a[idx])
                          - roc_auc_score(y[idx], b[idx]))
     lo, hi = np.percentile(boots, [2.5, 97.5])
-    return {
+    out = {
         "auc_diff": point, "ci_lower": float(lo), "ci_upper": float(hi),
         "significant": bool(lo > 0 or hi < 0),
         "se_method": ("cluster_bootstrap" if school_ids is not None
                       else "bootstrap"),
         "n_boot_effective": len(boots),
+        "model_a": None if model_a is None else str(model_a),
+        "model_b": None if model_b is None else str(model_b),
     }
+    if model_a is None or model_b is None:
+        out["comparands_unnamed"] = True
+        out["warning"] = (
+            "bootstrap_auc_difference was called without model_a/model_b, so "
+            "results.json does not record WHICH two models were compared. "
+            "Any prose naming the comparands is a guess. Pass the names."
+        )
+    else:
+        out["contrast"] = f"{model_a} - {model_b}"
+    return out
+
+
+def encode_categoricals(train_df, test_df, cat_cols, drop_first=True):
+    """One-hot encode train and test under ONE category mapping fitted on train.
+
+    Returns ``(train_encoded, test_encoded, encoding_report)``.
+
+    ``encoding_report`` is the artifact that makes dummy columns
+    writable-about. Per source column it records the reference category
+    **by its label**, every dummy's category label, and per-split counts:
+
+    .. code-block:: python
+
+        {"X1RACE": {"reference_category": "White, non-Hispanic",
+                    "reference_n_train": 6021, "reference_n_test": 1479,
+                    "dummies": {"X1RACE_Asian, non-Hispanic":
+                                {"category": "Asian, non-Hispanic",
+                                 "n_train": 1412, "n_test": 353}}}}
+
+    Encoding train and test *separately* and reconciling afterwards with
+    ``reindex`` is the failure this replaces, and it does not fail loudly.
+    ``get_dummies(drop_first=True)`` drops whichever category sorts first
+    **within that frame**, so the two splits can drop different
+    categories and every surviving column then means something different
+    in test than it did in train. In one delivered paper the column named
+    ``BYRACE_Multiracial`` held 1,479 White students and zero multiracial
+    students; the paper built a substantive racial finding and a
+    partial-dependence figure on it, with the direction also wrong. In
+    another, ``X1SEX_1.0`` summed to zero across all 4,200 test rows
+    while carrying 0.105 of the SHAP weight that made sex "the
+    second-largest feature group".
+
+    Raises ``ValueError`` on a dummy that is constant in either split --
+    a column with no variance in test cannot carry test-set SHAP weight,
+    so producing one means the encoding is wrong, not that the feature is
+    uninteresting.
+    """
+    import pandas as pd
+
+    tr = train_df.copy()
+    te = test_df.copy()
+    report: dict = {}
+    made_train, made_test = [], []
+
+    for col in cat_cols:
+        if col not in tr.columns:
+            raise ValueError(f"encode_categoricals: {col!r} is not a column of train_df")
+        if col not in te.columns:
+            raise ValueError(f"encode_categoricals: {col!r} is not a column of test_df")
+
+        cats = pd.Index(sorted(pd.Series(tr[col]).dropna().unique(), key=str))
+        if len(cats) < 2:
+            raise ValueError(
+                f"encode_categoricals: {col!r} has {len(cats)} category in train "
+                "and cannot be one-hot encoded."
+            )
+        tr_c = pd.Categorical(tr[col], categories=cats)
+        te_c = pd.Categorical(te[col], categories=cats)
+
+        unseen = set(map(str, pd.Series(te[col]).dropna().unique())) - set(map(str, cats))
+        d_tr = pd.get_dummies(tr_c, prefix=col, drop_first=drop_first, dtype=float)
+        d_te = pd.get_dummies(te_c, prefix=col, drop_first=drop_first, dtype=float)
+        # Identical categories both sides, so identical columns by construction.
+        assert list(d_tr.columns) == list(d_te.columns), (col, list(d_tr.columns), list(d_te.columns))
+        d_tr.index, d_te.index = tr.index, te.index
+
+        ref = str(cats[0]) if drop_first else None
+        entry = {
+            "source_column": col,
+            "categories_fitted_on_train": [str(c) for c in cats],
+            "reference_category": ref,
+            "drop_first": bool(drop_first),
+            "dummies": {},
+        }
+        if ref is not None:
+            entry["reference_n_train"] = int((pd.Series(tr_c.codes) == 0).sum())
+            entry["reference_n_test"] = int((pd.Series(te_c.codes) == 0).sum())
+        if unseen:
+            entry["test_categories_unseen_in_train"] = sorted(unseen)
+
+        offset = 1 if drop_first else 0
+        for i, name in enumerate(d_tr.columns):
+            n_tr = int(d_tr[name].sum())
+            n_te = int(d_te[name].sum())
+            if n_tr == 0 or n_tr == len(d_tr) or n_te == 0 or n_te == len(d_te):
+                raise ValueError(
+                    f"encode_categoricals: dummy {name!r} is constant "
+                    f"(train sum {n_tr}/{len(d_tr)}, test sum {n_te}/{len(d_te)}). "
+                    "A constant column carries no information and must not "
+                    "reach a model or a SHAP ranking."
+                )
+            entry["dummies"][str(name)] = {
+                "category": str(cats[i + offset]),
+                "n_train": n_tr,
+                "n_test": n_te,
+            }
+        report[col] = entry
+        made_train.append(d_tr)
+        made_test.append(d_te)
+
+    tr = tr.drop(columns=list(cat_cols))
+    te = te.drop(columns=list(cat_cols))
+    if made_train:
+        tr = pd.concat([tr] + made_train, axis=1)
+        te = pd.concat([te] + made_test, axis=1)
+    if list(tr.columns) != list(te.columns):
+        raise ValueError(
+            "encode_categoricals: train and test column lists diverged; "
+            f"train-only={sorted(set(tr.columns) - set(te.columns))}, "
+            f"test-only={sorted(set(te.columns) - set(tr.columns))}"
+        )
+    return tr, te, report
+
+
+def classification_metrics(y_true, y_pred, positive_label=1):
+    """Every classification metric, each under a name that says what it is.
+
+    Returns both averagings explicitly, never a bare ``precision`` /
+    ``recall`` / ``f1``:
+
+    ``*_macro``
+        unweighted mean over both classes (``average='macro'``).
+    ``*_positive``
+        the positive class alone (``average='binary'``). This is what a
+        reader assumes "recall" means in an early-warning paper.
+
+    The old contract stored the macro values under the bare names. Every
+    downstream reader -- abstract, results, discussion -- read them as
+    positive-class figures. In one delivered paper true positive-class
+    precision was 0.212 while the paper reported 0.576 throughout, and
+    the word "macro" appears in none of the five papers of that study.
+    That single misreading produced 6 of one paper's 12 catalogued
+    defects.
+
+    ``recall_macro`` is mathematically identical to balanced accuracy, so
+    a results.json whose ``recall`` equals its ``balanced_accuracy`` to
+    the last bit is macro wearing a positive-class name. That identity is
+    what :mod:`src.invariants` checks (``INV_MACRO_METRIC_MISLABEL``).
+    """
+    import numpy as np
+    from sklearn.metrics import (
+        accuracy_score,
+        balanced_accuracy_score,
+        confusion_matrix,
+        f1_score,
+        precision_score,
+        recall_score,
+    )
+
+    y = np.asarray(y_true).ravel()
+    p = np.asarray(y_pred).ravel()
+    kw = dict(zero_division=0)
+    out = {
+        "accuracy": float(accuracy_score(y, p)),
+        "balanced_accuracy": float(balanced_accuracy_score(y, p)),
+        "precision_macro": float(precision_score(y, p, average="macro", **kw)),
+        "recall_macro": float(recall_score(y, p, average="macro", **kw)),
+        "f1_macro": float(f1_score(y, p, average="macro", **kw)),
+        "precision_positive": float(
+            precision_score(y, p, pos_label=positive_label, average="binary", **kw)
+        ),
+        "recall_positive": float(
+            recall_score(y, p, pos_label=positive_label, average="binary", **kw)
+        ),
+        "f1_positive": float(
+            f1_score(y, p, pos_label=positive_label, average="binary", **kw)
+        ),
+        "positive_label": positive_label,
+        "metric_naming_contract": "explicit_macro_and_positive",
+    }
+    labels = sorted(set(np.unique(y)).union(np.unique(p)))
+    if len(labels) == 2:
+        tn, fp, fn, tp = confusion_matrix(y, p, labels=labels).ravel()
+        out["confusion_matrix"] = {
+            "tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp),
+            "labels": [_num_or_none(x) if not isinstance(x, (int, str)) else x
+                       for x in labels],
+        }
+        out["n_positive_true"] = int(tp + fn)
+        out["n_flagged"] = int(tp + fp)
+    return out
 
 
 def compute_calibration_metrics(y_true, y_prob, n_bins=10):
@@ -2362,17 +2613,138 @@ def psy_ctt(
 
 
 def psy_omega(cfa_result):
-    """P2: McDonald's omega-total from a psy_cfa result.
+    """P2: McDonald's omega from a :func:`psy_cfa` result.
 
-    omega = (sum lambda)^2 / ((sum lambda)^2 + sum theta) using
-    standardized loadings (theta_i = 1 - lambda_i^2).
+    Unidimensional model
+        omega = (sum lambda)^2 / ((sum lambda)^2 + sum theta),
+        with standardized loadings and theta_i = 1 - lambda_i^2.
+
+    Multi-factor model
+        omega_total = (1'L Phi L'1) / (1'L Phi L'1 + sum theta),
+        which needs the standardized latent covariance matrix Phi.
+
+    This function used to run the unidimensional formula unconditionally,
+    pooling every loading in ``cfa_result["loadings"]`` into one sum and
+    ignoring the ``factor`` key each row carries. On a two-factor scale
+    that is the same as asserting Phi = all-ones, i.e. that the factors
+    correlate 1.0. One delivered paper reported omega-total 0.922 for a
+    two-factor model whose loadings and alpha bound it at [0.885, 0.904];
+    0.9206 is exactly what the unidimensional formula returns on those
+    loadings, and reaching 0.922 with two factors would require phi ~
+    0.98 against an alpha-implied 0.42.
+
+    So: per-factor omega is always reported. ``omega_total`` is reported
+    only when it is actually computable -- one factor, or several with a
+    Phi from ``cfa_result["factor_cor"]``. Otherwise it is ``None`` and
+    ``omega_total_reason`` says why. A ``None`` here is a refusal to
+    guess; it must be reported as "not computed", never dropped.
     """
-    lams = [row["est_std"] for row in cfa_result["loadings"]]
-    s = sum(lams)
-    theta = sum(1.0 - l * l for l in lams)
-    return {"omega_total": s * s / (s * s + theta),
-            "n_items": len(lams),
-            "from_loadings": lams}
+    rows = cfa_result.get("loadings") or []
+    if not rows:
+        return {
+            "omega_total": None,
+            "omega_total_reason": "CFA result carried no loadings.",
+            "omega_by_factor": {},
+            "n_items": 0,
+            "n_factors": 0,
+            "from_loadings": [],
+        }
+
+    # `factor` is absent only on results from the pre-2026-09 helper.
+    by_factor: dict = {}
+    for row in rows:
+        by_factor.setdefault(str(row.get("factor", "_unnamed")), []).append(
+            float(row["est_std"])
+        )
+    factors = sorted(by_factor)
+    lams_all = [float(r["est_std"]) for r in rows]
+    theta_total = sum(1.0 - l * l for l in lams_all)
+
+    omega_by_factor = {}
+    for f in factors:
+        lam = by_factor[f]
+        s = sum(lam)
+        th = sum(1.0 - x * x for x in lam)
+        denom = s * s + th
+        omega_by_factor[f] = (s * s / denom) if denom else None
+
+    out = {
+        "omega_by_factor": omega_by_factor,
+        "n_items": len(lams_all),
+        "n_factors": len(factors),
+        "items_per_factor": {f: len(by_factor[f]) for f in factors},
+        "from_loadings": lams_all,
+    }
+
+    # Correlated residuals break the diagonal-Theta assumption in both
+    # formulas, so refuse rather than under-report.
+    resid = cfa_result.get("residual_cor") or []
+    if any(abs(float(r.get("est_std") or 0.0)) > 1e-8 for r in resid):
+        out["omega_total"] = None
+        out["omega_total_reason"] = (
+            f"The model declares {len(resid)} correlated residual(s); "
+            "omega assumes a diagonal residual matrix. Report per-factor "
+            "omega, or compute omega from the model-implied covariance."
+        )
+        return out
+
+    if len(factors) == 1:
+        out["omega_total"] = omega_by_factor[factors[0]]
+        out["omega_total_reason"] = "Unidimensional model."
+        return out
+
+    phi = _phi_matrix(cfa_result.get("factor_cor"), factors)
+    if phi is None:
+        out["omega_total"] = None
+        out["omega_total_reason"] = (
+            f"Model spans {len(factors)} factors ({', '.join(factors)}) and "
+            "the CFA result carries no standardized factor covariances, so "
+            "omega-total is not identified from the loadings alone. "
+            "Per-factor omega is reported instead."
+        )
+        return out
+
+    # 1'L Phi L'1 == sum_{j,k} (sum lambda in j)(sum lambda in k) phi_jk
+    sums = {f: sum(by_factor[f]) for f in factors}
+    common = 0.0
+    for j in factors:
+        for k in factors:
+            common += sums[j] * sums[k] * phi[j][k]
+    denom = common + theta_total
+    out["omega_total"] = (common / denom) if denom else None
+    out["omega_total_reason"] = (
+        f"Multi-factor omega-total over {len(factors)} factors using the "
+        "standardized factor covariance matrix."
+    )
+    out["factor_cor_used"] = {f"{j}~~{k}": phi[j][k] for j in factors for k in factors if j < k}
+    return out
+
+
+def _phi_matrix(factor_cor, factors):
+    """Build a symmetric standardized Phi from ``factor_cor`` rows.
+
+    Returns ``None`` if any off-diagonal pair is missing -- a partial Phi
+    would have to be completed by assumption, and assuming is what
+    produced the 0.922.
+    """
+    if not factor_cor:
+        return None
+    phi = {j: {k: (1.0 if j == k else None) for k in factors} for j in factors}
+    for row in factor_cor:
+        a, b = str(row.get("f1")), str(row.get("f2"))
+        if a not in phi or b not in phi:
+            continue
+        try:
+            v = float(row.get("est_std"))
+        except (TypeError, ValueError):
+            continue
+        phi[a][b] = v
+        phi[b][a] = v
+    for j in factors:
+        for k in factors:
+            if phi[j][k] is None:
+                return None
+    return phi
 
 
 def psy_cfa(items_df, model, estimator="MLR"):
@@ -2390,17 +2762,77 @@ def psy_cfa(items_df, model, estimator="MLR"):
 
 
 def psy_invariance(items_df, group, model):
-    """P6: configural->metric->scalar ladder (lavaan, Chen 2007 rules)."""
+    """P6: configural->metric->scalar ladder (lavaan, Chen 2007 rules).
+
+    Rows whose grouping value is missing are dropped, and how many were
+    dropped is reported as ``n_dropped_missing_group`` alongside the
+    surviving per-group counts.
+
+    This used to be ``str(g)`` for every non-``None`` value. A float
+    ``nan`` is not ``None``, so ``str(nan)`` produced the literal group
+    label ``'nan'`` and lavaan fitted it as a real third group. One
+    delivered paper's ladder ran with most of its cases inside that
+    phantom group, and the paper attached its precision claim to the
+    full-sample count rather than to the two substantive groups.
+    """
+    import math
+
     try:
         from src.r_bridge import run_r_script
     except ModuleNotFoundError:  # copied flat into a run output dir
         from r_bridge import run_r_script
 
-    return run_r_script("invariance_ladder.R", {
-        "items": _items_payload(items_df),
-        "group": [None if g is None else str(g) for g in list(group)],
+    raw = list(group)
+
+    def _missing(g) -> bool:
+        if g is None:
+            return True
+        if isinstance(g, float) and math.isnan(g):
+            return True
+        # pandas NA / numpy nan / the string forms a CSV round-trip makes.
+        try:
+            if pd.isna(g):
+                return True
+        except (TypeError, ValueError):
+            pass
+        return str(g).strip().lower() in {"", "nan", "none", "<na>", "na"}
+
+    keep = [i for i, g in enumerate(raw) if not _missing(g)]
+    n_dropped = len(raw) - len(keep)
+    labels = [str(raw[i]) for i in keep]
+
+    kept_df = items_df.iloc[keep] if hasattr(items_df, "iloc") else items_df
+
+    counts: dict = {}
+    for lab in labels:
+        counts[lab] = counts.get(lab, 0) + 1
+
+    if len(counts) < 2:
+        return {
+            "error": (
+                "invariance ladder needs at least 2 non-missing groups; got "
+                f"{len(counts)} ({', '.join(sorted(counts)) or 'none'}) after "
+                f"dropping {n_dropped} row(s) with a missing grouping value."
+            ),
+            "n_dropped_missing_group": n_dropped,
+            "group_counts": counts,
+            "n_analyzed": len(labels),
+        }
+
+    result = run_r_script("invariance_ladder.R", {
+        "items": _items_payload(kept_df),
+        "group": labels,
         "model": model,
     }, timeout_s=1200)
+
+    if isinstance(result, dict):
+        result["n_dropped_missing_group"] = n_dropped
+        result["group_counts"] = counts
+        # The n the ladder actually ran on. Reporting the pre-drop n
+        # beside these fit statistics is the defect this field exists to
+        # make impossible.
+        result["n_analyzed"] = len(labels)
+    return result
 
 
 def psy_grm(items_df, itemtype="graded"):

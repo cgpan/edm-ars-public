@@ -97,6 +97,10 @@ _COMPILED_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     for pid, pat, sev in _RAW_PATTERNS
 ]
 
+#: Any citation command, natbib or biblatex. Kept identical to
+#: ``src.invariants._CITE_CMD``; see the note there.
+_CITE_CMD = re.compile(r"\\[a-zA-Z]*cite[a-zA-Z]*\*?\s*(?:\[[^\]]*\]\s*)*\{([^}]*)\}")
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -136,8 +140,14 @@ def check_latex_quality(latex: str) -> LatexQualityReport:
 
     # --- Structural checks (not regex-match-per-instance) ---
 
-    # lq_13: Zero \cite{} commands when document has \bibliography
-    if r"\bibliography{" in latex and not re.search(r"\\cite\{", latex):
+    # lq_13: Zero citation commands when document has \bibliography.
+    #
+    # This tested for `\cite{` alone. The journal template loads biblatex
+    # and the Writer emits `\parencite{...}`, which contains "cite" but
+    # does not start with it -- so a fully-cited journal paper tripped
+    # this as an ERROR, and a genuinely uncited one would have been
+    # indistinguishable from it. Match any citation command.
+    if r"\bibliography{" in latex and not _CITE_CMD.search(latex):
         report.issues.append(
             LatexQualityIssue(
                 pattern_id="lq_13",

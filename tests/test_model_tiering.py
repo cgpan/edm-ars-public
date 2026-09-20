@@ -35,9 +35,20 @@ def repo_config() -> dict:
 
 class TestConfigTierAssignment:
     def test_outline_agent_routes_to_flash(self, repo_config: dict) -> None:
+        """The flash tier's id is `deepseek-flash`.
+
+        This asserted `deepseek-v4-flash` until 2026-09-20. The API had
+        stopped serving that id -- GET /models returns only
+        deepseek-flash and deepseek-v4-pro -- so ten shipped configs
+        routed the outline stage to a dead model, the 400 was swallowed
+        by a bare except in _run_writing, and every one of those runs
+        silently degraded to the v1 template path. The test agreed with
+        the configs the whole time, because it was pinned to the same
+        wrong string.
+        """
         cfg = resolve_provider_for_stage("outline_agent", repo_config)
         assert cfg.name == "deepseek"
-        assert cfg.model == "deepseek-v4-flash"
+        assert cfg.model == "deepseek-flash"
 
     @pytest.mark.parametrize("agent_key", HEAVY_AGENTS)
     def test_heavy_agents_stay_on_pro(

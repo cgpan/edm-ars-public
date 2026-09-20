@@ -118,12 +118,31 @@ class Critic(BaseAgent):
                 with open(reasoning_path, "w", encoding="utf-8") as f:
                     f.write(reasoning)
 
-        # Persist to disk
+        # Persist to disk. The orchestrator writes the effective verdict
+        # and the `unverified` flag onto this dict AFTER this returns, so
+        # persist_review_report() is called again from there; this write
+        # is the crash-safe copy.
+        self.persist_review_report(review_report)
+        return review_report
+
+    def persist_review_report(self, review_report: dict) -> str:
+        """Write ``review_report.json``. Safe to call more than once.
+
+        The file used to be written here and never again, while the
+        effective verdict and the `unverified` flag were stamped onto the
+        in-memory dict by the orchestrator a few lines later. So the
+        persisted artifact -- the one every downstream reader, every
+        audit and every archived run actually has -- carried only the
+        LLM's raw verdict and no flag at all. Six recent runs on disk
+        show `unverified` in checkpoint.json and absent from
+        review_report.json beside it, one of them with the two
+        disagreeing. The orchestrator calls this again once the verdict
+        is settled.
+        """
         report_path = os.path.join(self.ctx.output_dir, "review_report.json")
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(review_report, f, indent=2)
-
-        return review_report
+        return report_path
 
     @staticmethod
     def _extract_last_json_block(text: str) -> str:
@@ -259,10 +278,26 @@ class Critic(BaseAgent):
         ]
 
         if at_max:
+            # Report the true verdict. This block used to say "If your
+            # verdict would be REVISE, set it to PASS instead", and the
+            # orchestrator does not need that: _run_critiquing already
+            # routes REVISE-at-max-cycles to WRITING with unverified=True.
+            # What the instruction did do was corrupt the only
+            # LLM-vs-deterministic cross-check in the pipeline --
+            # verdict_evaluator compares the LLM's verdict string against
+            # its own recomputation and logs a disagreement, so telling
+            # the model to relabel REVISE as PASS made `llm_disagreement`
+            # read False in precisely the runs where the model disagreed.
+            # One run shipped at PASS with quality_score 9/10 holding
+            # eight critical defects.
             parts.append(
-                "- NOTE: Max revision cycles have been reached. If your verdict "
-                "would be REVISE, set it to PASS instead — the orchestrator will "
-                "mark the paper UNVERIFIED and include the full Critic report."
+                "- NOTE: Max revision cycles have been reached, so no further "
+                "revision is possible. Report your TRUE verdict anyway. A "
+                "REVISE here does not abort the run: the orchestrator writes "
+                "the paper with a mandatory UNVERIFIED warning block and "
+                "attaches your full report. Do NOT soften the verdict to PASS "
+                "-- the warning block is the only thing that tells a reader "
+                "the issues were left unresolved."
             )
 
         if findings_memory_summary:
@@ -299,7 +334,24 @@ class Critic(BaseAgent):
         - overall_verdict is one of PASS / REVISE / ABORT.
         - revision_instructions only targets known agents.
         """
-        valid_agents = set(self.task_template.get_agent_order())
+        # The cascade order is what _execute_revisions may RE-RUN. The
+        # Writer is not in it and must not be: CRITIQUING precedes
+        # WRITING, so at this point the Writer has not run yet and there
+        # is nothing to re-run.
+        #
+        # But that list was also used to decide which instructions were
+        # allowed to EXIST, and those are different questions. Across 19
+        # archived reports the Critic addressed 41 findings to the Writer
+        # -- a third of everything it found -- and every one was deleted
+        # here, six runs carrying the receipt in _validation_errors. A
+        # project skill (prediction-critic-checklist row sv_05) tells the
+        # Critic to write into that key. It was writing into a hole.
+        #
+        # Writer-addressed instructions are now kept and carried forward
+        # to the Writer's first invocation, where they are obligations on
+        # the manuscript it is about to produce.
+        cascade_agents = set(self.task_template.get_agent_order())
+        valid_agents = cascade_agents | {"Writer"}
 
         # Default missing required keys
         for key in _REQUIRED_REVIEW_KEYS:

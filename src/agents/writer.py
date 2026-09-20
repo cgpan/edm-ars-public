@@ -707,7 +707,41 @@ class Writer(BaseAgent):
             llm_latex,
             re.DOTALL,
         )
-        body = body_match.group(1).strip() if body_match else ""
+        if body_match:
+            body = body_match.group(1).strip()
+        else:
+            # No closing boundary anywhere. Either the model never opened
+            # a body, or its response was CUT OFF at the token limit
+            # before it could close one.
+            #
+            # This used to yield body = "" and no complaint. A run that
+            # produced a full 69 KB manuscript, truncated mid-sentence at
+            # the 16,000-token ceiling, shipped a 287-byte paper.tex
+            # containing a title, a bibliography command and
+            # \end{document} -- and the pipeline recorded it COMPLETED.
+            # Keep whatever the model did write, and say what happened.
+            tail = re.search(r"\\maketitle\s*(.*)", llm_latex, re.DOTALL)
+            body = tail.group(1).strip() if tail else ""
+            if body:
+                self.ctx.log.append(
+                    {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "agent": self.agent_name,
+                        "message": (
+                            "Writer response had no closing structural "
+                            "boundary (no \\end{document}, \\bibliographystyle "
+                            "or \\appendix) -- it was almost certainly cut off "
+                            f"at the token limit. Recovered {len(body)} "
+                            "characters of body rather than emitting an empty "
+                            "paper. RAISE per_stage_max_tokens.writer."
+                        ),
+                    }
+                )
+                self.ctx.errors.append(
+                    "Writer response was truncated at the token limit; the "
+                    "manuscript body was recovered from an unterminated "
+                    "document and may end mid-sentence."
+                )
         # A7: last line of defence. The sectionwise path sanitises each
         # section, but the single-shot path lands here directly, and a
         # fence or SUMMARY: note in the compiled PDF is indistinguishable
@@ -1001,6 +1035,57 @@ class Writer(BaseAgent):
     # Message builders
     # ------------------------------------------------------------------
 
+    def _obligation_block(self, review_report: dict | None) -> str:
+        """Critic findings addressed to the Writer, as instructions.
+
+        See :mod:`src.obligations`. These were deleted by the Critic's own
+        validator before the report was ever saved -- 41 of them across 19
+        archived runs -- so the Writer has never been told about a single
+        one.
+        """
+        from src.obligations import derive_obligations, render_for_writer
+
+        try:
+            return render_for_writer(derive_obligations(review_report))
+        except Exception:  # noqa: BLE001 - never lose a paper over a prompt block
+            return ""
+
+    #: Images in the output dir that are not analysis figures.
+    _NON_FIGURE_PREFIXES: tuple[str, ...] = ("lsar_", "_tmp", "thumb_", "paper")
+
+    def _available_figures(self, results_object: dict | None) -> list[str]:
+        """Figures the paper may embed: the claimed list UNION the disk.
+
+        ``results_object["figures_generated"]`` alone was the source here,
+        and it is a claim, not an observation. A causal run produced
+        ``love_plot.png``, ``propensity_overlap.png`` and
+        ``cate_distribution.png``; its revision cycle then re-ran the
+        analysis and returned ``figures_generated: []``. The Writer was
+        told the run had no figures and wrote a paper with none, while
+        all three sat in the output directory -- including the balance
+        plot its own checklist required. Enumerating the directory is
+        cheap and cannot be wrong about what exists.
+
+        The Analyst now reconciles the same two sources
+        (``_verify_figures_on_disk``); this is the backstop for the case
+        where results.json was restored from a checkpoint written before
+        that ran.
+        """
+        claimed = (results_object or {}).get("figures_generated") or []
+        figures = [f for f in claimed if isinstance(f, str)]
+        seen = {os.path.basename(f) for f in figures}
+        try:
+            on_disk = sorted(
+                f
+                for f in os.listdir(self.ctx.output_dir)
+                if f.lower().endswith((".png", ".pdf", ".jpg", ".jpeg"))
+                and not f.startswith(self._NON_FIGURE_PREFIXES)
+            )
+        except OSError:
+            return figures
+        figures.extend(f for f in on_disk if f not in seen)
+        return figures
+
     def _build_user_message(
         self,
         research_spec: dict | None,
@@ -1010,7 +1095,7 @@ class Writer(BaseAgent):
         review_report: dict | None,
         template_text: str = "",
     ) -> str:
-        figures = (results_object or {}).get("figures_generated") or []
+        figures = self._available_figures(results_object)
         parts = [
             "## research_spec.json",
             "```json",
@@ -1043,6 +1128,12 @@ class Writer(BaseAgent):
             json.dumps(review_report or {}, indent=2),
             "```",
             "",
+            # The raw report above has been in this prompt all along
+            # and changed nothing: no rule anywhere tells the Writer
+            # to act on it, and an undifferentiated JSON blob is not
+            # an instruction. This block is, and the manuscript is
+            # checked against it afterwards.
+            self._obligation_block(review_report),
             "## Available Figures",
             "\n".join(f"- {fig}" for fig in figures) if figures else "(none)",
             "",
@@ -1078,7 +1169,7 @@ class Writer(BaseAgent):
         template_text: str = "",
     ) -> str:
         """Build the user message for outline-first paper generation."""
-        figures = (results_object or {}).get("figures_generated") or []
+        figures = self._available_figures(results_object)
         parts = [
             "## research_spec.json",
             "```json",
@@ -1111,6 +1202,12 @@ class Writer(BaseAgent):
             json.dumps(review_report or {}, indent=2),
             "```",
             "",
+            # The raw report above has been in this prompt all along
+            # and changed nothing: no rule anywhere tells the Writer
+            # to act on it, and an undifferentiated JSON blob is not
+            # an instruction. This block is, and the manuscript is
+            # checked against it afterwards.
+            self._obligation_block(review_report),
             "## Paper Outline",
             "```json",
             json.dumps(outline, indent=2),

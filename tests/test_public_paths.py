@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.audit_public_paths import (  # noqa: E402
     PATTERNS,
+    STUDY_PATTERNS,
     history_blobs,
     scan,
     scan_history,
@@ -73,6 +74,53 @@ def test_tracked_files_carry_no_machine_specific_paths() -> None:
     hits = scan(tracked_files(REPO_ROOT), REPO_ROOT)
     rendered = "\n".join(f"  [{lbl}] {p}:{n}: {t}" for lbl, p, n, t in hits)
     assert not hits, f"machine-specific paths in tracked files:\n{rendered}"
+
+
+@pytest.mark.skipif(
+    not _IS_PUBLIC_MIRROR,
+    reason="the archive belongs to the private repository; this checkout is private",
+)
+def test_tracked_files_name_no_private_archive_runs() -> None:
+    """The mirror must not name the evaluation archive's run directories.
+
+    Those names encode a venue, a topic and an attempt count, and three
+    of them are arms of a blind-review study whose specs are withheld.
+    They reached this tree once, through a sync that ported the private
+    repository's archive-backed tests verbatim -- tests that can only
+    ever skip here, because the archive they read does not exist on a
+    fresh clone. The mirror ships without them.
+
+    This is a shape check, and a shape check is all a published detector
+    can be. The other half of the same problem -- distinctive numbers
+    quoted from a withheld manuscript -- cannot be guarded from inside
+    this repository, because a pattern that spelled them out would
+    publish them. That half is a pre-sync step, not a test.
+    """
+    hits = scan(tracked_files(REPO_ROOT), REPO_ROOT, extra_patterns=STUDY_PATTERNS)
+    hits = [h for h in hits if h[0] == "archive-run-name"]
+    rendered = "\n".join(f"  {p}:{n}: {t}" for _, p, n, t in hits)
+    assert not hits, f"private archive run names in tracked files:\n{rendered}"
+
+
+def test_archive_run_name_pattern_matches_the_real_shapes() -> None:
+    """Pin the shapes, so the guard cannot go vacuous the way the first
+    path scan did."""
+    label, pattern = STUDY_PATTERNS[0]
+    assert label == "archive-run-name"
+    # Synthetic names of each real shape. Writing the real ones here
+    # would publish exactly what the guard exists to keep out -- the
+    # same self-defeat as a secret-detector that ships the secret.
+    # The marker is per-line, and these lines are intentional examples.
+    for name in (
+        "edmars_venue__topicone__attempt8",  # audit-allow-path
+        "edmars_venue__topictwo__attempt1",  # audit-allow-path
+        "edmars__topicthree__attempt1",  # audit-allow-path
+        "edmars__topicfour__dryrun",  # audit-allow-path
+    ):
+        assert pattern.search(f'run = ARCHIVE / "{name}" / "output"'), name
+    # A bare agent or module name is not an archive run.
+    assert not pattern.search("edmars is the system under test")
+    assert not pattern.search("src/agents/verifier.py")
 
 
 @pytest.mark.parametrize(

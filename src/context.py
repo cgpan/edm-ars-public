@@ -15,7 +15,19 @@ class PipelineState(str, Enum):
     REVISING = "REVISING"
     WRITING = "WRITING"
     REVIEWING = "REVIEWING"
+    VERIFYING = "VERIFYING"
     COMPLETED = "COMPLETED"
+    #: Finished, artifacts written, and NOT fit to release: at least one
+    #: deterministic check the run itself ran came back critical.
+    #:
+    #: Before this existed, a run whose gate said ``passed: false`` and a
+    #: run whose gate said ``passed: true`` were byte-identical in
+    #: ``current_state`` -- both COMPLETED -- and the process exited 0
+    #: either way, so no wrapper could tell them apart. 23 archived runs
+    #: carry a failing gate result under ``current_state: "COMPLETED"``,
+    #: 11 of them with the paper.pdf still sitting beside it and nothing
+    #: on or near that PDF saying it failed.
+    INCOMPLETE = "INCOMPLETE"
     ABORTED = "ABORTED"
 
 

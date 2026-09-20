@@ -291,11 +291,19 @@ def test_happy_path_completes(tmp_path: Path) -> None:
     for fname in required:
         assert (tmp_path / fname).exists(), f"Missing required output file: {fname}"
 
-    # Correct completed_stages sequence (REVIEWING appended when review_gate enabled)
+    # Correct completed_stages sequence. After the core five, REVIEWING runs
+    # only when the review gate is enabled and VERIFYING always closes the
+    # run. Assert the SHAPE of the tail, not a fixed index: `review_gate`
+    # ships enabled here and disabled in the public mirror, so
+    # `completed_stages[5]` reads REVIEWING under one default and VERIFYING
+    # under the other while the pipeline is behaving correctly in both.
     core_stages = ["FORMULATING", "ENGINEERING", "ANALYZING", "CRITIQUING", "WRITING"]
     assert result.completed_stages[:5] == core_stages
-    if len(result.completed_stages) > 5:
-        assert result.completed_stages[5] == "REVIEWING"
+    tail = result.completed_stages[5:]
+    assert tail in (
+        ["VERIFYING"],
+        ["REVIEWING", "VERIFYING"],
+    ), f"unexpected post-WRITING stages: {tail}"
 
     # research_spec.json has correct content
     spec = json.loads((tmp_path / "research_spec.json").read_text())

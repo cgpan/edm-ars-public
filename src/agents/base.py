@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import warnings
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
@@ -80,6 +81,53 @@ def load_prompt(
             return yaml.safe_load(f) or {}
     except FileNotFoundError:
         return {}
+
+
+#: Media types DeepSeek and OpenAI accept as inline image parts.
+_IMAGE_MEDIA = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+#: Roughly 5 MB of base64 per image is the practical ceiling; an
+#: analysis figure at 150 dpi is far below it.
+_MAX_IMAGE_BYTES = 4_000_000
+
+
+def _image_content_part(path: str) -> dict | None:
+    """Encode a local image as an OpenAI-style ``image_url`` part.
+
+    Returns ``None`` -- never a silent empty part -- when the file is
+    missing, too large, or of a type the API does not take, and warns,
+    so a caller that believed it was checking a figure finds out it was
+    not.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    media = _IMAGE_MEDIA.get(ext)
+    if media is None:
+        warnings.warn(f"not an image type the API accepts: {path}", RuntimeWarning, stacklevel=2)
+        return None
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError as exc:
+        warnings.warn(f"could not read image {path}: {exc}", RuntimeWarning, stacklevel=2)
+        return None
+    if len(raw) > _MAX_IMAGE_BYTES:
+        warnings.warn(
+            f"image {path} is {len(raw)} bytes, above the {_MAX_IMAGE_BYTES} "
+            "ceiling; not sent",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+    import base64
+
+    b64 = base64.b64encode(raw).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{media};base64,{b64}"}}
 
 
 class BaseAgent(ABC):
@@ -370,7 +418,16 @@ class BaseAgent(ABC):
         user_message: str,
         max_tokens: int | None = None,
         temperature_override: float | None = None,
+        image_paths: list[str] | None = None,
     ) -> str:
+        """Call the configured model.
+
+        ``image_paths`` attaches local images as content parts. Only the
+        OpenAI-compatible providers (deepseek, openai) carry them;
+        anywhere else they are dropped with a warning rather than
+        silently, because a vision check that quietly became a text check
+        would report on figures it never saw.
+        """
         max_tokens = max_tokens if max_tokens is not None else self.max_tokens
         temperature = temperature_override if temperature_override is not None else self.temperature
         # Resolve {{SKILLS}} placeholder against the orchestrator-supplied
@@ -392,6 +449,29 @@ class BaseAgent(ABC):
             capture_dir = None
         # Retry on rate-limit (429): exponential backoff up to 3 attempts
         max_attempts = 3
+        # One content payload, built once. A list of parts for the
+        # OpenAI-compatible providers when images are attached; the bare
+        # string otherwise, so every existing call is byte-identical.
+        user_content: Any = user_message
+        if image_paths:
+            if self._provider in (_PROVIDER_OPENAI, _PROVIDER_DEEPSEEK):
+                parts: list[dict] = [{"type": "text", "text": user_message}]
+                for path in image_paths:
+                    part = _image_content_part(path)
+                    if part is not None:
+                        parts.append(part)
+                if len(parts) > 1:
+                    user_content = parts
+            else:
+                warnings.warn(
+                    f"{len(image_paths)} image(s) were passed to call_llm but "
+                    f"provider {self._provider!r} has no image path here; they "
+                    "were NOT sent. Anything the caller concludes about those "
+                    "figures is about text alone.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
         for attempt in range(max_attempts):
             try:
                 if self._provider == _PROVIDER_OPENAI:
@@ -408,7 +488,7 @@ class BaseAgent(ABC):
                         model=self.model,
                         messages=[
                             {"role": "system", "content": rendered_system_prompt},
-                            {"role": "user", "content": user_message},
+                            {"role": "user", "content": user_content},
                         ],
                         max_completion_tokens=max_tokens,
                         temperature=temperature,
@@ -443,7 +523,7 @@ class BaseAgent(ABC):
                         model=self.model,
                         messages=[
                             {"role": "system", "content": rendered_system_prompt},
-                            {"role": "user", "content": user_message},
+                            {"role": "user", "content": user_content},
                         ],
                         max_tokens=max_tokens,
                         temperature=temperature,

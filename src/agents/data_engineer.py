@@ -80,15 +80,32 @@ class DataEngineer(BaseAgent):
                 "message": f"WARNING: Could not copy analysis_helpers.py: {exc}",
             })
 
+        # Clear the artifacts this stage is contracted to produce, so a
+        # crashed attempt cannot leave an earlier one's files behind for
+        # validation to read as though they were this attempt's output.
+        #
+        # That is not hypothetical. A run whose retry died at
+        # "Analytic sample too small to split (n=0)" -- before it reached
+        # any imputation -- was reported to the operator as "NaN values
+        # remain in train_X: 11735 cells", counted from the PREVIOUS
+        # attempt's train_X.csv. The real failure was in a different
+        # error string entirely, and the diagnosis the operator acted on
+        # described a file the failing attempt never wrote.
+        self._clear_stage_outputs()
+
         # Execute with up to MAX_RETRIES retry attempts on failure
+        execution_ok = False
+        last_stderr = ""
         for attempt in range(self.MAX_RETRIES + 1):
             exec_result = self.execute_code(code)
             if exec_result["returncode"] == 0:
+                execution_ok = True
                 break
+            last_stderr = exec_result.get("stderr") or ""
             if attempt == self.MAX_RETRIES:
                 self.ctx.errors.append(
                     f"DataEngineer: code execution failed after {self.MAX_RETRIES + 1} "
-                    f"attempts. Last stderr: {exec_result['stderr'][:500]}"
+                    f"attempts. Last stderr: {last_stderr[:500]}"
                 )
                 break
             fix_message = self._build_fix_message(code, exec_result, attempt + 1)
@@ -99,9 +116,25 @@ class DataEngineer(BaseAgent):
             except ValueError:
                 # No new code block returned — stop retrying
                 break
+            self._clear_stage_outputs()
 
         data_report = self._read_data_report(last_response)
-        data_report = self._validate_outputs(data_report)
+        if not execution_ok:
+            # Say what actually happened. Validating the directory now
+            # would describe files no successful attempt produced.
+            data_report["validation_passed"] = False
+            data_report["execution_failed"] = True
+            data_report.setdefault("warnings", [])
+            if not isinstance(data_report["warnings"], list):
+                data_report["warnings"] = [str(data_report["warnings"])]
+            data_report["warnings"].insert(
+                0,
+                "DataEngineer code did not execute successfully; no output "
+                "files were produced by this stage. Last error: "
+                + " ".join(last_stderr.strip().splitlines()[-3:])[:400],
+            )
+        else:
+            data_report = self._validate_outputs(data_report)
 
         report_path = os.path.join(self.ctx.output_dir, "data_report.json")
         with open(report_path, "w", encoding="utf-8") as f:
@@ -250,6 +283,44 @@ class DataEngineer(BaseAgent):
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
+
+    #: Files this stage is contracted to produce. Cleared before every
+    #: execution attempt so a crash cannot leave an earlier attempt's
+    #: output to be validated as though it were this one's.
+    STAGE_OUTPUTS: tuple[str, ...] = (
+        "train_X.csv",
+        "train_y.csv",
+        "test_X.csv",
+        "test_y.csv",
+        "train_school_ids.csv",
+        "test_school_ids.csv",
+        "test_protected.csv",
+        "items_analytic.csv",
+        "panel_analytic.csv",
+        "data_report.json",
+    )
+
+    def _clear_stage_outputs(self) -> None:
+        removed = []
+        for name in self.STAGE_OUTPUTS:
+            path = os.path.join(self.ctx.output_dir, name)
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                    removed.append(name)
+                except OSError:
+                    pass
+        if removed:
+            self.ctx.log.append(
+                {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "agent": self.agent_name,
+                    "message": (
+                        "Cleared stale stage outputs before execution: "
+                        + ", ".join(removed)
+                    ),
+                }
+            )
 
     def _validate_outputs(self, data_report: dict) -> dict:
         """

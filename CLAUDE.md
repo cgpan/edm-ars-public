@@ -2,9 +2,20 @@
 
 ## What
 Multi-agent pipeline that automates prediction-focused EDM research.
-Five agents (ProblemFormulator → DataEngineer → Analyst → Critic → Writer)
-coordinated by a state-machine orchestrator. Given HSLS:09 data and a research
-prompt, produces a complete LaTeX paper with real citations.
+Six agents (ProblemFormulator → DataEngineer → Analyst → Critic →
+OutlineAgent → Writer) coordinated by a state-machine orchestrator, plus an
+optional seventh (Verifier, `src/agents/verifier.py`) that reads the finished
+manuscript. Given HSLS:09 data and a research prompt, produces a complete
+LaTeX paper with real citations.
+
+**Verification.** After the Writer — and after the review gate, when that is
+enabled — a `VERIFYING` stage holds the finished manuscript against the run's
+own artifacts. The battery in `src/invariants.py` is deterministic and uses no
+model; `src/obligations.py` tracks whether the Writer acted on the Critic's
+instructions. The stage writes `invariants.json`, `obligations.json` and
+`run_status.json`, and ends the run `COMPLETED` or `INCOMPLETE`. It is
+advisory by default (`verification.blocking: false`): promote a check to
+blocking only once its false-positive rate has been measured.
 
 **V2.0 architecture** uses a skill-based system: composable knowledge units
 (SKILL.md files) are matched at runtime by `SkillRegistry` and injected into
