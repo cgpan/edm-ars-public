@@ -398,6 +398,184 @@ def test_unused_class_option_is_reported(tmp_path):
     assert "floatsintex" in hits[0].evidence["unused_options"][0]
 
 
+# ---------------------------------------------------------------------------
+# INV_LATEX_NO_PDF -- a compile that produced nothing is not a "major"
+# ---------------------------------------------------------------------------
+
+
+_FATAL_LOG = (
+    "! File ended while scanning use of \\next.\n"
+    "<inserted text>\n"
+    "! Emergency stop.\n"
+    "<*> ./paper.tex\n"
+    "!  ==> Fatal error occurred, no output PDF file produced!\n"
+)
+
+
+def test_fatal_compile_with_no_pdf_is_critical(tmp_path):
+    """The exact shape that shipped: released clean, no PDF anywhere."""
+    run = _run(tmp_path, paper__log=_FATAL_LOG)
+    hits = _by_code(run, "INV_LATEX_NO_PDF")
+    assert len(hits) == 1
+    assert hits[0].severity == "critical"
+    assert "no output PDF file produced" in hits[0].evidence["fatal_markers"]
+    assert hits[0].evidence["paper_pdf_present"] is False
+    # The same errors must not also be reported as a separate major:
+    # one failure, one finding.
+    assert "INV_LATEX_COMPILE_ERROR" not in _codes(run)
+
+
+def test_errors_with_a_pdf_beside_them_stay_major(tmp_path):
+    """Three errors and a PDF is a different event from an abort."""
+    run = _run(
+        tmp_path,
+        paper__log="! Undefined control sequence.\n! Missing $ inserted.\n",
+        paper__pdf="%PDF-1.5 stub",
+    )
+    codes = _codes(run)
+    assert "INV_LATEX_COMPILE_ERROR" in codes
+    assert "INV_LATEX_NO_PDF" not in codes
+
+
+def test_a_missing_pdf_is_reported_even_without_a_fatal_marker(tmp_path):
+    """The log is evidence a compile was attempted; the PDF is evidence
+    of what it produced."""
+    run = _run(tmp_path, paper__log="This is pdfTeX, Version 3.14\n")
+    hits = _by_code(run, "INV_LATEX_NO_PDF")
+    assert len(hits) == 1
+    assert hits[0].evidence["fatal_markers"] == []
+    assert "no fatal marker" in hits[0].message
+
+
+def test_a_clean_compile_is_silent(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__log="This is pdfTeX, Version 3.14\nOutput written on paper.pdf.\n",
+        paper__pdf="%PDF-1.5 stub",
+    )
+    codes = _codes(run)
+    assert "INV_LATEX_NO_PDF" not in codes
+    assert "INV_LATEX_COMPILE_ERROR" not in codes
+
+
+def test_no_log_at_all_claims_nothing(tmp_path):
+    """No log means no compile was attempted -- not a failed one."""
+    run = _run(tmp_path, paper__tex=r"\begin{document}Body.\end{document}")
+    assert "INV_LATEX_NO_PDF" not in _codes(run)
+
+
+# ---------------------------------------------------------------------------
+# INV_LATEX_ENVIRONMENT_UNBALANCED
+# ---------------------------------------------------------------------------
+
+
+def test_an_unclosed_environment_is_caught(tmp_path):
+    r"""The CCSXML shape: the XML tag closes, the environment does not.
+
+    ``</CCSXML>`` looks like a closing tag and is not one. LaTeX keeps
+    reading to the end of the file and then reports a runaway argument
+    850 lines from the line that actually opened the group.
+    """
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            "\\documentclass[sigconf]{acmart}\n"
+            "\\begin{CCSXML}\n<ccs2012></ccs2012>\n</CCSXML>\n"
+            "\\begin{document}Body.\\end{document}\n"
+        ),
+    )
+    hits = _by_code(run, "INV_LATEX_ENVIRONMENT_UNBALANCED")
+    assert len(hits) == 1
+    assert hits[0].severity == "critical"
+    assert hits[0].evidence["unbalanced"] == {"CCSXML": 1}
+    assert "never closed" in hits[0].message
+
+
+def test_an_extra_end_is_caught_too(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            "\\begin{document}\\begin{table}A\\end{table}\\end{table}"
+            "\\end{document}"
+        ),
+    )
+    hits = _by_code(run, "INV_LATEX_ENVIRONMENT_UNBALANCED")
+    assert len(hits) == 1
+    assert hits[0].evidence["unbalanced"] == {"table": -1}
+    assert "more than it was opened" in hits[0].message
+
+
+def test_a_balanced_document_is_silent(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            "\\begin{document}\n"
+            "\\begin{table}\\begin{tabular}{ll}a&b\\end{tabular}\\end{table}\n"
+            "\\begin{figure}\\includegraphics{x.png}\\end{figure}\n"
+            "\\end{document}\n"
+        ),
+    )
+    assert "INV_LATEX_ENVIRONMENT_UNBALANCED" not in _codes(run)
+
+
+def test_a_commented_begin_opens_nothing(tmp_path):
+    """A checker that cries wolf on correct content gets switched off."""
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            "\\begin{document}\n"
+            "% \\begin{table} -- kept for reference, not used\n"
+            "Body.\n\\end{document}\n"
+        ),
+    )
+    assert "INV_LATEX_ENVIRONMENT_UNBALANCED" not in _codes(run)
+
+
+def test_an_environment_definition_is_not_a_use(tmp_path):
+    r"""``\newenvironment`` balances across two arguments this counter
+    never sees as a pair."""
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            "\\newenvironment{myfig}{\\begin{figure}}{\\end{figure}}\n"
+            "\\begin{document}Body.\\end{document}\n"
+        ),
+    )
+    assert "INV_LATEX_ENVIRONMENT_UNBALANCED" not in _codes(run)
+
+
+def test_a_listing_may_print_a_begin(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            "\\begin{document}\n"
+            "\\begin{verbatim}\n\\begin{table}\n\\end{verbatim}\n"
+            "\\end{document}\n"
+        ),
+    )
+    assert "INV_LATEX_ENVIRONMENT_UNBALANCED" not in _codes(run)
+
+
+def test_the_two_latex_checks_see_the_same_failure_from_both_sides(tmp_path):
+    """One reads the log, one reads the source, and they agree.
+
+    The source-side check is the one that names the cause. The log only
+    ever reports where TeX gave up.
+    """
+    run = _run(
+        tmp_path,
+        paper__log=_FATAL_LOG,
+        paper__tex=(
+            "\\begin{CCSXML}\n</CCSXML>\n\\begin{document}B.\\end{document}\n"
+        ),
+    )
+    codes = _codes(run)
+    assert "INV_LATEX_NO_PDF" in codes
+    assert "INV_LATEX_ENVIRONMENT_UNBALANCED" in codes
+    named = _by_code(run, "INV_LATEX_ENVIRONMENT_UNBALANCED")[0]
+    assert "CCSXML" in named.evidence["unbalanced"]
+
+
 def test_unverified_block_missing_is_critical(tmp_path):
     run = _run(
         tmp_path,

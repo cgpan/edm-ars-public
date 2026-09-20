@@ -2368,6 +2368,15 @@ def check_superlative_contradicted(a: RunArtifacts) -> list[Finding]:
     return out
 
 
+#: pdflatex's own words when it gives up and writes nothing. Any one of
+#: them is sufficient; a fatal run normally prints all three.
+_FATAL_LATEX = (
+    "no output PDF file produced",
+    "Emergency stop",
+    "Fatal error occurred",
+)
+
+
 def check_latex_compile_errors(a: RunArtifacts) -> list[Finding]:
     """Errors in the run's own LaTeX log.
 
@@ -2375,6 +2384,14 @@ def check_latex_compile_errors(a: RunArtifacts) -> list[Finding]:
     pointed at a repaired artifact reported zero errors for a paper whose
     original had roughly 1,000 characters destroyed by math-mode
     collapse.
+
+    A compile that produced NO PDF is reported separately and as
+    critical. This check used to grade every ``!`` line the same way, so
+    a run whose pdflatex hit an emergency stop and wrote nothing scored
+    four majors, and ``run_status.json`` recorded ``released: true,
+    reason: clean`` for a paper that does not exist. Three errors with a
+    PDF beside them and a fatal abort with no PDF at all are not the
+    same finding.
     """
     log = a.text("paper.log")
     if not log:
@@ -2387,7 +2404,40 @@ def check_latex_compile_errors(a: RunArtifacts) -> list[Finding]:
     undefined = re.findall(r"Citation `([^']+)' undefined", log)
     unused_opts = re.findall(r"Unused global option\(s\):\s*\n?\s*\[([^\]]*)\]", log)
     out: list[Finding] = []
-    if errors:
+    markers = [m for m in _FATAL_LATEX if m in log]
+    has_pdf = a.exists("paper.pdf")
+    if markers or not has_pdf:
+        # The log exists, so a compile was attempted. Either pdflatex said
+        # it gave up, or there is no PDF where one should be. Both mean
+        # the deliverable was not produced.
+        out.append(
+            Finding(
+                code="INV_LATEX_NO_PDF",
+                severity="critical",
+                message=(
+                    "LaTeX did not produce a PDF. "
+                    + (
+                        f"paper.log says: {markers[0]}. "
+                        if markers
+                        else "paper.log records no fatal marker, but no "
+                        "paper.pdf sits beside it. "
+                    )
+                    + (
+                        f"First error: {errors[0][:120]}"
+                        if errors
+                        else "The log records no `!` error line, so the "
+                        "failure is somewhere the log does not name."
+                    )
+                ),
+                artifact="paper.log",
+                evidence={
+                    "fatal_markers": markers,
+                    "paper_pdf_present": has_pdf,
+                    "errors": errors[:10],
+                },
+            )
+        )
+    elif errors:
         out.append(
             Finding(
                 code="INV_LATEX_COMPILE_ERROR",
@@ -2436,6 +2486,74 @@ def check_latex_compile_errors(a: RunArtifacts) -> list[Finding]:
 _VERBATIM = re.compile(r"(?s)\\begin\{(verbatim|lstlisting|minted)\}.*?\\end\{\1\}")
 _MATH = re.compile(r"(?s)\$\$.*?\$\$|\$[^$]*\$|\\\[.*?\\\]|\\\(.*?\\\)")
 _COMMENT = re.compile(r"(?<!\\)%.*")
+
+_BEGIN_ENV = re.compile(r"\\begin\s*\{([^}]*)\}")
+_END_ENV = re.compile(r"\\end\s*\{([^}]*)\}")
+#: ``\newenvironment{x}{...\begin{y}...}{...\end{y}...}`` balances across
+#: two arguments that this counter never sees as a pair. Drop the
+#: declaration rather than teach the counter to brace-match.
+_ENV_DEFINITION = re.compile(
+    r"\\(?:re)?newenvironment\s*\*?\s*\{[^}]*\}(?:\s*\[[^\]]*\])*"
+)
+
+
+def check_unbalanced_environments(a: RunArtifacts) -> list[Finding]:
+    r"""A ``\begin{env}`` the manuscript never closes.
+
+    Written after a delivered paper opened ``\begin{CCSXML}`` in the ACM
+    preamble, wrote the XML closing tag ``</CCSXML>``, and never wrote
+    ``\end{CCSXML}``. ``CCSXML`` is a ``comment`` environment, so LaTeX
+    swallowed the entire document looking for its end and aborted with
+    "File ended while scanning use of \next". No PDF was produced, and
+    the run was released.
+
+    The compile log reports the *symptom*, and only if a log survived.
+    This reads the manuscript, so it fires whether or not anything was
+    compiled, and it names the environment rather than the line where
+    TeX finally gave up -- which in that paper was 850 lines away.
+
+    Comments and verbatim blocks are stripped first: a ``%``-commented
+    ``\begin`` opens nothing, and a listing may legitimately print one.
+    """
+    tex = a.paper
+    if not tex:
+        return []
+    body = _VERBATIM.sub(" ", tex)
+    body = _COMMENT.sub(" ", body)
+    body = _ENV_DEFINITION.sub(" ", body)
+
+    counts: dict[str, int] = {}
+    for m in _BEGIN_ENV.finditer(body):
+        name = m.group(1).strip()
+        counts[name] = counts.get(name, 0) + 1
+    for m in _END_ENV.finditer(body):
+        name = m.group(1).strip()
+        counts[name] = counts.get(name, 0) - 1
+    unbalanced = {k: v for k, v in counts.items() if v != 0}
+    if not unbalanced:
+        return []
+
+    def _phrase(name: str, n: int) -> str:
+        if n > 0:
+            return f"{name}: opened {n} time(s) and never closed"
+        return f"{name}: closed {-n} time(s) more than it was opened"
+
+    detail = "; ".join(_phrase(k, v) for k, v in sorted(unbalanced.items()))
+    return [
+        Finding(
+            code="INV_LATEX_ENVIRONMENT_UNBALANCED",
+            severity="critical",
+            message=(
+                f"{a.paper_name} does not balance "
+                f"{len(unbalanced)} environment(s) -- {detail}. LaTeX reads "
+                "past the intended end of the group, and the error it "
+                "finally reports names neither the environment nor the "
+                "line that opened it."
+            ),
+            artifact=a.paper_name or "paper.tex",
+            evidence={"unbalanced": unbalanced},
+        )
+    ]
 
 
 def _prose_only(tex: str) -> str:
@@ -2766,6 +2884,7 @@ CHECKS: tuple[Callable[[RunArtifacts], list[Finding]], ...] = (
     check_flagged_variable_count,
     check_imputation_method_mismatch,
     check_latex_compile_errors,
+    check_unbalanced_environments,
     check_unescaped_latex_specials,
     check_alt_text_as_body,
     check_handtyped_crossrefs,

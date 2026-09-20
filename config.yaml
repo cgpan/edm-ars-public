@@ -190,7 +190,23 @@ verification:
   # recovery over the deterministic battery is measured separately,
   # offline, against the answer key.
   judge_enabled: false
-  blocking_codes: []   # e.g. [INV_MACRO_METRIC_MISLABEL, INV_COMPARATOR_UNNAMED]
+  # Promoted on measurement, one code at a time. Setting this list at all
+  # overrides `blocking` above: ONLY these codes stop a run.
+  #
+  # INV_LATEX_NO_PDF -- pdflatex said it produced no PDF, or no PDF sits
+  # beside the log that proves one was attempted. Measured over all 37
+  # archived manuscripts plus the four templates: one firing, on the one
+  # paper that provably did not compile. Zero false positives. This is
+  # the least arguable finding the battery can make -- the deliverable
+  # does not exist -- and it is exactly the case that used to be released
+  # as `reason: clean`, at severity major, with no PDF anywhere.
+  #
+  # INV_LATEX_ENVIRONMENT_UNBALANCED is deliberately NOT here. Same zero
+  # false positives over the same 41 documents, but it reports a cause,
+  # and a cause can in principle be survivable: a stray `\end` sometimes
+  # only warns. Blocking belongs on the finding that says the artifact is
+  # missing, not on the one that explains why.
+  blocking_codes: [INV_LATEX_NO_PDF]
 
 review_gate:
   # Requires LSAR (separate repository) and LSAR_HOME set.

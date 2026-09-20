@@ -108,15 +108,22 @@ stopped.
 **Verification.** `VERIFYING` holds the finished manuscript against the run's
 own artifacts and writes `invariants.json`, `obligations.json` and
 `run_status.json` beside the paper. The checks in `src/invariants.py` are
-deterministic and use no model. The 37 of them recompute arithmetic the paper
+deterministic and use no model. The 38 of them recompute arithmetic the paper
 states, try to bind every numeral in the prose to a number the run actually
 produced, catch a macro-averaged score described as a positive-class one, catch
-a limitation claiming a variable was unavailable when the run used it, and
-check that every figure on disk is referenced and every figure referenced
-exists. `verification.blocking` ships
-`false` — a critical finding is recorded, not fatal — because a check has no
-business stopping a run until somebody has measured its false-positive rate.
-Set `blocking_codes` to promote individual checks once you have.
+a limitation claiming a variable was unavailable when the run used it, check
+that every figure on disk is referenced and every figure referenced exists, and
+catch a `\begin{env}` the manuscript never closes. `verification.blocking`
+ships `false` — a critical finding is recorded, not fatal — because a check has
+no business stopping a run until somebody has measured its false-positive rate.
+
+One check is promoted. `INV_LATEX_NO_PDF` — pdflatex said it produced no PDF,
+or none sits beside the log that proves one was attempted — is listed in
+`verification.blocking_codes`, so it ends the run `INCOMPLETE` and exits 2.
+It earned that: zero false positives across every archived manuscript and every
+template, and the finding it makes is the least arguable one available, namely
+that the deliverable does not exist. Note that setting `blocking_codes` at all
+overrides `blocking`: only the listed codes stop a run.
 
 An optional LLM judge (`src/agents/verifier.py`, `verification.judge_enabled`)
 reads the manuscript with vision and reports what the deterministic checks

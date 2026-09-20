@@ -393,6 +393,57 @@ class TestRunOrchestration:
         on_disk = (tmp_path / "paper.tex").read_text(encoding="utf-8")
         assert returned_text == on_disk
 
+    def test_run_without_an_outline_still_protects_the_preamble(
+        self, tmp_path: Path
+    ) -> None:
+        r"""The gate was ``outline is not None``, which is not about preambles.
+
+        When OutlineAgent failed, the Writer fell back to the v1 message
+        and reassembly was skipped, so the model's own preamble shipped.
+        One delivered paper lost ``\end{CCSXML}`` that way, produced no
+        PDF, and was released. This run has no outline; the preamble must
+        still come from the template.
+        """
+        agent = self._agent(tmp_path)
+        corrupted = _SAMPLE_TEX.replace(
+            "\\begin{document}",
+            "\\begin{CCSXML}\n<ccs2012></ccs2012>\n</CCSXML>\n\\begin{document}",
+        )
+        agent.call_llm = MagicMock(
+            return_value=f"```latex\n{corrupted}\n```\n```bibtex\n{_SAMPLE_BIB}\n```\n"
+        )
+
+        agent.run()
+
+        written = (tmp_path / "paper.tex").read_text(encoding="utf-8")
+        assert "</CCSXML>" not in written
+        assert written.count("\\begin{CCSXML}") == written.count("\\end{CCSXML}")
+
+    def test_a_response_without_maketitle_is_left_alone(self, tmp_path: Path) -> None:
+        r"""Reassembly needs ``\maketitle`` to find the body.
+
+        Without one the extracted body is empty, and substituting that
+        into the template would turn a short manuscript into a long empty
+        one -- trading the corruption being prevented for a worse defect.
+        """
+        agent = self._agent(tmp_path)
+        no_maketitle = (
+            "\\documentclass{article}\\begin{document}"
+            "\\cite{paper001}\\bibliography{references}\\end{document}"
+        )
+        agent.call_llm = MagicMock(
+            return_value=f"```latex\n{no_maketitle}\n```\n"
+            f"```bibtex\n{_SAMPLE_BIB}\n```\n"
+        )
+
+        agent.run()
+
+        written = (tmp_path / "paper.tex").read_text(encoding="utf-8")
+        assert "%%PLACEHOLDER" not in written, "an unfilled template must not ship"
+        assert "\\documentclass{article}" in written, (
+            "the model's own document was replaced by an empty template"
+        )
+
     def test_run_uses_bibtex_from_llm_response(self, tmp_path: Path) -> None:
         agent = self._agent(tmp_path)
         agent.call_llm = MagicMock(return_value=_llm_response_with_both_blocks())
@@ -792,13 +843,17 @@ class TestTruncatedWriterResponse:
         )
         return w
 
+    # RAW strings, and it matters: written unraw, "\title" is a tab and
+    # "\begin" is a backspace byte, so these fixtures were not LaTeX and
+    # the assertions below passed against a document the reassembler
+    # could not parse. Python said so in DeprecationWarnings nobody read.
     TEMPLATE = (
-        "\documentclass{acmart}\n\title{%%PLACEHOLDER:TITLE%%}\n"
+        r"\documentclass{acmart}" "\n" r"\title{%%PLACEHOLDER:TITLE%%}" "\n"
         "%%PLACEHOLDER:SHORTTITLE%%%%PLACEHOLDER:KEYWORDS%%"
         "%%PLACEHOLDER:DATASET_CITATION%%%%PLACEHOLDER:AUTHORS%%\n"
-        "\begin{abstract}%%PLACEHOLDER:ABSTRACT%%\end{abstract}\n"
-        "\begin{document}\maketitle\n%%PLACEHOLDER:PAPER_BODY%%\n"
-        "%%PLACEHOLDER:APPENDIX%%\end{document}\n"
+        r"\begin{abstract}%%PLACEHOLDER:ABSTRACT%%\end{abstract}" "\n"
+        r"\begin{document}\maketitle" "\n%%PLACEHOLDER:PAPER_BODY%%\n"
+        r"%%PLACEHOLDER:APPENDIX%%\end{document}" "\n"
     )
 
     def test_a_truncated_response_keeps_its_body(self, tmp_path, monkeypatch):
@@ -806,10 +861,10 @@ class TestTruncatedWriterResponse:
         monkeypatch.setattr(w, "_dataset_citation", lambda: "", raising=False)
         monkeypatch.setattr(w, "_author_line", lambda: "", raising=False)
         truncated = (
-            "\title{Predicting Dropout}\n"
-            "\begin{abstract}An abstract.\end{abstract}\n"
-            "\begin{document}\maketitle\n"
-            "\section{Introduction}\nThe analysis proceeded in four stages "
+            r"\title{Predicting Dropout}" "\n"
+            r"\begin{abstract}An abstract.\end{abstract}" "\n"
+            r"\begin{document}\maketitle" "\n"
+            r"\section{Introduction}" "\nThe analysis proceeded in four stages "
             "and the final one was cut off mid-sent"
         )
         out = w._reassemble_from_template(truncated, self.TEMPLATE)
@@ -817,16 +872,46 @@ class TestTruncatedWriterResponse:
         assert w.ctx.errors, "a truncated response must be recorded, not swallowed"
         assert "truncated" in w.ctx.errors[0]
 
+    def test_preamble_survives_a_plausible_looking_xml_repair(
+        self, tmp_path, monkeypatch
+    ):
+        r"""``\end{CCSXML}`` rewritten as ``</CCSXML>`` must not survive.
+
+        It looks like the obvious fix for an unclosed XML tag and it is
+        not one: CCSXML is a ``comment`` environment, so LaTeX reads to
+        end of file looking for the end that is no longer there. The
+        template's copy is the one that ships.
+        """
+        w = self._writer(tmp_path)
+        monkeypatch.setattr(w, "_dataset_citation", lambda: "", raising=False)
+        monkeypatch.setattr(w, "_author_line", lambda: "", raising=False)
+        template = self.TEMPLATE.replace(
+            "\\begin{document}",
+            "\\begin{CCSXML}\n<ccs2012></ccs2012>\n\\end{CCSXML}\n\\begin{document}",
+        )
+        corrupted = (
+            "\\title{Predicting Dropout}\n"
+            "\\begin{CCSXML}\n<ccs2012></ccs2012>\n</CCSXML>\n"
+            "\\begin{abstract}An abstract.\\end{abstract}\n"
+            "\\begin{document}\\maketitle\n"
+            "\\section{Introduction}\nA complete body.\n"
+            "\\bibliographystyle{ACM-Reference-Format}\n\\end{document}\n"
+        )
+        out = w._reassemble_from_template(corrupted, template)
+        assert "\\end{CCSXML}" in out
+        assert "</CCSXML>" not in out
+        assert out.count("\\begin{CCSXML}") == out.count("\\end{CCSXML}")
+
     def test_a_complete_response_records_no_truncation(self, tmp_path, monkeypatch):
         w = self._writer(tmp_path)
         monkeypatch.setattr(w, "_dataset_citation", lambda: "", raising=False)
         monkeypatch.setattr(w, "_author_line", lambda: "", raising=False)
         complete = (
-            "\title{Predicting Dropout}\n"
-            "\begin{abstract}An abstract.\end{abstract}\n"
-            "\begin{document}\maketitle\n"
-            "\section{Introduction}\nA complete body.\n"
-            "\bibliographystyle{ACM-Reference-Format}\n\end{document}\n"
+            r"\title{Predicting Dropout}" "\n"
+            r"\begin{abstract}An abstract.\end{abstract}" "\n"
+            r"\begin{document}\maketitle" "\n"
+            r"\section{Introduction}" "\nA complete body.\n"
+            r"\bibliographystyle{ACM-Reference-Format}" "\n" r"\end{document}" "\n"
         )
         out = w._reassemble_from_template(complete, self.TEMPLATE)
         assert "A complete body." in out

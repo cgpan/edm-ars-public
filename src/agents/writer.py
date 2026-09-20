@@ -283,10 +283,38 @@ class Writer(BaseAgent):
             paper_tex = self._extract_latex(llm_response)
             bibtex = self._extract_bibtex(llm_response) or fallback_bibtex
 
-        # v2 path: reassemble from clean template to prevent preamble corruption.
+        # Reassemble from the clean template to prevent preamble corruption.
         # The LLM often modifies \makeatletter / \renewcommand\@copyrightpermission
         # blocks, causing broken first pages in the compiled PDF.
-        if outline is not None and paper_tex not in (_MINIMAL_STUB_TEX,):
+        #
+        # This used to be gated on `outline is not None`, which is not a
+        # property of the preamble. When OutlineAgent failed -- a truncated
+        # JSON response -- the Writer fell back to the v1 message, reassembly
+        # was skipped, and the model's own preamble shipped. One delivered
+        # paper came back with `\end{CCSXML}` rewritten as `</CCSXML>`: a
+        # plausible-looking XML repair that leaves a `comment` environment
+        # open to end of file. pdflatex aborted, no PDF was produced, and the
+        # run was released. Another run's raw Writer output carries the same
+        # corruption and shipped a correct paper -- because it had an outline
+        # and therefore got reassembled. The outline decided whether the
+        # preamble was protected, and it has no business deciding that.
+        #
+        # The v1 fallback already hands the LLM the v2 template
+        # (F-A4-V1-TEMPLATE-MISSING, see _load_template), so the placeholders
+        # reassembly needs are there. The explicit check says so out loud
+        # rather than relying on it.
+        #
+        # The `\maketitle` condition is the real precondition, stated
+        # plainly: reassembly locates the body as whatever follows
+        # `\maketitle`, so a response that never wrote one yields an empty
+        # body, and substituting that into the template turns a short
+        # manuscript into a long empty one -- a worse artifact than the
+        # corruption being prevented.
+        if (
+            paper_tex not in (_MINIMAL_STUB_TEX,)
+            and "%%PLACEHOLDER:PAPER_BODY%%" in template_text
+            and "\\maketitle" in paper_tex
+        ):
             paper_tex = self._reassemble_from_template(paper_tex, template_text)
 
         # Validate template structure and log any warnings

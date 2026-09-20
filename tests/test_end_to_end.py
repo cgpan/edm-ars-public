@@ -518,3 +518,39 @@ def test_pipeline_log_has_all_stages(tmp_path: Path) -> None:
     log_text = (tmp_path / "pipeline.log").read_text()
     for keyword in ("FORMULATING", "ENGINEERING", "ANALYZING", "CRITIQUING", "WRITING"):
         assert keyword in log_text, f"pipeline.log missing entry for {keyword}"
+
+
+def test_a_run_that_produced_no_pdf_does_not_complete(tmp_path: Path) -> None:
+    """The defect the first promoted blocking code exists for.
+
+    A delivered run hit an emergency stop, produced no PDF, and recorded
+    ``released: true, reason: clean`` -- because the compile failure was
+    graded major and majors are advisory. The same artifacts now
+    terminate the run INCOMPLETE, which is what a batch harness reads as
+    exit code 2.
+
+    Asserted end to end rather than on the check alone: severity, the
+    ``blocking_codes`` entry in config.yaml and the release decision are
+    three separate things, and the bug lived in the gap between them.
+    """
+    orch = _make_orch(tmp_path)
+    _wire_stubs(orch)
+    assert orch.run().current_state == PipelineState.COMPLETED
+
+    out = Path(orch.ctx.output_dir)
+    (out / "paper.log").write_text(
+        "! Emergency stop.\n"
+        "!  ==> Fatal error occurred, no output PDF file produced!\n",
+        encoding="utf-8",
+    )
+    (out / "paper.pdf").unlink(missing_ok=True)
+
+    orch.ctx.completed_stages.remove("VERIFYING")
+    orch.ctx.current_state = PipelineState.VERIFYING
+    orch._run_verifying()
+
+    assert orch.ctx.current_state == PipelineState.INCOMPLETE
+    status = json.loads((out / "run_status.json").read_text(encoding="utf-8"))
+    assert status["released"] is False
+    assert status["blocking_findings"] == ["INV_LATEX_NO_PDF"]
+    assert status["reason"] != "clean"

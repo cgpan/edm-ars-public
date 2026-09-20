@@ -15,7 +15,11 @@ model; `src/obligations.py` tracks whether the Writer acted on the Critic's
 instructions. The stage writes `invariants.json`, `obligations.json` and
 `run_status.json`, and ends the run `COMPLETED` or `INCOMPLETE`. It is
 advisory by default (`verification.blocking: false`): promote a check to
-blocking only once its false-positive rate has been measured.
+blocking only once its false-positive rate has been measured. One code is
+promoted — `INV_LATEX_NO_PDF`, measured at zero false positives over 37
+archived manuscripts and the four templates. Note that setting
+`verification.blocking_codes` at all overrides `blocking`: only the listed
+codes stop a run.
 
 **V2.0 architecture** uses a skill-based system: composable knowledge units
 (SKILL.md files) are matched at runtime by `SkillRegistry` and injected into
