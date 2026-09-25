@@ -5,7 +5,7 @@
 # Python environment as EDM-ARS:
 #   pip install -r requirements-lsar.txt
 # Installing LSAR's own requirements.txt from your checkout does the same
-# job (it also pulls LSAR's test tools):
+# job (LSAR's test tools are in its requirements-dev.txt):
 #   pip install -r <path to LSAR>/requirements.txt
 #
 # These are the runtime packages LSAR imports, with the ranges from LSAR's
