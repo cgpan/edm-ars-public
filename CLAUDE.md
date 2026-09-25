@@ -68,7 +68,7 @@ historical: `config.yaml` and the code are current where they differ.
 - SPEC.md — original implementation spec (schemas, agent designs)
 - DISCLAIMER.md, PRIVACY.md — user-facing disclaimer and data-handling notice; keep them true to the code
 - config.yaml — central configuration (providers, model IDs, paths, pipeline params)
-- .env.example — every environment variable the pipeline reads, with empty values
+- .env.example — the environment variables a user may set: keys with empty values, addresses and settings commented out
 - requirements.txt (runtime), requirements-dev.txt (tests, lint, types), requirements-lsar.txt (review gate), requirements-sandbox.txt (Docker image)
 - data/raw/ — dataset files (gitignored; see README "Data setup" for exact names)
 - data_registry/datasets/ — YAML variable registries (Tier 1 curated, Tier 2 auto)
