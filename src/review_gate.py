@@ -557,6 +557,7 @@ class ReviewGate:
                 try:
                     proc = subprocess.run(c, cwd=str(cwd),
                                           capture_output=True, text=True,
+                                          encoding="utf-8", errors="replace",
                                           timeout=timeout_s)
                 except Exception:
                     return False
@@ -568,6 +569,11 @@ class ReviewGate:
                     cwd=str(cwd),
                     capture_output=True,
                     text=True,
+                    # pdflatex writes UTF-8 or raw 8-bit bytes; the locale
+                    # codec (cp1252 on Windows) raised on the first byte it
+                    # could not map, which no handler here caught.
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout_s,
                 )
                 if proc.returncode not in (0, 1):
@@ -1928,6 +1934,8 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         if result["success"]:
             self._log("LaTeX recompilation succeeded")
         else:
+            if result.get("message"):
+                self._log(f"LaTeX recompilation: {result['message']}")
             failed = [s for s in result["steps"] if s["returncode"] not in (0, 1)]
             for step in failed:
                 self._log(

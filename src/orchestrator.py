@@ -550,6 +550,11 @@ def _summarize_compile(output_dir: str, result: Any) -> dict:
     steps = [s for s in (result.get("steps") or []) if isinstance(s, dict)]
     missing_tool = result.get("missing_tool")
     failed_step = result.get("failed_step")
+    # compile_latex judges freshness itself (the PDF appeared or changed
+    # during this compile); prefer that over bare existence, which a PDF
+    # the stale-output cleanup could not delete would otherwise satisfy.
+    on_disk = os.path.exists(os.path.join(output_dir, "paper.pdf"))
+    pdf_exists = bool(result["pdf_exists"]) and on_disk if "pdf_exists" in result else on_disk
     for step in steps:
         rc = step.get("returncode")
         if rc in (0, 1):
@@ -564,9 +569,11 @@ def _summarize_compile(output_dir: str, result: Any) -> dict:
             missing_tool = str(step.get("cmd") or "").split(" ", 1)[0] or None
     return {
         "success": bool(result.get("success")),
-        "pdf_exists": os.path.exists(os.path.join(output_dir, "paper.pdf")),
+        "pdf_exists": pdf_exists,
+        "stale_pdf": bool(on_disk and not pdf_exists),
         "missing_tool": missing_tool,
         "failed_step": failed_step,
+        "message": result.get("message"),
         "steps": [
             {
                 "cmd": s.get("cmd"),
@@ -1990,13 +1997,22 @@ class Orchestrator:
             )
         else:
             tool = summary.get("missing_tool")
-            note = (
-                f"LaTeX compilation produced NO paper.pdf: {tool} was not found. "
-                "Install a TeX distribution and put it on PATH."
-                if tool
-                else "LaTeX compilation produced NO paper.pdf; see paper.log "
-                "and latex_compile.json."
-            )
+            detail = summary.get("message")
+            if tool:
+                note = (
+                    f"LaTeX compilation produced NO paper.pdf: {tool} was not found. "
+                    "Install a TeX distribution and put it on PATH."
+                )
+            elif detail:
+                note = (
+                    f"LaTeX compilation produced NO paper.pdf: {detail} "
+                    "Details in latex_compile.json."
+                )
+            else:
+                note = (
+                    "LaTeX compilation produced NO paper.pdf; see paper.log "
+                    "and latex_compile.json."
+                )
             self._log("Orchestrator", note)
             self.ctx.errors.append(note)
             events.emit(self.ctx, "warning", stage="WRITING", code="NO_PDF", message=note)
