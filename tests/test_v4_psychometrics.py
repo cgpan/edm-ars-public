@@ -2,21 +2,26 @@
 
 The certification test runs the real gate against the real R
 installation (standing Arc-R rule: no downscaling). Skips cleanly on
-machines without R.
+machines without R -- or with R but without the packages the certified
+scripts load, which used to fail instead of skipping.
 """
 from __future__ import annotations
 
 import pytest
 
 try:
-    from src.r_bridge import RBridgeError, find_rscript
+    from src.r_bridge import missing_r_packages
 
-    find_rscript()
-    _HAS_R = True
-except Exception:
+    _MISSING_R = missing_r_packages()
+    _HAS_R = not _MISSING_R
+    _R_SKIP_REASON = (
+        f"R packages missing: {', '.join(_MISSING_R)}" if _MISSING_R else ""
+    )
+except Exception as exc:  # RBridgeError, or R that cannot start
     _HAS_R = False
+    _R_SKIP_REASON = f"Rscript not available: {exc}"
 
-needs_r = pytest.mark.skipif(not _HAS_R, reason="Rscript not available")
+needs_r = pytest.mark.skipif(not _HAS_R, reason=_R_SKIP_REASON or "R not usable")
 
 
 class TestRBridge:

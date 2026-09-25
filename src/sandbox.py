@@ -154,11 +154,14 @@ def blas_thread_env(base: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-def child_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+def child_env(
+    base: Mapping[str, str] | None = None,
+    rscript_path: str | None = None,
+) -> dict[str, str]:
     """The environment LLM-generated code runs with.
 
     ``blas_thread_env`` (credentials dropped, inner thread pools capped)
-    plus one thing the executor relies on:
+    plus two things the executor relies on:
 
     * UTF-8 stdio. On a Windows host the child's stdout defaults to the
       ANSI code page, so a generated script died with UnicodeEncodeError
@@ -167,6 +170,10 @@ def child_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
       decodes the pipes as UTF-8, so the child must write UTF-8; these are
       forced, not defaulted, because a stray PYTHONIOENCODING=cp1252 in
       the host env would bring the crash back.
+    * ``EDM_ARS_RSCRIPT`` from config ``r_bridge.rscript_path``. The psy_*
+      wrappers run inside the child and never read config, so the setting
+      only reaches ``r_bridge.find_rscript`` through the environment. An
+      operator's own EDM_ARS_RSCRIPT wins over the config value.
 
     Rscript, started by the bridge from inside the child, inherits all of
     this -- including the missing credentials.
@@ -174,6 +181,8 @@ def child_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     env = blas_thread_env(dict(base) if base is not None else None)
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    if rscript_path and not env.get("EDM_ARS_RSCRIPT", "").strip():
+        env["EDM_ARS_RSCRIPT"] = str(rscript_path)
     return env
 
 
@@ -222,11 +231,16 @@ class SubprocessExecutor:
     the choice for operators who deliberately run analysis code elsewhere.
     """
 
-    def __init__(self, python_executable: str | None = None) -> None:
+    def __init__(
+        self,
+        python_executable: str | None = None,
+        rscript_path: str | None = None,
+    ) -> None:
         self.python_executable: str | None = (
             os.path.expanduser(os.path.expandvars(str(python_executable)))
             if python_executable else None
         )
+        self.rscript_path: str | None = str(rscript_path) if rscript_path else None
 
     def interpreter(self) -> str:
         """The Python the generated script will run under."""
@@ -313,7 +327,7 @@ class SubprocessExecutor:
                     errors="replace",
                     timeout=timeout_s,
                     cwd=output_dir,
-                    env=child_env(),
+                    env=child_env(rscript_path=self.rscript_path),
                 )
             except OSError as exc:
                 # Only the interpreter launch lands here: writing the
@@ -372,6 +386,7 @@ class DockerSandbox:
         network_disabled: bool = True,
         auto_build: bool = True,
         python_executable: str | None = None,
+        rscript_path: str | None = None,
     ) -> None:
         self.image = image
         self.memory_limit = memory_limit
@@ -380,8 +395,10 @@ class DockerSandbox:
         self.auto_build = auto_build
         self._client: Any = None  # lazy-initialised on first run()
         # Every "fall back to subprocess" path uses this one, so a fallback
-        # runs under the configured interpreter, not the default one.
-        self._fallback = SubprocessExecutor(python_executable=python_executable)
+        # runs under the configured interpreter and R, not the defaults.
+        self._fallback = SubprocessExecutor(
+            python_executable=python_executable, rscript_path=rscript_path,
+        )
 
     def _get_client(self) -> Any:
         """Return (and cache) a docker.DockerClient."""
@@ -448,7 +465,8 @@ class DockerSandbox:
         }
         # child_env with an explicit base: the container gets only
         # OUTPUT_DIR plus the thread caps and UTF-8 stdio, never a copy of
-        # the host env.
+        # the host env. No EDM_ARS_RSCRIPT either: a host path to Rscript
+        # means nothing inside the image, which has no R.
         environment: dict[str, str] = child_env({"OUTPUT_DIR": "/workspace"})
 
         if raw_data_path is not None:
@@ -751,13 +769,17 @@ def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecuto
 
     Every executor returned -- including the subprocess one a Docker
     sandbox falls back to -- carries ``sandbox.python_executable`` (null =
-    the interpreter running the pipeline).
+    the interpreter running the pipeline) and ``r_bridge.rscript_path``
+    (exported to generated code as EDM_ARS_RSCRIPT).
     """
     sandbox_cfg: dict[str, Any] = config.get("sandbox") or {}
     python_executable = sandbox_cfg.get("python_executable") or None
+    rscript_path = (config.get("r_bridge") or {}).get("rscript_path") or None
 
     def _subprocess() -> SubprocessExecutor:
-        return SubprocessExecutor(python_executable=python_executable)
+        return SubprocessExecutor(
+            python_executable=python_executable, rscript_path=rscript_path,
+        )
 
     if not sandbox_cfg.get("enabled", False):
         return _subprocess()
@@ -790,4 +812,5 @@ def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecuto
         network_disabled=sandbox_cfg.get("network_disabled", True),
         auto_build=sandbox_cfg.get("auto_build", True),
         python_executable=python_executable,
+        rscript_path=rscript_path,
     )
