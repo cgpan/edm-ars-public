@@ -693,9 +693,10 @@ class CausalDIDTemplate(TaskTemplate):
 class PsychometricsTemplate(TaskTemplate):
     """Measurement/psychometrics studies - V4 (locked-spec entry).
 
-    P-battery: P1 CTT, P2 omega, P3 CFA, P4 GRM, P5 DIF, P6 invariance -
-    all through certified analysis_helpers.psy_* wrappers backed by the
-    R bridge (see the psychometrics scope note (internal)).
+    P-battery: P1 CTT, P2 omega, P3 CFA, P4 GRM, P5 DIF, P6 invariance,
+    P7 CDM (DINA/G-DINA) - all through certified analysis_helpers.psy_*
+    wrappers backed by the R bridge (see the psychometrics scope note
+    (internal)).
     """
 
     def get_name(self) -> str:
@@ -733,7 +734,9 @@ class PsychometricsTemplate(TaskTemplate):
         known = {"P1", "P2", "P3", "P4", "P5", "P6", "P7"}
         bad = [m for m in battery if m not in known]
         if bad:
-            warnings.append(f"unknown method IDs: {bad} (known: sorted P1-P6)")
+            warnings.append(
+                f"unknown method IDs: {bad} (known: {', '.join(sorted(known))})"
+            )
         if any(m in battery for m in ("P5", "P6")) and not spec.get("grouping_vars"):
             warnings.append("P5/P6 require grouping_vars")
         return warnings
