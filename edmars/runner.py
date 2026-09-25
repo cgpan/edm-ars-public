@@ -235,6 +235,11 @@ def build_effective_config(settings: dict[str, Any], plan: "StudyPlan") -> dict[
     if llm_provider == "anthropic":
         cfg["models"] = {**(cfg.get("models") or {}), **models}
         writer_model = cfg["models"].get("writer")
+        if writer_model and not cfg["models"].get("outline_agent"):
+            # The shipped top-level ``models`` block has no outline_agent
+            # entry, and the Anthropic path has no default for it: the
+            # outline step would call the API with an empty model id.
+            cfg["models"]["outline_agent"] = writer_model
     else:
         block = cfg.setdefault(llm_provider, {}) or {}
         cfg[llm_provider] = block
@@ -254,10 +259,22 @@ def build_effective_config(settings: dict[str, Any], plan: "StudyPlan") -> dict[
     rg["venue"] = str(getattr(plan, "venue", None) or _sget(settings, "defaults.venue", "EDM"))
     home = _lsar_home(settings)
     if review_enabled(settings, plan) and home is not None:
+        gate: dict[str, Any] = {}
+        try:
+            from edmars import lsar
+
+            gate = dict(lsar.gate_config({**settings, "lsar": {
+                **as_dict(_sget(settings, "lsar", {})), "home": str(home)}}, rg["venue"]))
+        except Exception:  # noqa: BLE001 -- the fallback below writes the same paths
+            gate = {}
         rg["enabled"] = True
-        rg["lsar_project_path"] = str(home)
-        rg["lsar_config_path"] = str(home / "config.yaml")
-        rg["calibration_path"] = str(home / "calibration" / "anchors_edm.yaml")
+        rg["lsar_project_path"] = str(gate.get("lsar_project_path") or home)
+        rg["lsar_config_path"] = str(gate.get("lsar_config_path") or home / "config.yaml")
+        rg["calibration_path"] = str(
+            gate.get("calibration_path") or home / "calibration" / "anchors_edm.yaml")
+        if gate.get("venue"):
+            # LSAR's own spelling of the venue ("AERA Open" -> "AERA_OPEN").
+            rg["venue"] = str(gate["venue"])
         if writer_model:
             rg["revision_model"] = writer_model
     else:
@@ -319,6 +336,24 @@ def _provider_env_var(provider: str) -> str:
     return _PROVIDER_ENV.get(provider, "DEEPSEEK_API_KEY")
 
 
+def _latex_bin_dir(settings: dict[str, Any]) -> str | None:
+    if str(_sget(settings, "latex.mode", "") or "") == "none":
+        return None
+    try:
+        from edmars import toolchain
+
+        return toolchain.latex_bin_dir(settings)
+    except Exception:  # noqa: BLE001 -- PATH as it is still works for a system TeX
+        return None
+
+
+def _rscript(settings: dict[str, Any]) -> str | None:
+    """The Rscript setup saved. Without one the pipeline's own R search
+    (src/r_bridge.py: newest version first) takes over."""
+    saved = _sget(settings, "r.rscript")
+    return str(saved) if saved else None
+
+
 def child_env(
     settings: dict[str, Any],
     *,
@@ -354,12 +389,23 @@ def child_env(
             env.pop(key, None)
     path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
     exe_dir = str(Path(sys.executable).parent)
+    first = [exe_dir]
+    tex_dir = _latex_bin_dir(settings)
+    if tex_dir:
+        # The pipeline runs a bare ``pdflatex``; a TinyTeX install (or a TeX
+        # found outside PATH) is only visible to it through PATH.
+        first.append(tex_dir)
     current = env.get(path_key, "")
     parts = [p for p in current.split(os.pathsep) if p]
-    env[path_key] = os.pathsep.join([exe_dir] + [p for p in parts if p != exe_dir])
-    rscript = _sget(settings, "r.rscript")
+    env[path_key] = os.pathsep.join(first + [p for p in parts if p not in first])
+    rscript = _rscript(settings)
     if rscript:
         env["EDM_ARS_RSCRIPT"] = str(rscript)
+    base_url = _sget(settings, "provider_base_url")
+    if provider == "local" and base_url:
+        # OPENAI_BASE_URL in the environment beats the config's base_url
+        # (defect E3), so a stray one would send a local study elsewhere.
+        env["OPENAI_BASE_URL"] = str(base_url)
     home = _lsar_home(settings)
     if review and home is not None:
         env["LSAR_HOME"] = str(home)
@@ -474,6 +520,126 @@ def prepare_run(settings: dict[str, Any], plan: "StudyPlan") -> Path:
     }
     _write_json(run_dir / "runner.json", runner)
     return run_dir
+
+
+# ---------------------------------------------------------------------------
+# The pipeline's own pre-flight
+# ---------------------------------------------------------------------------
+
+#: What the pipeline's findings are called on the check list.
+_FINDING_TITLES = {
+    "KEY_MISSING": "AI service key",
+    "SDK_MISSING": "Python packages",
+    "PROVIDER_CONFIG_INVALID": "AI models",
+    "INSTALL_INCOMPLETE": "Installation",
+    "DATA_MISSING": "Dataset file",
+    "LATEX_MISSING": "PDF typesetting",
+    "R_MISSING": "R",
+    "R_PACKAGES_MISSING": "R packages",
+    "LSAR_NOT_FOUND": "Automated reviewer",
+    "LSAR_IMPORT_FAILED": "Automated reviewer",
+    "LSAR_KEY_MISSING": "Automated reviewer key",
+}
+
+
+#: The edmars command that fixes a finding. The pipeline's own fix text
+#: speaks to people who run ``python -m src.main`` (".env in the repository
+#: folder"), which is wrong advice for an installed copy.
+_FINDING_FIXES = {
+    "KEY_MISSING": "Run `edmars setup ai` to add the key.",
+    "PROVIDER_CONFIG_INVALID": "Run `edmars setup ai` (and `edmars setup advanced` for per-step models).",
+    "SDK_MISSING": "Reinstall EDM-ARS, then run `edmars doctor`.",
+    "INSTALL_INCOMPLETE": "Reinstall EDM-ARS, then run `edmars doctor`.",
+    "DATA_MISSING": "Run `edmars data install {dataset}` (or `edmars data import {dataset} FILE`).",
+    "LATEX_MISSING": "Run `edmars setup pdf`.",
+    "R_MISSING": "Run `edmars setup r`.",
+    "R_PACKAGES_MISSING": "Run `edmars setup r`.",
+    "LSAR_NOT_FOUND": "Run `edmars setup reviewer`.",
+    "LSAR_IMPORT_FAILED": "Run `edmars setup reviewer`.",
+    "LSAR_KEY_MISSING": "Run `edmars setup reviewer` to add a DeepSeek key.",
+}
+
+
+def pipeline_check(settings: dict[str, Any], plan: "StudyPlan", *,
+                   timeout_s: float = 300) -> list[Any]:
+    """Run the pipeline's own ``--dry-run`` with exactly the config, spec and
+    environment a launch would use, and return its findings as checks.
+
+    This is the check the pipeline makes at start-up (keys, models the
+    agents would refuse, the data file, R for measurement studies, LSAR).
+    Running it here means a study that would stop in its first second is
+    refused before a study folder exists, with the pipeline's own words.
+    Nothing is created outside a temporary folder, and nothing is sent.
+    """
+    import tempfile
+
+    from edmars.model import Check
+
+    root = Path(paths.app_root()).absolute()
+    with tempfile.TemporaryDirectory(prefix="edmars-check-") as tmp:
+        work = Path(tmp)
+        cfg = build_effective_config(settings, plan)
+        _write_text_atomic(work / "run_config.yaml",
+                           yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+        argv = build_argv(plan, work / "run")
+        # build_argv points --config / --research-spec into the run folder;
+        # here they live next to it, and the run folder is never created.
+        fixed: list[str] = []
+        for i, token in enumerate(argv):
+            if i and argv[i - 1] == "--config":
+                token = str(work / "run_config.yaml")
+            elif i and argv[i - 1] == "--research-spec":
+                token = str(work / "research_spec.locked.json")
+            fixed.append(token)
+        spec = getattr(plan, "spec", None)
+        if isinstance(spec, dict):
+            _write_json(work / "research_spec.locked.json", spec)
+        fixed += ["--dry-run", "--json-summary", "--quiet"]
+        env = child_env(
+            settings,
+            provider=str(_sget(settings, "provider", "deepseek")),
+            review=review_enabled(settings, plan),
+            run_id="preflight",
+        )
+        try:
+            result = proc.run(fixed, timeout=timeout_s, env=env, cwd=root)
+        except Exception as exc:  # noqa: BLE001 -- reported as a check
+            return [Check("Pipeline check", "fail",
+                          f"The pipeline's own check could not run: {edsecrets.redact(str(exc))}",
+                          "Run `edmars doctor`.")]
+    summary: dict[str, Any] = {}
+    for line in reversed((result.stdout or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                summary = json.loads(line)
+            except ValueError:
+                summary = {}
+            break
+    if not summary:
+        tail = [ln for ln in (result.stderr or "").strip().splitlines() if ln.strip()]
+        detail = edsecrets.redact(tail[-1].strip()) if tail else f"exit code {result.returncode}"
+        return [Check("Pipeline check", "fail",
+                      f"The pipeline could not check this study: {detail}",
+                      "Run `edmars doctor`; if it finds nothing, run "
+                      "`edmars doctor --bundle` and attach the file to an issue.")]
+    checks: list[Any] = []
+    for item in summary.get("checks") or []:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or "")
+        severity = "fail" if str(item.get("severity")) == "fail" else "warn"
+        fix = _FINDING_FIXES.get(code)
+        fix = fix.format(dataset=_plan_dataset(plan)) if fix else str(item.get("fix") or "")
+        checks.append(Check(
+            _FINDING_TITLES.get(code, code.replace("_", " ").capitalize() or "Pipeline check"),
+            severity,
+            edsecrets.redact(str(item.get("message") or code)),
+            edsecrets.redact(fix) or None,
+        ))
+    if not checks:
+        checks.append(Check("Pipeline check", "ok", "The pipeline's own start-up check passed"))
+    return checks
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +1062,7 @@ __all__ = [
     "child_env",
     "latest_run",
     "launch",
+    "pipeline_check",
     "list_runs",
     "prepare_run",
     "resume",
