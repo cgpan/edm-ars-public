@@ -748,7 +748,11 @@ def run_cmd(
     ] = None,
     paper_format: Annotated[
         Optional[PaperFormat],
-        typer.Option("--paper-format", help="conference or journal (default: your setup's choice)."),
+        typer.Option(
+            "--paper-format",
+            help="conference or journal (default: journal for a journal --venue, "
+            "otherwise your setup's choice).",
+        ),
     ] = None,
     review: Annotated[
         Optional[bool],

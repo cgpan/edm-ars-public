@@ -2209,10 +2209,12 @@ def plan_from_flags(
         )
     options = _default_options(settings)
     if venue:
+        # A journal named on the command line gets a journal article, as
+        # in `edmars new`; `--paper-format` (applied by the caller) still
+        # wins. settings.load() always fills defaults.paper_format, so the
+        # saved default cannot be what decides this.
         options["venue"] = normalize_venue(venue)
-        if options["venue"] in JOURNAL_VENUES and not _sget(
-            settings, "defaults.paper_format"
-        ):
+        if options["venue"] in JOURNAL_VENUES:
             options["paper_format"] = "journal"
 
     if example:

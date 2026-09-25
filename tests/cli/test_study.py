@@ -784,6 +784,18 @@ def test_flags_take_defaults_from_settings() -> None:
     assert study.plan_from_flags(settings, example="x1mtheff_itr").review is False
 
 
+@pytest.mark.parametrize("venue", ["JEDM", "JLA", "AERA Open"])
+def test_a_journal_venue_flag_means_a_journal_article(venue: str) -> None:
+    from edmars import settings as settings_mod
+
+    loaded = settings_mod.load()  # fills defaults.paper_format = conference
+    assert settings_mod.get(loaded, "defaults.paper_format") == "conference"
+    plan = study.plan_from_flags(loaded, example="x1mtheff_itr", venue=venue)
+    assert plan.paper_format == "journal"
+    plan = study.plan_from_flags(loaded, example="x1mtheff_itr", venue="EDM")
+    assert plan.paper_format == "conference"
+
+
 # --------------------------------------------------------------------------
 # Confirmation card (R6)
 # --------------------------------------------------------------------------
