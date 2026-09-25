@@ -51,7 +51,12 @@ class NonInteractiveError(RuntimeError):
 
     def __init__(self, question: str, hint: str | None = None) -> None:
         self.question = question.strip().rstrip(":?").strip()
-        why = "--yes was given" if _non_interactive else "there is no terminal to ask in"
+        if _input_closed:
+            why = "it reached the end of the input, so no one is there to answer"
+        elif _non_interactive:
+            why = "--yes was given"
+        else:
+            why = "there is no terminal to ask in"
         advice = hint or (
             "Run the command in a terminal window, or give the answer as an "
             "option (see --help)."
@@ -65,6 +70,9 @@ class NonInteractiveError(RuntimeError):
 
 _plain_forced = False
 _non_interactive = False
+#: Set once a prompt hit end of input: nobody is there to answer, so every
+#: later prompt stops too, and is_interactive() says so.
+_input_closed = False
 _machine_output = False
 _screen_reader: bool | None = None
 _consoles: dict[tuple[bool, bool], Console] = {}
@@ -97,9 +105,10 @@ def set_machine_output(flag: bool) -> None:
 
 def reset() -> None:
     """Return every mode to its default (for tests and repeated invocations)."""
-    global _plain_forced, _non_interactive, _machine_output, _screen_reader
+    global _plain_forced, _non_interactive, _machine_output, _screen_reader, _input_closed
     _plain_forced = False
     _non_interactive = False
+    _input_closed = False
     _machine_output = False
     _screen_reader = None
     _consoles.clear()
@@ -206,7 +215,7 @@ def is_mintty() -> bool:
 
 def is_interactive() -> bool:
     """True when a person can answer prompts right now."""
-    if _non_interactive:
+    if _non_interactive or _input_closed:
         return False
     return _isatty(sys.stdin) or is_mintty()
 
@@ -474,6 +483,20 @@ def _read_line(prompt: str) -> str | None:
         return None
 
 
+def _end_of_input(message: str) -> NonInteractiveError:
+    """The error for a prompt that read end of input.
+
+    A person who presses Enter sends an empty line; end of input means no
+    one is typing (a pipe, a closed console, or Git Bash's pipes mistaken
+    for mintty's). The default is NOT taken: a default of "Start the
+    study" would spend money nobody agreed to.
+    """
+    global _input_closed
+    _input_closed = True
+    say()
+    return NonInteractiveError(message)
+
+
 def select(
     message: str,
     choices: list[tuple[str, str]],
@@ -527,9 +550,7 @@ def select(
     while True:
         raw = _read_line(prompt)
         if raw is None:
-            if default is not None:
-                return default
-            raise NonInteractiveError(message)
+            raise _end_of_input(message)
         raw = raw.strip()
         if not raw and default is not None:
             return default
@@ -577,9 +598,7 @@ def text(message: str, default: str | None = None, validate: Validator | None = 
     while True:
         raw = _read_line(f"{message}{suffix}: ")
         if raw is None:
-            if default is not None:
-                return default
-            raise NonInteractiveError(message)
+            raise _end_of_input(message)
         value = raw.strip()
         if not value and default is not None:
             value = default
@@ -617,7 +636,7 @@ def secret(message: str) -> str:
         )
         raw = _read_line(f"{message}: ")
         if raw is None:
-            raise NonInteractiveError(message)
+            raise _end_of_input(message)
         # Move up one line and clear it: mintty understands ANSI escapes.
         sys.stdout.write("\x1b[1A\x1b[2K")
         sys.stdout.flush()
@@ -628,7 +647,7 @@ def secret(message: str) -> str:
 
     raw = _read_line(f"{message}: ")
     if raw is None:
-        raise NonInteractiveError(message)
+        raise _end_of_input(message)
     return raw.strip()
 
 
@@ -655,7 +674,7 @@ def confirm(message: str, default: bool = True) -> bool:
     while True:
         raw = _read_line(f"{message} {hint} ")
         if raw is None:
-            return default
+            raise _end_of_input(message)
         answer_text = raw.strip().lower()
         if not answer_text:
             return default

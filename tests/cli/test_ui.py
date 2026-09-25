@@ -208,12 +208,27 @@ def test_plain_select_refuses_disabled_options(typed, capsys: pytest.CaptureFixt
     assert "That option is not available: needs both datasets" in out
 
 
-def test_plain_select_at_end_of_input(typed) -> None:  # type: ignore[no-untyped-def]
+def test_end_of_input_never_takes_the_default(typed) -> None:  # type: ignore[no-untyped-def]
+    # End of input is not a person pressing Enter: under Git Bash, pipes that
+    # look like mintty's made "Start this study? [1]" read EOF and start a
+    # paid study on the default. Every prompt now stops instead.
     typed()
-    assert ui.select("Pick", [("a", "A")], default="a") == "a"
-    typed()
+    with pytest.raises(ui.NonInteractiveError) as info:
+        ui.select("Start this study?", [("start", "Start"), ("cancel", "Cancel")], default="start")
+    assert "end of the input" in str(info.value)
+    # ... and nothing after it tries to ask again (the fixture patches
+    # is_interactive itself, so the flag behind it is checked).
+    assert ui._input_closed
     with pytest.raises(ui.NonInteractiveError):
         ui.select("Pick", [("a", "A")])
+    ui.reset()
+    typed()
+    with pytest.raises(ui.NonInteractiveError):
+        ui.text("Venue", default="EDM")
+    ui.reset()
+    typed()
+    with pytest.raises(ui.NonInteractiveError):
+        ui.confirm("Go ahead?", default=True)
 
 
 def test_select_rejects_a_default_that_is_not_a_choice() -> None:
@@ -253,3 +268,10 @@ def test_get_console_returns_a_real_console_for_rich_widgets() -> None:
     assert not ui.get_console().stderr
     ui.set_machine_output(True)
     assert ui.get_console().stderr
+
+
+def test_is_interactive_is_false_after_end_of_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ui, "_isatty", lambda stream: True)
+    assert ui.is_interactive()
+    monkeypatch.setattr(ui, "_input_closed", True)
+    assert not ui.is_interactive()
