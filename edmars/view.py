@@ -438,7 +438,10 @@ def _watch_live(reader: StateReader, run_dir: Path, *, poll_s: float) -> int:
 
     from edmars import ui
 
-    console = ui.console
+    # rich's Live keeps a console of its own: hand it the real Console, not
+    # ui.console (a forwarding proxy for plain print calls).
+    get_console = getattr(ui, "get_console", None)
+    console = get_console() if callable(get_console) else ui.console
     tree = _ProcTree()
 
     def renderable(state: RunState) -> Group:

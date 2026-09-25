@@ -189,7 +189,8 @@ def test_live_mode_finishes(run_home: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
     run = make_run(run_home, results=PREDICTION_RESULTS)
     console = Console(file=io.StringIO(), width=100, force_terminal=True)
-    monkeypatch.setattr(ui, "console", console)
+    # The live view hands rich's Live the real Console (ui.get_console()).
+    monkeypatch.setattr(ui, "get_console", lambda stderr=False: console)
     monkeypatch.setattr(ui, "is_plain", lambda: False)
     assert view.watch(run) == view.EXIT_ENDED
     assert "Framing the question" in console.file.getvalue()  # type: ignore[attr-defined]
