@@ -41,7 +41,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterator, Sequence
 
-from edmars import paths
+from edmars import estimates, paths
 from edmars.model import Check, StudyPlan
 
 # --------------------------------------------------------------------------
@@ -145,10 +145,8 @@ TIME_WITHOUT_REVIEW = "usually 10-35 minutes"
 TIME_WITH_REVIEW = (
     "usually 35-60 minutes with the automated review, occasionally about 2 hours"
 )
-COST_DEEPSEEK = (
-    "roughly US$0.05-0.20 per study with DeepSeek, including the automated "
-    "review (measured on only a few runs). You pay DeepSeek directly."
-)
+# One source for prices, shared with setup (edmars/estimates.py).
+COST_DEEPSEEK = estimates.COST_DEEPSEEK
 COST_OTHER = (
     "not estimated for this AI service; live token counts are shown while the "
     "study runs. You pay the service directly."

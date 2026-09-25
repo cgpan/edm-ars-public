@@ -406,6 +406,22 @@ def test_reviewer_asks_for_a_deepseek_key_even_with_another_service(fx: Fakes) -
     assert "differ by about 2 points" in fx.ui.output
 
 
+def test_reviewer_quotes_the_same_price_as_the_confirmation_card(fx: Fakes) -> None:
+    import re
+
+    from edmars import estimates, study
+
+    fx.ui.script = ["manual", "skip"]
+    assert run("reviewer") == 0
+    flat = " ".join(fx.ui.output.split())
+    assert estimates.REVIEW_COST_DEEPSEEK in flat
+    assert "US$0.05 per review" not in flat
+    # Six reviews at the quoted price fit inside the card's whole-study range.
+    most_reviews = float(re.findall(r"US\$([\d.]+) in all", estimates.REVIEW_COST_DEEPSEEK)[0])
+    top = float(re.findall(r"US\$[\d.]+-([\d.]+)", study.COST_DEEPSEEK)[0])
+    assert most_reviews < top
+
+
 def test_reviewer_stays_off_without_a_deepseek_key(fx: Fakes) -> None:
     fx.write_settings(provider="openai")
     fx.ui.script = ["manual", "skip"]
