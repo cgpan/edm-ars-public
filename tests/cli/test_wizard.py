@@ -541,6 +541,32 @@ def test_openai_needs_a_model_because_none_is_shipped(fx: Fakes) -> None:
     assert "EDM-ARS will use OpenAI" in fx.ui.output
 
 
+def test_openai_model_list_offers_text_models_newest_first_with_no_default(fx: Fakes) -> None:
+    # GET /v1/models lists every model the account can reach. Sorted A-Z and
+    # cut at 40, the old menu pre-selected babbage-002 for every step and cut
+    # off the gpt-5 models the prompt told people to pick.
+    listed = ["babbage-002", "chatgpt-4o-latest", "dall-e-2", "dall-e-3", "davinci-002", "gpt-3.5-turbo",
+              "gpt-3.5-turbo-0125", "gpt-4", "gpt-4-0613", "gpt-4.1", "gpt-4o", "gpt-4o-2024-08-06",
+              "gpt-4o-audio-preview", "gpt-4o-mini", "gpt-4o-mini-tts", "gpt-4o-realtime-preview",
+              "gpt-4o-search-preview", "gpt-4o-transcribe", "gpt-5", "gpt-5-mini", "gpt-5.1", "gpt-image-1",
+              "o1", "o3", "o3-mini", "o4-mini", "omni-moderation-latest", "text-embedding-3-large",
+              "text-embedding-3-small", "tts-1", "whisper-1"]
+    listed += [f"ft:gpt-3.5-turbo:example-org:tuned-{i}" for i in range(40)]
+    fx.providers.results[OTHER_KEY] = KeyCheck("OK", "key accepted", models=listed)
+    fx.ui.script = ["openai", "paste", OTHER_KEY, "gpt-5"]
+    assert run("ai") == 0
+    assert set(fx.saved()["models"].values()) == {"gpt-5"}
+    message, choices = next((m, c) for kind, m, c in fx.ui.prompts if m.startswith("Which OpenAI model"))
+    assert fx.ui.defaults[message] is None
+    offered = [value for value, _ in choices or []]
+    assert offered[0] == "gpt-5.1" and {"gpt-5", "gpt-5-mini", "gpt-4o", "o3"} <= set(offered)
+    for unusable in ("babbage-002", "davinci-002", "dall-e-3", "tts-1", "whisper-1", "gpt-image-1",
+                     "text-embedding-3-large", "omni-moderation-latest", "gpt-4o-realtime-preview",
+                     "gpt-4o-transcribe", "gpt-4o-search-preview", "gpt-4o-audio-preview"):
+        assert unusable not in offered
+    assert "__type__" in offered
+
+
 def test_noninteractive_openai_without_a_model_fails(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", OTHER_KEY)
     code = run(non_interactive=True, options={"accept_disclosure": True, "provider": "openai"})

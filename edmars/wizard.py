@@ -278,6 +278,35 @@ def _clean_key(text: str) -> str:
     return key
 
 
+#: Parts of a model id that mark a model the pipeline cannot use: a
+#: service's model list (OpenAI's especially) also holds embedding,
+#: speech, image, moderation and old completion-only models.
+_NON_TEXT_MODEL_MARKERS: tuple[str, ...] = (
+    "embed", "tts", "whisper", "dall-e", "image", "sora", "babbage", "davinci", "moderation",
+    "realtime", "audio", "transcribe", "search", "computer-use",
+)
+
+#: A dated snapshot suffix: -2024-08-06, -20250929, -0613.
+_SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4})$")
+
+
+def _model_order(model_id: str) -> tuple[bool, tuple[int, int, int], str]:
+    """Sort key putting higher version numbers first (gpt-5.1 before gpt-4o,
+    claude-sonnet-4-5 before claude-3-7-sonnet), then the name. The
+    account's own fine-tuned models ("ft:...") come after the base ones."""
+    base = _SNAPSHOT_SUFFIX.sub("", model_id.lower())
+    numbers = [int(n) for n in re.findall(r"\d+", base)[:3]]
+    numbers += [0] * (3 - len(numbers))
+    return base.startswith("ft:"), (-numbers[0], -numbers[1], -numbers[2]), model_id
+
+
+def _chat_models(model_ids: Sequence[str]) -> list[str]:
+    """The ids worth offering as the model for every step: text models
+    only, newest-looking first, so a cut-off list keeps the strong ones."""
+    keep = {m for m in model_ids if m and not any(mark in m.lower() for mark in _NON_TEXT_MODEL_MARKERS)}
+    return sorted(keep, key=_model_order)
+
+
 def _normalize_rscript(path: Path) -> Path | None:
     """Accept Rscript itself, R's ``bin`` folder, the R install folder, or ``R.exe``."""
     exe = "Rscript.exe" if os.name == "nt" else "Rscript"
@@ -808,10 +837,12 @@ class _Wizard:
         self.info(f"EDM-ARS has no recommended {label} models, so choose the one every step will use. Pick "
                   "the strongest model your account offers: the steps that write analysis code depend on it. "
                   "You can choose a model per step later in `edmars setup advanced`.")
-        available = sorted(self.last_models or [])
+        available = _chat_models(self.last_models or [])
         if available:
             shown = [(m, m) for m in available[:40]] + [("__type__", "Type a model name")]
-            pick = self.choose(f"Which {label} model should EDM-ARS use?", shown, default=shown[0][0], back=False)
+            # No default: Enter alone must not pick a model for every step.
+            pick = self.choose(f"Which {label} model should EDM-ARS use? (Newest first; models that "
+                               "cannot write text are not listed.)", shown, explicit=True, back=False)
             model = pick if pick != "__type__" else self.ask_text("Model name")
         else:
             model = self.ask_text(f"Model name (as {label} lists it)")
