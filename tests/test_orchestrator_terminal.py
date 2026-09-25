@@ -4,8 +4,8 @@ Covers the orchestrator side of the release-honesty and resilience
 repairs: run_status.json at every terminal state (B3), a gate that did not
 run reported as such (B2), no PDF without a pdflatex log (B1), abort codes,
 resuming an aborted or interrupted run (D3), checkpoint atomicity and
-identity (D1, D2), the live event stream (D8) and the literature
-status (E9).
+identity (D1, D2), concurrent findings-memory writes (D7), the live event
+stream (D8) and the literature status (E9).
 
 Every test stubs the agents and the LaTeX compile, so nothing here calls a
 provider or needs TeX installed.
@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -878,3 +879,88 @@ def test_checkpoint_round_trip_restores_every_field(tmp_path: Path) -> None:
     for k, v in sentinels.items():
         assert getattr(again.ctx, k) == v, k
     assert again.ctx.current_state == PipelineState.ENGINEERING
+
+
+# ---------------------------------------------------------------------------
+# D7 -- the shared findings memory
+# ---------------------------------------------------------------------------
+
+
+def test_overlapping_runs_both_reach_the_findings_memory(tmp_path: Path) -> None:
+    """Both runs load the memory before either saves; the second save used
+    to overwrite the first run's entry."""
+    cfg = _config(tmp_path)
+    a = _orch(tmp_path / "run_a", cfg)
+    b = _orch(tmp_path / "run_b", cfg)
+    _wire(a)
+    _wire(b)
+    a.run()
+    b.run()
+
+    import yaml
+
+    mem = yaml.safe_load(
+        (tmp_path / "memory" / "memory.yaml").read_text(encoding="utf-8")
+    )
+    ids = {r["run_id"] for r in mem["runs"]}
+    assert {"run_a", "run_b"} <= ids
+    assert not (tmp_path / "memory" / "memory.yaml.lock").exists()
+
+
+def test_a_resumed_abort_is_one_memory_entry_not_two(tmp_path: Path) -> None:
+    """The abort writes an entry; the resumed run's outcome replaces it."""
+    cfg = _config(tmp_path)
+    run = tmp_path / "run_x"
+    first = _orch(run, cfg)
+    _wire(first)
+
+    def flaky(**_kw: Any) -> dict:
+        raise ProviderError("NETWORK", "connection reset")
+
+    first.data_engineer.run = flaky
+    first.run()
+
+    second = _orch(run, cfg)
+    _wire(second)
+    assert second.run().current_state == PipelineState.COMPLETED
+
+    import yaml
+
+    mem = yaml.safe_load(
+        (tmp_path / "memory" / "memory.yaml").read_text(encoding="utf-8")
+    )
+    entries = [r for r in mem["runs"] if r["run_id"] == "run_x"]
+    assert len(entries) == 1
+    assert entries[0]["verdict"] == "PASS"
+
+
+def test_a_held_lock_skips_the_memory_update_instead_of_racing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("src.orchestrator._FINDINGS_LOCK_TIMEOUT_S", 0.2)
+    cfg = _config(tmp_path)
+    (tmp_path / "memory").mkdir()
+    lock = tmp_path / "memory" / "memory.yaml.lock"
+    lock.write_text("12345\n", encoding="utf-8")  # a live holder
+    orch = _orch(tmp_path / "run", cfg)
+    _wire(orch)
+    orch.run()
+
+    assert lock.exists()  # someone else's lock is left alone
+    assert not (tmp_path / "memory" / "memory.yaml").exists()
+    log = (tmp_path / "run" / "pipeline.log").read_text(encoding="utf-8")
+    assert "FindingsMemory update skipped" in log
+
+
+def test_a_stale_lock_is_broken(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    (tmp_path / "memory").mkdir()
+    lock = tmp_path / "memory" / "memory.yaml.lock"
+    lock.write_text("99999\n", encoding="utf-8")
+    old = datetime(2020, 1, 1).timestamp()
+    os.utime(lock, (old, old))
+    orch = _orch(tmp_path / "run", cfg)
+    _wire(orch)
+    orch.run()
+    assert (tmp_path / "memory" / "memory.yaml").exists()
+    assert not lock.exists()

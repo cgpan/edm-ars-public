@@ -7,9 +7,10 @@ import os
 import shutil
 import time
 import warnings
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from src import events
 from src.agents.analyst import Analyst
@@ -261,6 +262,10 @@ _STAGE_PLAIN: dict[str, str] = {
 #: state, reason_code, abort, gate, literature, run_id and written_at.
 RUN_STATUS_SCHEMA = 2
 
+#: How long a finishing run waits for another run's findings-memory
+#: write before giving up on its own (non-fatal) update.
+_FINDINGS_LOCK_TIMEOUT_S = 30.0
+
 #: Words a failure uses when the file it wanted is not there.
 _MISSING_FILE_MARKERS = (
     "FileNotFoundError",
@@ -465,6 +470,57 @@ def _atomic_write_text(path: str, text: str) -> None:
                 pass
 
 
+def _acquire_lock(path: str, timeout_s: float, stale_s: float) -> Optional[int]:
+    """Create ``path`` exclusively. Returns the fd, -1 when locking is not
+    possible here (proceed unlocked), or None on timeout."""
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    except OSError:
+        return -1
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+            except OSError:
+                pass
+            return fd
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(path) > stale_s:
+                    # A holder that died without cleaning up.
+                    os.remove(path)
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.1)
+        except OSError:
+            return -1
+
+
+@contextmanager
+def _exclusive_lock(
+    path: str, timeout_s: float = 30.0, stale_s: float = 300.0
+) -> Iterator[bool]:
+    """A lock file next to a shared resource. Yields False on timeout."""
+    fd = _acquire_lock(path, timeout_s, stale_s)
+    try:
+        yield fd is not None
+    finally:
+        if fd is not None and fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
 def _remove_stale_compile_outputs(output_dir: str) -> None:
     """Drop the previous compile's PDF and log before compiling again.
 
@@ -565,6 +621,7 @@ class Orchestrator:
         self._last_status: Optional[dict] = None
         self._stage_clock: Optional[tuple[str, int, float]] = None
         self._resumed = False
+        self._findings_memory_path: Optional[str] = None
 
         os.makedirs(ctx.output_dir, exist_ok=True)
         # Live side channel (events.jsonl + live_status.json). Attached
@@ -611,6 +668,7 @@ class Orchestrator:
         if fm_cfg.get("enabled", False):
             try:
                 mem_path = fm_cfg.get("path", "findings_memory/memory.yaml")
+                self._findings_memory_path = mem_path
                 self.findings_memory = FindingsMemory.load(mem_path)
             except Exception as exc:
                 self.findings_memory = None
@@ -2768,8 +2826,46 @@ class Orchestrator:
                 runtime_minutes=runtime_minutes,
                 api_cost_usd=None,
             )
-            self.findings_memory.add_run(entry)
-            self.findings_memory.save()
+            # Every run reads memory.yaml when it starts and writes its
+            # whole copy back when it ends, so two overlapping runs used to
+            # lose the first finisher's entry, and two saves racing on the
+            # fixed memory.yaml.tmp could interleave into invalid YAML
+            # (which the next load silently treats as empty). Serialise
+            # the write and re-read the file under the lock (D7).
+            mem_path = self._findings_memory_path or getattr(
+                self.findings_memory, "path", None
+            )
+            if not mem_path:
+                self.findings_memory.runs = [
+                    r for r in self.findings_memory.runs if r.run_id != run_id
+                ]
+                self.findings_memory.add_run(entry)
+                self.findings_memory.save()
+            else:
+                with _exclusive_lock(
+                    mem_path + ".lock", timeout_s=_FINDINGS_LOCK_TIMEOUT_S
+                ) as locked:
+                    if not locked:
+                        self._log(
+                            "Orchestrator",
+                            "FindingsMemory update skipped: another run held "
+                            f"{mem_path}.lock for {_FINDINGS_LOCK_TIMEOUT_S:.0f}s "
+                            "(non-fatal)",
+                        )
+                        return
+                    fresh = FindingsMemory.load(mem_path)
+                    if not fresh.runs and self.findings_memory.runs:
+                        # The file became unreadable since this run
+                        # started; do not overwrite the history this run
+                        # still holds with a near-empty file.
+                        fresh = self.findings_memory
+                    # A run resumed after an abort reaches this point a
+                    # second time; its later outcome replaces the entry the
+                    # abort wrote instead of counting the run twice.
+                    fresh.runs = [r for r in fresh.runs if r.run_id != run_id]
+                    fresh.add_run(entry)
+                    fresh.save()
+                    self.findings_memory = fresh
             self._log("Orchestrator", f"FindingsMemory updated: {run_id}")
         except Exception as exc:
             self._log("Orchestrator", f"FindingsMemory update failed (non-fatal): {exc}")
