@@ -204,7 +204,7 @@ def _function_probe(calls: str) -> str:
     wanted = ", ".join(
         f"'{name}'"
         for name in ("Test-UnderPath", "Merge-UserPath", "ConvertTo-CmdPath",
-                     "Get-SyncProvider", "Test-Excluded")
+                     "Get-SyncProvider", "Test-Excluded", "Get-Download")
     )
     return f"""
 $tokens = $null; $errors = $null
@@ -337,6 +337,34 @@ def test_ps1_refuses_bad_input_before_changing_anything(tmp_path: Path) -> None:
         assert result.returncode != 0
         assert "too long for Windows" in result.stdout
         assert not too_long.exists()
+
+
+@pytest.mark.skipif(not (ON_WINDOWS and POWERSHELL), reason="Windows PowerShell only")
+def test_ps1_downloads_only_over_https(tmp_path: Path) -> None:
+    # install.sh refuses plain http (curl --proto '=https'); install.ps1
+    # used to fetch SHA256SUMS and the archive over it, so the fingerprint
+    # check proved nothing.
+    dest = str(tmp_path / "sums").replace("'", "''")
+    calls = f"""
+try {{ Get-Download 'http://127.0.0.1:9/SHA256SUMS' '{dest}'; $out.http = 'downloaded' }}
+catch {{ $out.http = $_.Exception.Message }}
+"""
+    result = _powershell(_function_probe(calls), tmp_path)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert "only https://" in out["http"]
+    assert not (tmp_path / "sums").exists()
+
+    base = tmp_path / "base"
+    result = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(INSTALL_PS1), "-DryRun", "-Dir", str(base), "-BinDir", str(tmp_path / "bin")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
+        env=_clean_env(tmp_path, EDMARS_RELEASE_BASE_URL="http://127.0.0.1:9/dist"),
+    )
+    assert result.returncode != 0
+    assert "must start with https://" in result.stdout
+    assert not base.exists()
 
 
 def _long_paths_enabled() -> bool:

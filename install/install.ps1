@@ -158,11 +158,15 @@
 
     # Download URL to DEST. A file:// URL or a plain path is copied, which
     # lets EDMARS_RELEASE_BASE_URL point at a local dist\ folder for testing.
+    # Only https:// is downloaded, as in install.sh: over plain http:// the
+    # archive and its SHA256SUMS could both be swapped on the way.
     function Get-Download([string]$Url, [string]$Dest) {
         if ($Url -match '^file:') {
             Copy-Item -LiteralPath ([uri]$Url).LocalPath -Destination $Dest -Force
-        } elseif ($Url -match '^https?://') {
+        } elseif ($Url -match '^https://') {
             Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+        } elseif ($Url -match '^[A-Za-z][A-Za-z0-9+.-]*://') {
+            throw "only https:// addresses are downloaded, not $Url"
         } else {
             Copy-Item -LiteralPath $Url -Destination $Dest -Force
         }
@@ -431,6 +435,9 @@
             $ver = $requested
             if ($env:EDMARS_RELEASE_BASE_URL) {
                 $releaseBase = $env:EDMARS_RELEASE_BASE_URL.TrimEnd('/')
+                if (($releaseBase -match '^[A-Za-z][A-Za-z0-9+.-]*://') -and ($releaseBase -notmatch '^(https://|file:)')) {
+                    Stop-Install "EDMARS_RELEASE_BASE_URL must start with https:// (or be a local folder or a file:// address). A download over plain http:// could be altered on the way, so nothing was downloaded."
+                }
             } elseif ($requested) {
                 $releaseBase = "https://github.com/$EdmarsRepo/releases/download/v$requested"
             } else {
