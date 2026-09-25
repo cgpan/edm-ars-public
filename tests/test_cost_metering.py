@@ -30,6 +30,9 @@ from src.cost import (
     write_summary,
 )
 
+# Synthetic rates keyed by arbitrary model ids. "deepseek-v4-flash" is
+# the retired flash id, used here only as a name for a cheaper tier;
+# the shipped config prices and routes to "deepseek-flash".
 PRICING = {
     "deepseek-v4-pro": {"input": 0.28, "cached_input": 0.028, "output": 0.42},
     "deepseek-v4-flash": {"input": 0.07, "cached_input": 0.007, "output": 0.28},
@@ -299,3 +302,64 @@ class TestRedundantRecord:
 
         (tmp_path / "checkpoint.json").write_text("{ broken", encoding="utf-8")
         assert load_usage_from_checkpoint(str(tmp_path)) == []
+
+
+class TestUnpricedAndUnverifiedRates:
+    """E5: an unpriced entry in the breakdowns read as $0.00, and a rate
+    nobody had checked read exactly like a measured one."""
+
+    def test_unpriced_breakdown_entries_are_none_not_zero(self) -> None:
+        us = [
+            TokenUsage("writer", "deepseek-v4-pro", "d", 1_000, 1_000),
+            TokenUsage("critic", "claude-opus-4-6", "a", 1_000, 1_000),
+        ]
+        s = summarize(us, PRICING)
+        assert s.by_model["claude-opus-4-6"]["cost_usd"] is None
+        assert s.by_model["claude-opus-4-6"]["unpriced_calls"] == 1
+        assert s.by_agent["critic"]["cost_usd"] is None
+        assert s.by_agent["writer"]["cost_usd"] == cost_usd(us[0], PRICING)
+        assert s.cost_usd == cost_usd(us[0], PRICING)
+        assert s.unpriced_calls == 1
+        assert s.cost_status == "partial"
+
+    def test_mixed_entry_keeps_its_priced_part_and_counts_the_gap(self) -> None:
+        us = [
+            TokenUsage("writer", "deepseek-v4-pro", "d", 1_000, 0),
+            TokenUsage("writer", "mystery", "d", 1_000, 0),
+        ]
+        entry = summarize(us, PRICING).by_agent["writer"]
+        assert entry["cost_usd"] == cost_usd(us[0], PRICING)
+        assert entry["unpriced_calls"] == 1
+
+    def test_fully_verified_run_is_measured(self) -> None:
+        s = summarize([TokenUsage("w", "deepseek-v4-pro", "d", 10, 10)], PRICING)
+        assert s.cost_status == "measured"
+        assert s.unverified_rate_models == []
+
+    def test_unverified_rate_makes_the_cost_an_estimate(self, tmp_path: Path) -> None:
+        pricing = {
+            **PRICING,
+            "deepseek-flash": {"input": 0.07, "cached_input": 0.007,
+                               "output": 0.28, "unverified": True},
+        }
+        record_usage(str(tmp_path), TokenUsage("outline_agent", "deepseek-flash", "d", 1_000, 100))
+        record_usage(str(tmp_path), TokenUsage("writer", "deepseek-v4-pro", "d", 1_000, 100))
+        payload = write_summary(str(tmp_path), {"pricing": {"per_million_tokens": pricing}})
+        assert payload["cost_usd"] is not None
+        assert payload["cost_status"] == "estimated"
+        assert payload["unverified_rate_models"] == ["deepseek-flash"]
+        assert "ESTIMATE" in payload["note"]
+
+    def test_verified_false_is_the_same_flag(self) -> None:
+        from src.cost import rate_is_unverified
+
+        assert rate_is_unverified({"input": 1, "verified": False})
+        assert rate_is_unverified({"input": 1, "unverified": True})
+        assert not rate_is_unverified({"input": 1})
+        assert not rate_is_unverified(None)
+
+    def test_flag_keys_do_not_change_the_price(self) -> None:
+        flagged = {"m": {"input": 1.0, "output": 2.0, "unverified": True}}
+        plain = {"m": {"input": 1.0, "output": 2.0}}
+        u = TokenUsage("a", "m", "d", 1_000_000, 1_000_000)
+        assert cost_usd(u, flagged) == cost_usd(u, plain) == 3.0

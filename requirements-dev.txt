@@ -1,0 +1,10 @@
+# Development tools: the test suite, lint and type checks.
+# Install on top of the runtime requirements:
+#   pip install -r requirements.txt -r requirements-dev.txt
+pytest>=7.4
+ruff>=0.5
+mypy>=1.8
+types-PyYAML          # type stubs so `mypy src/` can check yaml calls
+types-requests        # type stubs so `mypy src/` can check requests calls
+# Only for generate_tier2.py when the input is an SPSS file (.sav/.zsav).
+pyreadstat>=1.2

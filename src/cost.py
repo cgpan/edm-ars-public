@@ -111,7 +111,8 @@ def load_pricing(config: dict) -> dict:
           currency: USD
           per_million_tokens:
             deepseek-v4-pro:   {input: 0.28, cached_input: 0.028, output: 0.42}
-            deepseek-v4-flash: {input: 0.07, cached_input: 0.007, output: 0.28}
+            deepseek-flash:    {input: 0.07, cached_input: 0.007, output: 0.28,
+                                verified: false}
 
     Returns an empty dict when unconfigured, which makes every cost
     ``None`` — deliberately. A missing rate must surface as "not priced",
@@ -139,6 +140,22 @@ def load_pricing(config: dict) -> dict:
         return (base.get("pricing") or {}).get("per_million_tokens") or {}
     except Exception:  # noqa: BLE001 — unpriced is a valid outcome
         return {}
+
+
+def rate_is_unverified(rates: Any) -> bool:
+    """True when a pricing entry is flagged as not checked against the
+    provider's price list (``unverified: true`` or ``verified: false``).
+
+    Such a rate still prices the call -- the figure is the best available
+    -- but everything built from it is labelled an ESTIMATE, never a
+    measured cost (defect E5: the flash tier's rates were carried over
+    from a retired model id and would otherwise read as fact).
+    """
+    if not isinstance(rates, dict):
+        return False
+    if rates.get("unverified"):
+        return True
+    return rates.get("verified") is False
 
 
 def cost_usd(usage: TokenUsage, pricing: dict) -> Optional[float]:
@@ -255,6 +272,19 @@ class CostSummary:
     #: cost_usd covers only PART of the run and must be reported as a
     #: lower bound.
     unpriced_models: list = field(default_factory=list)
+    #: Models priced from a rate flagged unverified in config.yaml. A
+    #: non-empty list makes cost_usd an ESTIMATE.
+    unverified_rate_models: list = field(default_factory=list)
+    #: Calls with no configured rate (their tokens are in the totals,
+    #: their dollars are not).
+    unpriced_calls: int = 0
+    #: "measured" (every call priced from a verified rate), "estimated"
+    #: (some rate is unverified), "partial" (some calls unpriced) or
+    #: "unpriced" (no call priced). "partial" wins over "estimated".
+    cost_status: str = "unpriced"
+    #: Per-agent / per-model breakdowns. Each entry's ``cost_usd`` is None
+    #: when none of its calls could be priced -- never a silent 0.0 --
+    #: and ``unpriced_calls`` says how many of its calls are missing.
     by_agent: dict = field(default_factory=dict)
     by_model: dict = field(default_factory=dict)
 
@@ -265,6 +295,14 @@ def summarize(usages: list[TokenUsage], pricing: dict) -> CostSummary:
     priced_total = 0.0
     any_priced = False
     unpriced: set[str] = set()
+    unverified: set[str] = set()
+
+    def _add(entry: dict, c: Optional[float]) -> None:
+        if c is None:
+            entry["unpriced_calls"] += 1
+        else:
+            entry["cost_usd"] = (entry["cost_usd"] or 0.0) + c
+
     for u in usages:
         s.prompt_tokens += u.prompt_tokens
         s.completion_tokens += u.completion_tokens
@@ -272,26 +310,43 @@ def summarize(usages: list[TokenUsage], pricing: dict) -> CostSummary:
         c = cost_usd(u, pricing)
         if c is None:
             unpriced.add(u.model)
+            s.unpriced_calls += 1
         else:
             any_priced = True
             priced_total += c
+            if rate_is_unverified((pricing or {}).get(u.model)):
+                unverified.add(u.model)
         agent = s.by_agent.setdefault(
             u.agent, {"n_calls": 0, "prompt_tokens": 0,
-                      "completion_tokens": 0, "cost_usd": 0.0}
+                      "completion_tokens": 0, "cost_usd": None,
+                      "unpriced_calls": 0}
         )
         agent["n_calls"] += 1
         agent["prompt_tokens"] += u.prompt_tokens
         agent["completion_tokens"] += u.completion_tokens
-        agent["cost_usd"] += c or 0.0
+        _add(agent, c)
         model = s.by_model.setdefault(
-            u.model, {"n_calls": 0, "total_tokens": 0, "cost_usd": 0.0}
+            u.model, {"n_calls": 0, "total_tokens": 0, "cost_usd": None,
+                      "unpriced_calls": 0}
         )
         model["n_calls"] += 1
         model["total_tokens"] += u.total_tokens
-        model["cost_usd"] += c or 0.0
+        _add(model, c)
+    for entry in list(s.by_agent.values()) + list(s.by_model.values()):
+        if entry["cost_usd"] is not None:
+            entry["cost_usd"] = round(entry["cost_usd"], 6)
     s.total_tokens = s.prompt_tokens + s.completion_tokens
     s.cost_usd = round(priced_total, 6) if any_priced else None
     s.unpriced_models = sorted(unpriced)
+    s.unverified_rate_models = sorted(unverified)
+    if not any_priced:
+        s.cost_status = "unpriced"
+    elif unpriced:
+        s.cost_status = "partial"
+    elif unverified:
+        s.cost_status = "estimated"
+    else:
+        s.cost_status = "measured"
     return s
 
 
@@ -311,6 +366,18 @@ def write_summary(output_dir: str, config: dict) -> Optional[dict]:
         "those counts multiplied by the configured rate; if rates change, "
         "re-price from the raw counts rather than re-running."
     )
+    if summary.unverified_rate_models:
+        payload["note"] += (
+            " cost_usd is an ESTIMATE: the configured rate for "
+            + ", ".join(summary.unverified_rate_models)
+            + " is marked unverified in config.yaml pricing."
+        )
+    if summary.unpriced_models:
+        payload["note"] += (
+            " cost_usd is a LOWER BOUND: no rate is configured for "
+            + ", ".join(summary.unpriced_models)
+            + ", so those calls are counted in tokens but not in dollars."
+        )
     try:
         with open(
             os.path.join(output_dir, SUMMARY_FILENAME), "w", encoding="utf-8"

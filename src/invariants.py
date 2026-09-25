@@ -2376,6 +2376,85 @@ _FATAL_LATEX = (
     "Fatal error occurred",
 )
 
+#: An undefined citation as the kernel, natbib and biblatex actually print
+#: it. All three put "on page N" between the key and "undefined"::
+#:
+#:     LaTeX Warning: Citation `foo2020' on page 1 undefined on input line 3.
+#:     Package natbib Warning: Citation `foo2020' on page 1 undefined on ...
+#:     LaTeX Warning: Citation 'foo2020' on page 1 undefined on input line 5.
+#:
+#: (the last one is biblatex, which opens with a straight quote). The
+#: pattern this replaced required "' undefined" straight after the key,
+#: matched none of them, and so never fired on a real log: a PDF full of
+#: [?] was released as clean. "on page N" stays optional for the
+#: pre-2.09-style message some classes still emit.
+_UNDEFINED_CITATION = re.compile(
+    r"Citation [`']([^'\s]+)' (?:on page \S+ )?undefined"
+)
+#: Older biblatex reports a key missing from the .bib this way, over
+#: several ``(biblatex)``-prefixed continuation lines.
+_BIBLATEX_MISSING_ENTRY = re.compile(
+    r"The following entry could not be found\s*\n\(biblatex\)\s+in the "
+    r"database:\s*\n\(biblatex\)\s+(\S+)"
+)
+#: TeX hard-wraps its log at ``max_print_line`` (79 in TeX Live and
+#: MiKTeX), so a long citation key arrives split across two lines.
+_TEX_LOG_LINE_WIDTH = 79
+
+
+def _unwrap_tex_log(log: str) -> str:
+    """Rejoin lines TeX split at the log width, so a pattern can see a
+    warning whole. A line exactly as wide as the limit is a wrapped one;
+    joining the rare genuine 79-character line to its successor only
+    concatenates text and cannot manufacture a match."""
+    out: list[str] = []
+    carry = ""
+    for line in log.splitlines():
+        if len(line) >= _TEX_LOG_LINE_WIDTH:
+            carry += line
+            continue
+        out.append(carry + line)
+        carry = ""
+    if carry:
+        out.append(carry)
+    return "\n".join(out)
+
+
+def _undefined_citations(log: str) -> list[str]:
+    """Keys the final LaTeX pass reported as undefined, in log order."""
+    text = _unwrap_tex_log(log)
+    keys = _UNDEFINED_CITATION.findall(text)
+    keys += _BIBLATEX_MISSING_ENTRY.findall(text)
+    return keys
+
+
+def _no_log_compile_record(a: "RunArtifacts") -> dict:
+    """What ``latex_compile.json`` says about a compile that left no log.
+
+    The orchestrator writes that file after every compile; it is the only
+    place the reason survives when pdflatex never started (not installed,
+    not on PATH) and so never wrote ``paper.log``.
+    """
+    record = a.json("latex_compile.json")
+    if not isinstance(record, dict):
+        return {}
+    raw_steps = record.get("steps")
+    steps: list = raw_steps if isinstance(raw_steps, list) else []
+    first_bad = next(
+        (
+            s
+            for s in steps
+            if isinstance(s, dict) and s.get("returncode") not in (0, 1)
+        ),
+        None,
+    )
+    return {
+        "missing_tool": record.get("missing_tool"),
+        "failed_step": (first_bad or {}).get("cmd") or record.get("failed_step"),
+        "stderr": str((first_bad or {}).get("stderr") or "")[:300],
+        "returncode": (first_bad or {}).get("returncode"),
+    }
+
 
 def check_latex_compile_errors(a: RunArtifacts) -> list[Finding]:
     """Errors in the run's own LaTeX log.
@@ -2395,13 +2474,62 @@ def check_latex_compile_errors(a: RunArtifacts) -> list[Finding]:
     """
     log = a.text("paper.log")
     if not log:
-        return []
+        # No log is not the same as no compile. The orchestrator compiles
+        # every manuscript it writes; when pdflatex is not installed or
+        # not on PATH it never starts, writes neither paper.log nor
+        # paper.pdf, and this check used to return nothing -- so the one
+        # blocking code could not fire and a run with no PDF at all was
+        # released as clean. A manuscript with neither a log nor a PDF
+        # beside it is a deliverable that was not produced. A directory
+        # with no manuscript (an aborted run) or with a PDF (a log
+        # cleaned up afterwards) still claims nothing.
+        if a.paper_name is None or a.exists("paper.pdf"):
+            return []
+        record = _no_log_compile_record(a)
+        tool = record.get("missing_tool")
+        if tool:
+            why = (
+                f"{tool} was not found, so the compile never ran. Install a "
+                "TeX distribution (TeX Live, MiKTeX or MacTeX) and make sure "
+                f"{tool} is on the PATH this pipeline runs with."
+            )
+        elif record.get("failed_step"):
+            why = (
+                f"the compile step `{record['failed_step']}` failed "
+                f"(rc={record.get('returncode')}) before writing a log"
+                + (f": {record['stderr']}" if record.get("stderr") else ".")
+            )
+        else:
+            why = (
+                "pdflatex never ran or died before writing its log (is a "
+                "TeX distribution installed and pdflatex on PATH?)."
+            )
+        return [
+            Finding(
+                code="INV_LATEX_NO_PDF",
+                severity="critical",
+                message=(
+                    f"LaTeX did not produce a PDF: {a.paper_name} has no "
+                    f"paper.log and no paper.pdf beside it; {why}"
+                ),
+                artifact=a.paper_name,
+                evidence={
+                    "fatal_markers": [],
+                    "paper_pdf_present": False,
+                    "paper_log_present": False,
+                    "compile_ran": False,
+                    "missing_tool": tool,
+                    "failed_step": record.get("failed_step"),
+                    "errors": [],
+                },
+            )
+        ]
     errors = [
         ln.strip()
         for ln in log.splitlines()
         if ln.startswith("! ") or ln.startswith("!pdfTeX error")
     ]
-    undefined = re.findall(r"Citation `([^']+)' undefined", log)
+    undefined = _undefined_citations(log)
     unused_opts = re.findall(r"Unused global option\(s\):\s*\n?\s*\[([^\]]*)\]", log)
     out: list[Finding] = []
     markers = [m for m in _FATAL_LATEX if m in log]

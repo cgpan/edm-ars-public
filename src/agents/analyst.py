@@ -290,7 +290,12 @@ class Analyst(BaseAgent):
 
         # Execute with up to MAX_RETRIES retry attempts on failure
         for attempt in range(self.MAX_RETRIES + 1):
-            exec_result = self.execute_code(code, timeout_s=self._exec_timeout_s())
+            exec_result = self.execute_code_attempt(
+                code,
+                attempt=attempt + 1,
+                max_attempts=self.MAX_RETRIES + 1,
+                timeout_s=self._exec_timeout_s(),
+            )
             if exec_result["returncode"] == 0:
                 break
             if attempt == self.MAX_RETRIES:

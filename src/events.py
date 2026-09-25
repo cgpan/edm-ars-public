@@ -26,9 +26,27 @@ import json
 import os
 import threading
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable, Optional
 
 SCHEMA_VERSION = 1
+
+#: Called with each record after it is written, when set. The command
+#: line sets it to print a short progress line per stage, wait, retry and
+#: warning (D8: the console was otherwise silent for the whole run, which
+#: a first-time user cannot tell from a hang). Process-wide, like the
+#: console it writes to; errors in it are swallowed like every other part
+#: of this side channel.
+_echo: Optional[Callable[[dict[str, Any]], None]] = None
+
+
+def set_echo(
+    fn: Optional[Callable[[dict[str, Any]], None]],
+) -> Optional[Callable[[dict[str, Any]], None]]:
+    """Install *fn* as the console echo; return the previous one."""
+    global _echo
+    previous = _echo
+    _echo = fn
+    return previous
 
 #: The event types a reader should expect. Readers must still tolerate
 #: types that are not listed here.
@@ -109,7 +127,13 @@ class EventSink:
                     fh.write(line + "\n")
                 self._update_status(record)
         except Exception:  # noqa: BLE001 -- a UI side channel must never raise
-            pass
+            return
+        echo = _echo
+        if echo is not None:
+            try:
+                echo(record)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _update_status(self, record: dict[str, Any]) -> None:
         status = self._status

@@ -96,6 +96,24 @@ class TestFindingsMemoryLoad:
             mem = FindingsMemory.load(path)
             assert mem.runs == []
 
+    def test_corrupt_file_is_set_aside_not_overwritten(self) -> None:
+        """D7: a corrupt memory.yaml was read as empty and then replaced by
+        the next save, losing every earlier run without a trace."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "memory.yaml")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("runs: [unclosed\n  - {bad")
+            mem = FindingsMemory.load(path)
+            assert mem.runs == []
+            aside = [n for n in os.listdir(tmpdir) if n.startswith("memory.yaml.corrupt-")]
+            assert len(aside) == 1
+            with open(os.path.join(tmpdir, aside[0]), encoding="utf-8") as f:
+                assert f.read().startswith("runs: [unclosed")
+            mem.add_run(_make_entry())
+            mem.save()
+            assert len(FindingsMemory.load(path).runs) == 1
+            assert os.path.exists(os.path.join(tmpdir, aside[0]))
+
     def test_load_valid_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "memory.yaml")

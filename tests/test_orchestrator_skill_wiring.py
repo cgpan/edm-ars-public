@@ -135,7 +135,7 @@ class TestRenderSystemPrompt:
 
 class TestOrchestratorRegistry:
     def test_orchestrator_loads_skill_registry_at_init(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         # Import lazily so module-level Anthropic patches stay clean.
         from src.context import PipelineContext
@@ -144,7 +144,7 @@ class TestOrchestratorRegistry:
         ctx = PipelineContext(
             dataset_name="hsls09_public",
             raw_data_path="/nonexistent/raw.csv",
-            output_dir=str(Path.cwd() / "tmp_orch_test"),
+            output_dir=str(tmp_path),  # not the working directory: a run folder there was left behind by every test run
             task_type="prediction",
             max_revision_cycles=0,
         )
@@ -176,7 +176,7 @@ class TestOrchestratorRegistry:
         assert orch.skill_registry.count() == 70  # ... +assistments-conventions +natural-academic-prose (E2)
 
     def test_stage_context_for_analyst_pulls_expected_skills(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         from src.context import PipelineContext
         from src.orchestrator import Orchestrator
@@ -184,7 +184,7 @@ class TestOrchestratorRegistry:
         ctx = PipelineContext(
             dataset_name="hsls09_public",
             raw_data_path="/nonexistent/raw.csv",
-            output_dir=str(Path.cwd() / "tmp_orch_test2"),
+            output_dir=str(tmp_path),  # not the working directory: a run folder there was left behind by every test run
             task_type="prediction",
             max_revision_cycles=0,
         )

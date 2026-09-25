@@ -16,6 +16,7 @@ PDF, this module:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -23,8 +24,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
-
-import anthropic  # type: ignore[import-not-found]
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +189,61 @@ def _leading_title(text: str) -> Optional[str]:
     return None
 
 
+def _route_lsar_logging(log_file: Path) -> Optional[Path]:
+    """Keep LSAR's INFO chatter in ``log_file``, not on the run's console.
+
+    LSAR logs every stage at INFO from a couple of dozen loggers, several
+    hundred console lines per gate run that bury the pipeline's own
+    progress (G3). An LSAR that offers ``configure_logging`` (LSAR-public
+    fix/released-issues and later) gets a per-cycle ``lsar.log`` with the
+    full record, and its console handler is limited to warnings. An
+    operator who set LSAR_LOG_LEVEL or LSAR_QUIET keeps their choice for
+    the console. An older LSAR is left as it is. Returns the file that was
+    attached (for :func:`_detach_lsar_log_file`), or None. Never raises.
+    """
+    try:
+        from lsar.utils import logger as lsar_logger  # type: ignore[import-not-found]
+
+        configure = getattr(lsar_logger, "configure_logging", None)
+        if not callable(configure):
+            return None
+        root = configure(log_file=log_file)
+        operator_level = (
+            os.environ.get("LSAR_LOG_LEVEL", "").strip()
+            or os.environ.get("LSAR_QUIET", "").strip()
+        )
+        if not operator_level:
+            for handler in getattr(root, "handlers", []):
+                if (
+                    isinstance(handler, logging.StreamHandler)
+                    and not isinstance(handler, logging.FileHandler)
+                    and handler.level < logging.WARNING
+                ):
+                    handler.setLevel(logging.WARNING)
+        return log_file
+    except Exception:  # noqa: BLE001 - logging must never stop a review
+        return None
+
+
+def _detach_lsar_log_file(log_file: Optional[Path]) -> None:
+    """Remove the file handler :func:`_route_lsar_logging` attached, so a
+    later cycle's records do not also land in this cycle's lsar.log."""
+    if log_file is None:
+        return
+    target = os.path.abspath(str(log_file))
+    lsar_root_logger = logging.getLogger("lsar")
+    for handler in list(lsar_root_logger.handlers):
+        if (
+            isinstance(handler, logging.FileHandler)
+            and os.path.abspath(handler.baseFilename) == target
+        ):
+            lsar_root_logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 class ReviewGate:
     """LSAR-powered quality gate for EDM-ARS papers."""
 
@@ -277,46 +331,73 @@ class ReviewGate:
         self.revision_model: str = rg_cfg.get("revision_model", "claude-sonnet-4-6")
         self.revision_max_tokens: int = rg_cfg.get("revision_max_tokens", 16000)
 
-        # Build LLM client (same pattern as BaseAgent — respects llm_provider)
-        provider = config.get("llm_provider", "anthropic")
-        self._llm_provider: str = provider
-        if provider == "minimax":
-            api_key = os.environ.get("MINIMAX_API_KEY", "")
-            base_url = config.get("minimax", {}).get(
-                "base_url", "https://api.minimax.io/anthropic"
-            )
-            self._llm_client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
-            minimax_models = config.get("minimax", {}).get("models", {})
-            self._llm_model = minimax_models.get(
-                "revision_writer", minimax_models.get("writer", "MiniMax-M2.7")
-            )
-        elif provider in ("deepseek", "openai"):
-            # OpenAI-compatible chat.completions path. Model resolution:
-            # <provider>.models.revision_writer wins (per-agent tiering),
-            # then review_gate.revision_model.
-            import openai  # deferred: anthropic-only envs need not install it
+        # Build the reviser's LLM client through the same code path as the
+        # agents (src/agents/llm_client.py): same base-URL precedence, same
+        # key checks, same timeout and retry policy (E3/D5). The model is
+        # resolved by provider_resolver.resolve_revision_writer:
+        #   per_stage_providers.revision_writer
+        #   -> <provider>.models.revision_writer
+        #   -> <provider>.models.writer            (models.* for anthropic)
+        #   -> review_gate.revision_model          (deepseek ONLY)
+        #   -> provider default (deepseek, minimax)
+        # review_gate.revision_model ships as a DeepSeek id; it used to be
+        # sent to OpenAI / Anthropic / a local server too, where every
+        # revision failed with model-not-found and the gate re-reviewed an
+        # unrevised manuscript (E2).
+        from src.agents.llm_client import LLMSettings, build_client, llm_settings
+        from src.agents.provider_resolver import (
+            ProviderConfig,
+            ProviderConfigError,
+            resolve_revision_writer,
+        )
 
-            provider_block = config.get(provider, {}) or {}
-            if provider == "deepseek":
-                api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-                base_url = provider_block.get(
-                    "base_url", "https://api.deepseek.com"
+        self._llm_client: Any = None
+        #: Why revisions cannot run (None when they can). Read by the
+        #: summary so a gate that never revised says why.
+        self.revision_unavailable_reason: Optional[str] = None
+        #: One entry per failed revision call: {"code", "message"}.
+        self.revision_failures: list[dict] = []
+        # A malformed reviser setting disables revision (and says so); it
+        # must not take the LSAR review itself down with it.
+        try:
+            self._llm_provider_cfg = resolve_revision_writer(config)
+        except ProviderConfigError as exc:
+            self._llm_provider_cfg = ProviderConfig(
+                name=str(config.get("llm_provider", "anthropic")), model=""
+            )
+            self.revision_unavailable_reason = f"invalid reviser configuration: {exc}"
+        try:
+            self._llm_settings = llm_settings(config)
+        except ProviderConfigError as exc:
+            self._llm_settings = LLMSettings()
+            self.revision_unavailable_reason = (
+                self.revision_unavailable_reason or f"invalid llm settings: {exc}"
+            )
+        provider = self._llm_provider_cfg.name
+        self._llm_provider: str = provider
+        self._llm_model: str = self._llm_provider_cfg.model
+        if self.revision_unavailable_reason is None and not self._llm_model:
+            key = "models" if provider == "anthropic" else f"{provider}.models"
+            self.revision_unavailable_reason = (
+                f"no revision model configured for provider {provider!r}; set "
+                f"{key}.revision_writer (or {key}.writer) in config.yaml"
+            )
+        if self.revision_unavailable_reason is None:
+            try:
+                self._llm_client = build_client(
+                    self._llm_provider_cfg, self._llm_settings
                 )
-            else:
-                api_key = os.environ.get("OPENAI_API_KEY", "")
-                base_url = provider_block.get("base_url")
-            client_kwargs: dict = {"api_key": api_key}
-            if base_url:
-                client_kwargs["base_url"] = base_url
-            self._llm_client = openai.OpenAI(**client_kwargs)
-            provider_models = provider_block.get("models", {}) or {}
-            self._llm_model = (
-                provider_models.get("revision_writer") or self.revision_model
+            except EnvironmentError as exc:
+                self.revision_unavailable_reason = str(exc)
+        if self.revision_unavailable_reason:
+            self._log(
+                f"Paper revision disabled: {self.revision_unavailable_reason}"
             )
         else:
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            self._llm_client = anthropic.Anthropic(api_key=api_key)
-            self._llm_model = self.revision_model
+            self._log(
+                f"Revision model: {provider}/{self._llm_model} "
+                f"(from {self._llm_provider_cfg.model_key or 'provider default'})"
+            )
 
     # ------------------------------------------------------------------
     # Internal logging helper
@@ -532,6 +613,7 @@ class ReviewGate:
                 try:
                     proc = subprocess.run(c, cwd=str(cwd),
                                           capture_output=True, text=True,
+                                          encoding="utf-8", errors="replace",
                                           timeout=timeout_s)
                 except Exception:
                     return False
@@ -543,6 +625,11 @@ class ReviewGate:
                     cwd=str(cwd),
                     capture_output=True,
                     text=True,
+                    # pdflatex writes UTF-8 or raw 8-bit bytes; the locale
+                    # codec (cp1252 on Windows) raised on the first byte it
+                    # could not map, which no handler here caught.
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout_s,
                 )
                 if proc.returncode not in (0, 1):
@@ -571,8 +658,12 @@ class ReviewGate:
         Returns ``None`` on any failure (LSAR crash, import error, etc.).
         """
         lsar_root = str(self.lsar_project_path)
+        # Why the last call returned None, for the gate summary: a gate
+        # that could not run must not read as a review that scored 0.
+        self._last_lsar_failure = None
         if not os.path.isdir(lsar_root):
             self._log(f"LSAR project path does not exist: {lsar_root}")
+            self._last_lsar_failure = f"lsar_not_found: {lsar_root}"
             return None
 
         cycle_dir = self.output_dir / "lsar_review" / f"cycle_{cycle}"
@@ -584,8 +675,11 @@ class ReviewGate:
             sys.path.insert(0, lsar_root)
             added_to_path = True
 
+        lsar_log_file: Optional[Path] = None
         try:
             from lsar.pipeline import LSARPipeline  # type: ignore[import-not-found]
+
+            lsar_log_file = _route_lsar_logging(cycle_dir / "lsar.log")
 
             config_path: Optional[Path] = None
             if self.lsar_config_path and self.lsar_config_path.exists():
@@ -616,8 +710,29 @@ class ReviewGate:
 
         except Exception as exc:
             self._log(f"LSAR pipeline failed (cycle {cycle}): {exc}")
+            detail = " ".join(str(exc).split())[:200]
+            if isinstance(exc, ImportError):
+                self._last_lsar_failure = f"lsar_import_failed: {detail}"
+                # G2: usually one of LSAR's own dependencies is missing
+                # from this Python; say how to install them.
+                self._log(
+                    "LSAR could not be imported; install its requirements "
+                    "into the Python that runs EDM-ARS: "
+                    f"{Path(sys.executable).name} -m pip install -r "
+                    f"\"{Path(lsar_root) / 'requirements.txt'}\""
+                )
+            elif type(exc).__name__ == "ScoringFailedError":
+                # LSAR (fix/released-issues) raises this instead of
+                # returning default 5/10 scores when scoring fails or its
+                # J1 guard refuses a truncated review: no score exists.
+                self._last_lsar_failure = f"lsar_scoring_failed: {detail}"
+            else:
+                self._last_lsar_failure = (
+                    f"exception: {type(exc).__name__}: {detail}"
+                )
             return None
         finally:
+            _detach_lsar_log_file(lsar_log_file)
             if added_to_path and lsar_root in sys.path:
                 sys.path.remove(lsar_root)
 
@@ -833,8 +948,24 @@ class ReviewGate:
     )
 
     def _call_revision_llm(self, prompt: str) -> Optional[str]:
-        """Send *prompt* to the configured provider. ``None`` on failure."""
-        try:
+        """Send *prompt* to the configured provider. ``None`` on failure.
+
+        Transient failures are retried under the shared policy and every
+        wait is logged before it starts; a failure that remains is logged
+        with its code (KEY_REJECTED, NO_CREDIT, MODEL_GONE, ...) and kept
+        in ``revision_failures`` instead of vanishing into a bare None.
+        """
+        from src.agents.llm_client import call_with_retries
+        from src.errors import ProviderError
+
+        if self._llm_client is None:
+            self._log(
+                "LLM revision skipped: "
+                f"{self.revision_unavailable_reason or 'no client'}"
+            )
+            return None
+
+        def _attempt() -> str:
             if self._llm_provider in ("deepseek", "openai"):
                 response = self._llm_client.chat.completions.create(
                     model=self._llm_model,
@@ -854,7 +985,23 @@ class ReviewGate:
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 return stream.get_final_text()
+
+        try:
+            return call_with_retries(
+                _attempt,
+                provider_cfg=self._llm_provider_cfg,
+                model=self._llm_model,
+                settings=self._llm_settings,
+                on_wait=lambda _s, _a, _r, message: self._log(message),
+            )
+        except ProviderError as exc:
+            self.revision_failures.append({"code": exc.code, "message": str(exc)})
+            self._log(f"LLM revision call failed [{exc.code}]: {exc}")
+            return None
         except Exception as exc:
+            self.revision_failures.append(
+                {"code": "UNKNOWN", "message": f"{type(exc).__name__}: {exc}"}
+            )
             self._log(f"LLM revision call failed: {exc}")
             return None
 
@@ -1551,11 +1698,30 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         }
         return median_report
 
+    #: Optional ``(event_type, **data) -> None`` hook the orchestrator sets
+    #: to receive ``gate.cycle`` / ``gate.review`` / ``gate.skipped``
+    #: events. A class attribute, so constructing a gate is unchanged.
+    event_fn: Any = None
+
+    def _event(self, etype: str, **data: Any) -> None:
+        fn = self.event_fn
+        if fn is None:
+            return
+        try:
+            fn(etype, **data)
+        except Exception:  # noqa: BLE001 - a UI side channel never raises
+            pass
+
     def run_gate(self) -> dict:
         """Execute the full review gate loop.
 
         Returns a summary dict with cycle details, final scores, and
-        whether the paper passed.
+        whether the paper passed. ``ran`` says whether any review
+        happened at all; when it did not, ``skip_reason`` says why and
+        ``final_score`` / ``passed`` are None. The old summary reported a
+        gate that never ran -- LSAR missing, a dependency missing, no PDF
+        -- as ``passed: false, final_score: 0.0``, indistinguishable from
+        a paper reviewed and judged worthless.
         """
         self._log(
             f"Starting review gate (max_cycles={self.max_cycles}, "
@@ -1567,14 +1733,22 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         final_score: float = 0.0
         final_recommendation: str = "Unknown"
         final_review_path: Optional[str] = None
+        skip_reason: Optional[str] = None
 
         for cycle in range(1, self.max_cycles + 1):
             self._log(f"--- Review gate cycle {cycle}/{self.max_cycles} ---")
+            self._event(
+                "gate.cycle",
+                cycle=cycle,
+                plain=f"Review gate: cycle {cycle} of {self.max_cycles}",
+                max_cycles=self.max_cycles,
+            )
 
             # 1. Prepare PDF
             pdf_path = self.prepare_pdf(self.output_dir, cycle=cycle)
             if pdf_path is None:
                 self._log("Cannot prepare PDF; skipping review gate")
+                skip_reason = "no_pdf"
                 break
 
             # 2. Run LSAR (with borderline-triggered median sampling —
@@ -1586,6 +1760,9 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             report_json = self.run_lsar(pdf_path, cycle)
             if report_json is None:
                 self._log("LSAR returned no result; skipping review gate")
+                skip_reason = (
+                    getattr(self, "_last_lsar_failure", None) or "lsar_no_result"
+                )
                 break
             report_json = self._maybe_median_sample(report_json, pdf_path, cycle)
 
@@ -1633,6 +1810,18 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                     "median_sampling": median_info,
                     "honesty_blockers": honesty,
                 }
+            )
+            self._event(
+                "gate.review",
+                cycle=cycle,
+                plain=(
+                    f"Review gate cycle {cycle}: score {final_score}, "
+                    + ("passed" if passed else "not passed")
+                ),
+                score=final_score,
+                passed=passed,
+                recommendation=final_recommendation,
+                threshold=self.pass_threshold,
             )
 
             if passed:
@@ -1764,19 +1953,40 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         # Build final summary. I5: threshold provenance and the median
         # sample set used to live only in pipeline.log — the summary now
         # carries everything needed to audit the verdict from disk.
+        ran = bool(per_cycle_scores)
+        if not ran:
+            skip_reason = skip_reason or (
+                "no_cycles" if self.max_cycles < 1 else "unknown"
+            )
+            self._event(
+                "gate.skipped",
+                plain=f"The review gate could not run ({skip_reason})",
+                reason=skip_reason,
+            )
         summary: dict[str, Any] = {
+            "ran": ran,
+            "skip_reason": None if ran else skip_reason,
             "cycles_used": len(per_cycle_scores),
             "max_cycles": self.max_cycles,
-            "final_score": final_score,
-            "final_recommendation": final_recommendation,
+            "final_score": final_score if ran else None,
+            "final_recommendation": (
+                final_recommendation if ran else "Not reviewed"
+            ),
             "per_cycle_scores": per_cycle_scores,
             "final_review_path": final_review_path,
-            "passed": final_passed,
+            "passed": final_passed if ran else None,
             "threshold_used": self.pass_threshold,
             "threshold_source": self.calibration_source,
             "advisory_mode": getattr(self, "advisory_mode", None),
             "venue": self.venue,
             "dimension_floor": self.dimension_floor,
+            # Why the paper was not revised between cycles, when it was
+            # not: a reviser that could not be configured, or calls that
+            # failed (with their ProviderError codes).
+            "revision_unavailable_reason": getattr(
+                self, "revision_unavailable_reason", None
+            ),
+            "revision_failures": list(getattr(self, "revision_failures", []) or []),
         }
 
         # Persist summary
@@ -1785,10 +1995,16 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         summary_path.write_text(
             json.dumps(summary, indent=2, default=str), encoding="utf-8"
         )
-        self._log(
-            f"Review gate finished: passed={final_passed}, "
-            f"cycles={len(per_cycle_scores)}, final_score={final_score:.2f}"
-        )
+        if ran:
+            self._log(
+                f"Review gate finished: passed={final_passed}, "
+                f"cycles={len(per_cycle_scores)}, final_score={final_score:.2f}"
+            )
+        else:
+            self._log(
+                f"Review gate did NOT run ({skip_reason}); the paper was not "
+                "reviewed and no score exists."
+            )
         return summary
 
     def _compile_full_latex(self, run_dir: Path) -> None:
@@ -1799,6 +2015,8 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         if result["success"]:
             self._log("LaTeX recompilation succeeded")
         else:
+            if result.get("message"):
+                self._log(f"LaTeX recompilation: {result['message']}")
             failed = [s for s in result["steps"] if s["returncode"] not in (0, 1)]
             for step in failed:
                 self._log(

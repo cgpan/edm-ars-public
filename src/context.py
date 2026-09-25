@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
@@ -67,7 +69,21 @@ class PipelineContext:
     revision_cycle: int = 0
     errors: list = field(default_factory=list)
     log: list = field(default_factory=list)
-    run_start_time: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    # Timezone-aware on purpose. A naive ``utcnow()`` stamp here could
+    # never be subtracted from the aware "now" the findings memory uses,
+    # so every run recorded ``runtime_minutes: None``.
+    run_start_time: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+    #: Why and where the run stopped, when it stopped early. Written by
+    #: the orchestrator's abort paths and by ``finalize_interrupted``;
+    #: read back by ``--resume`` (which stage to retry) and by
+    #: ``run_status.json`` (the ``abort`` block). Shape::
+    #:
+    #:     {"stage": "ENGINEERING", "code": "<ABORT_CODE>",
+    #:      "message": "<one line>", "resumable": bool, "at": "<UTC ISO>"}
+    abort_info: Optional[dict] = None
 
     # Live event side channel (src/events.py). Never serialized: it is a
     # handle on <run>/events.jsonl, re-attached after a checkpoint load.
@@ -98,6 +114,7 @@ class PipelineContext:
             "errors": self.errors,
             "log": self.log,
             "run_start_time": self.run_start_time,
+            "abort_info": self.abort_info,
         }
 
     @classmethod
@@ -125,4 +142,31 @@ class PipelineContext:
         ctx.errors = data.get("errors", [])
         ctx.log = data.get("log", [])
         ctx.run_start_time = data.get("run_start_time", "")
+        ctx.abort_info = data.get("abort_info")
         return ctx
+
+
+def allocate_run_dir(output_base: str, now: Optional[datetime] = None) -> str:
+    """Create and return a fresh ``run_YYYYMMDD_HHMMSS`` directory.
+
+    Two launches in the same second (a shell loop, a batch harness) used
+    to resolve to the same name, and ``os.makedirs(exist_ok=True)`` then
+    let the second run share -- and overwrite -- the first run's
+    checkpoint and artifacts. The directory is created here with
+    ``exist_ok=False`` so the name is claimed atomically; on a collision a
+    short suffix is appended (``_2``, ``_3``, ...) and the timestamp
+    format itself is unchanged. Returns an absolute path.
+    """
+    stamp = (now or datetime.now()).strftime("run_%Y%m%d_%H%M%S")
+    base = os.path.abspath(output_base)
+    os.makedirs(base, exist_ok=True)
+    candidates = [stamp] + [f"{stamp}_{i}" for i in range(2, 100)]
+    candidates.append(f"{stamp}_{uuid.uuid4().hex[:8]}")
+    for name in candidates:
+        path = os.path.join(base, name)
+        try:
+            os.makedirs(path, exist_ok=False)
+        except FileExistsError:
+            continue
+        return path
+    raise FileExistsError(f"could not allocate a run directory under {base}")

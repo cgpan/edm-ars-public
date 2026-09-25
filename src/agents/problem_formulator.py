@@ -14,6 +14,7 @@ import requests
 import yaml
 
 from src.agents.base import BaseAgent, parse_llm_json
+from src.errors import ProviderError
 
 # Backward-compatible re-export of HSLS:09 temporal ordering
 from src.dataset_adapter import HSLS09_TEMPORAL_ORDER as TEMPORAL_ORDER  # noqa: F401
@@ -22,6 +23,33 @@ from src.dataset_adapter import HSLS09_TEMPORAL_ORDER as TEMPORAL_ORDER  # noqa:
 # ---------------------------------------------------------------------------
 # Registry helpers
 # ---------------------------------------------------------------------------
+
+
+#: How the generation-mode task names each dataset. HSLS:09 keeps the
+#: exact wording every earlier prompt used.
+_DATASET_LABELS: dict[str, str] = {
+    "hsls09_public": "HSLS:09",
+    "els_2002": "ELS:2002",
+    "assistments_0910": "ASSISTments 2009-10",
+    "did_els_hsls_panel": "ELS:2002 x HSLS:09 cross-cohort panel",
+}
+
+
+def _dataset_label(registry: dict | None, dataset_name: str | None) -> str:
+    """Short name of the run's dataset for the PF task line (C1).
+
+    The generation branch always asked for "a prediction research question
+    using the HSLS:09 dataset", whatever dataset the run had loaded.
+    """
+    reg = registry if isinstance(registry, dict) else {}
+    fallback = dataset_name if isinstance(dataset_name, str) else ""
+    key = str(reg.get("name") or fallback or "")
+    return (
+        _DATASET_LABELS.get(key)
+        or str(reg.get("full_name") or "").strip()
+        or key
+        or "HSLS:09"
+    )
 
 
 def _build_registry_var_map(registry: dict) -> dict[str, dict]:
@@ -69,6 +97,33 @@ def _spec_one_liner(spec: dict) -> str:
 _JACCARD_THRESHOLD = 0.80
 _CROSSREF_BASE_URL = "https://api.crossref.org/works"
 _CROSSREF_TIMEOUT_S = 5
+_CROSSREF_PROJECT_URL = "https://github.com/cgpan/edm-ars-public"
+
+
+def _crossref_mailto(config: dict | None) -> str | None:
+    """Contact address for Crossref's polite pool, if the operator gave one.
+
+    ``CROSSREF_MAILTO`` in the environment wins over
+    ``semantic_scholar.crossref_mailto`` in config.yaml. Crossref asks
+    clients to identify themselves with a mailto; requests that do are
+    routed to a more reliable pool. None when neither is set -- the
+    project never invents an address.
+    """
+    env_value = (os.environ.get("CROSSREF_MAILTO") or "").strip()
+    if env_value:
+        return env_value
+    s2_cfg = (config or {}).get("semantic_scholar") or {}
+    value = s2_cfg.get("crossref_mailto") if isinstance(s2_cfg, dict) else None
+    value = str(value).strip() if value else ""
+    return value or None
+
+
+def _crossref_request_args(mailto: str | None) -> tuple[dict[str, str], dict[str, str]]:
+    """(extra query params, headers) for a Crossref request."""
+    if mailto:
+        agent = f"EDM-ARS (+{_CROSSREF_PROJECT_URL}; mailto:{mailto})"
+        return {"mailto": mailto}, {"User-Agent": agent}
+    return {}, {"User-Agent": f"EDM-ARS (+{_CROSSREF_PROJECT_URL})"}
 
 
 def _tokenize_title(title: str) -> set[str]:
@@ -118,11 +173,14 @@ def _verify_paper_three_layers(
     paper: dict,
     real_ids: set[str],
     real_title_tokens: list[tuple[set[str], dict]],
+    crossref_mailto: str | None = None,
 ) -> str:
     """Return 'VERIFIED', 'SUSPICIOUS', or 'HALLUCINATED' for a single paper.
 
     Layer 1: exact S2 paper ID match.
-    Layer 2: CrossRef title search with Jaccard similarity ≥ 0.80.
+    Layer 2: CrossRef title search with Jaccard similarity ≥ 0.80. The
+        request identifies the client (User-Agent) and, when configured,
+        carries ``mailto`` for Crossref's polite pool (E9).
     Layer 3: Jaccard against actual S2 result titles ≥ 0.80.
     """
     # Layer 1: exact S2 ID
@@ -135,9 +193,11 @@ def _verify_paper_three_layers(
 
     # Layer 2: CrossRef
     try:
+        extra_params, headers = _crossref_request_args(crossref_mailto)
         resp = requests.get(
             _CROSSREF_BASE_URL,
-            params={"query.title": title, "rows": 1, "select": "title"},
+            params={"query.title": title, "rows": 1, "select": "title", **extra_params},
+            headers=headers,
             timeout=_CROSSREF_TIMEOUT_S,
         )
         if resp.status_code == 200:
@@ -248,6 +308,7 @@ class ProblemFormulator(BaseAgent):
         research_spec = parsed.get("research_spec") or {}
         literature_context = parsed.get("literature_context") or s2_context
         literature_context = self._filter_hallucinated_papers(literature_context, s2_context)
+        literature_context = self._with_retrieval_status(literature_context, s2_context)
 
         self._log_validation_warnings(research_spec, registry)
 
@@ -307,6 +368,7 @@ class ProblemFormulator(BaseAgent):
             lit = self._filter_hallucinated_papers(
                 parsed.get("literature_context") or s2_context, s2_context
             )
+            lit = self._with_retrieval_status(lit, s2_context)
             candidates.append(spec)
             literature_contexts.append(lit)
             prior_specs.append(_spec_one_liner(spec))
@@ -344,6 +406,15 @@ class ProblemFormulator(BaseAgent):
             # Arc P3: full retrieved pool (see _run_single).
             "retrieved_literature": s2_context,
         }
+
+    @staticmethod
+    def _with_retrieval_status(literature_context: dict, s2_context: dict) -> dict:
+        """Carry the search's ``retrieval_status`` onto the context the
+        model returned, which is what the orchestrator stores."""
+        status = (s2_context or {}).get("retrieval_status")
+        if status is None or not isinstance(literature_context, dict):
+            return literature_context
+        return {**literature_context, "retrieval_status": dict(status)}
 
     def _select_best_candidate(
         self,
@@ -439,6 +510,12 @@ class ProblemFormulator(BaseAgent):
                         "message": f"S2 keyword queries generated: {valid}",
                     })
                     return valid
+        except ProviderError:
+            # A rejected key, an empty account or a provider that stayed
+            # unreachable through every retry is not a reason to fall back
+            # to default queries: the next call would fail the same way,
+            # after the literature search and a second round of waits.
+            raise
         except Exception as exc:  # noqa: BLE001
             self.ctx.log.append({
                 "timestamp": datetime.utcnow().isoformat(),
@@ -493,7 +570,9 @@ class ProblemFormulator(BaseAgent):
                 where relevance ranking happened to place it.
         """
         last_exc: Exception | None = None
+        last_http: int | None = None
         retryable = True
+        self._last_s2_outcome = "failed"
 
         for attempt in range(max_retries + 1):
             try:
@@ -529,6 +608,7 @@ class ProblemFormulator(BaseAgent):
                     headers=headers,
                     timeout=15,
                 )
+                last_http = resp.status_code if isinstance(resp.status_code, int) else None
 
                 if 400 <= resp.status_code < 500 and resp.status_code != 429:
                     retryable = False
@@ -546,6 +626,7 @@ class ProblemFormulator(BaseAgent):
                     )
 
                 data = resp.json()
+                self._last_s2_outcome = "ok"
                 return [
                     {
                         "paperId": item.get("paperId", ""),
@@ -587,6 +668,7 @@ class ProblemFormulator(BaseAgent):
                 last_exc = exc
                 break
 
+        self._last_s2_outcome = "rate_limited" if last_http == 429 else "failed"
         self.ctx.log.append({
             "timestamp": datetime.utcnow().isoformat(),
             "agent": self.agent_name,
@@ -768,6 +850,10 @@ class ProblemFormulator(BaseAgent):
         # Run all queries and merge by paperId (dedup)
         seen_ids: set[str] = set()
         merged_papers: list[dict] = []
+        # One outcome per topical query ("ok" | "rate_limited" | "failed"),
+        # read back by _search_literature for retrieval_status.
+        topical_outcomes: list[str] = []
+        self._s2_query_outcomes = topical_outcomes
 
         for i, query in enumerate(queries):
             if i > 0:
@@ -790,6 +876,11 @@ class ProblemFormulator(BaseAgent):
                 if pid and pid not in seen_ids:
                     seen_ids.add(pid)
                     merged_papers.append(paper)
+            outcome = self._take_s2_outcome(papers)
+            topical_outcomes.append(outcome)
+            self._lit_progress(
+                "semantic_scholar", i + 1, len(queries), len(papers), outcome
+            )
             self.ctx.log.append({
                 "timestamp": datetime.utcnow().isoformat(),
                 "agent": self.agent_name,
@@ -828,6 +919,10 @@ class ProblemFormulator(BaseAgent):
                     seen_ids.add(pid)
                     merged_papers.append(paper)
                     n_new += 1
+            self._lit_progress(
+                "semantic_scholar_seminal", 1, 1, len(seminal),
+                self._take_s2_outcome(seminal),
+            )
             self.ctx.log.append({
                 "timestamp": datetime.utcnow().isoformat(),
                 "agent": self.agent_name,
@@ -878,6 +973,8 @@ class ProblemFormulator(BaseAgent):
         """
         seen_ids: set[str] = set()
         papers: list[dict] = []
+        outcomes: list[str] = []
+        self._arxiv_query_outcomes = outcomes
 
         for i, query in enumerate(queries):
             if i > 0:
@@ -900,6 +997,8 @@ class ProblemFormulator(BaseAgent):
                         "agent": self.agent_name,
                         "message": f"arXiv query '{query[:50]}' HTTP {resp.status_code}",
                     })
+                    outcomes.append("failed")
+                    self._lit_progress("arxiv", i + 1, len(queries), 0, "failed")
                     continue
 
                 root = ET.fromstring(resp.text)
@@ -935,6 +1034,8 @@ class ProblemFormulator(BaseAgent):
                     })
                     count += 1
 
+                outcomes.append("ok")
+                self._lit_progress("arxiv", i + 1, len(queries), count, "ok")
                 self.ctx.log.append({
                     "timestamp": datetime.utcnow().isoformat(),
                     "agent": self.agent_name,
@@ -944,6 +1045,8 @@ class ProblemFormulator(BaseAgent):
                     ),
                 })
             except Exception as exc:  # noqa: BLE001
+                outcomes.append("failed")
+                self._lit_progress("arxiv", i + 1, len(queries), 0, "failed")
                 self.ctx.log.append({
                     "timestamp": datetime.utcnow().isoformat(),
                     "agent": self.agent_name,
@@ -959,23 +1062,134 @@ class ProblemFormulator(BaseAgent):
     def _search_literature(self, user_prompt: str | None) -> dict:
         """Search both Semantic Scholar and arXiv, merge, deduplicate by title.
 
-        Returns the same dict format as ``_search_semantic_scholar()``.
+        Returns the same dict format as ``_search_semantic_scholar()``,
+        plus ``retrieval_status`` (CONTRACT section 6)::
+
+            {"semantic_scholar": "ok|failed|rate_limited|skipped",
+             "arxiv": "ok|failed|disabled",
+             "n_papers": int, "degraded": bool,
+             "n_semantic_scholar": int, "n_arxiv": int}
+
+        ``degraded`` is true when S2 contributed no papers or the pool is
+        empty. A run that went on with placeholders or arXiv alone used to
+        finish COMPLETED with the failure recorded only in checkpoint.json
+        (E9). It is now written to pipeline.log, emitted as a warning
+        event, and carried into run_status.json by the orchestrator.
         """
+        self._s2_query_outcomes = None
+        self._arxiv_query_outcomes = None
+        arxiv_enabled = bool(self.config.get("arxiv", {}).get("enabled", True))
+        result = self._search_literature_sources(user_prompt, arxiv_enabled)
+        status = self._retrieval_status(result, arxiv_enabled)
+        result["retrieval_status"] = status
+        if status["degraded"]:
+            hint = (
+                " Set SEMANTIC_SCHOLAR_API_KEY for a dedicated rate limit."
+                if not os.environ.get("SEMANTIC_SCHOLAR_API_KEY") else ""
+            )
+            message = (
+                "Literature retrieval degraded: Semantic Scholar "
+                f"{status['semantic_scholar']} ({status['n_semantic_scholar']} papers), "
+                f"arXiv {status['arxiv']} ({status['n_arxiv']} papers), "
+                f"{status['n_papers']} papers in total. Related work and "
+                "citations will be thin or placeholders." + hint
+            )
+            self._note(message)
+            self._emit(
+                "warning",
+                plain="The literature search came back thin",
+                code="LITERATURE_DEGRADED",
+                message=message,
+                retrieval_status=status,
+            )
+        return result
+
+    def _take_s2_outcome(self, papers: list[dict]) -> str:
+        """Outcome of the S2 request that just ran, then forget it."""
+        outcome = getattr(self, "_last_s2_outcome", None)
+        self._last_s2_outcome = None
+        if outcome is None:
+            # _run_single_s2_query was replaced (tests); judge by results.
+            return "ok" if papers else "failed"
+        return str(outcome)
+
+    def _lit_progress(
+        self, source: str, query_index: int, n_queries: int,
+        papers_found: int, status: str,
+    ) -> None:
+        """One ``lit.progress`` event per literature request."""
+        label = {
+            "semantic_scholar": "Semantic Scholar",
+            "semantic_scholar_seminal": "Semantic Scholar (seminal works)",
+            "arxiv": "arXiv",
+        }.get(source, source)
+        self._emit(
+            "lit.progress",
+            plain=f"Searching {label} ({query_index}/{n_queries}): {papers_found} found",
+            source=source,
+            query_index=query_index,
+            n_queries=n_queries,
+            papers_found=papers_found,
+            status=status,
+        )
+
+    def _retrieval_status(self, result: dict, arxiv_enabled: bool) -> dict:
+        """Summarise what each source returned (CONTRACT section 6)."""
+        papers = result.get("papers") or []
+        n_arxiv = sum(1 for p in papers if p.get("source") == "arxiv")
+        n_s2 = len(papers) - n_arxiv
+
+        s2_outcomes = getattr(self, "_s2_query_outcomes", None)
+        if s2_outcomes is None:
+            # The S2 search did not run its query loop (it was replaced);
+            # judge by what it returned.
+            s2_state = "ok" if n_s2 else "failed"
+        elif not s2_outcomes:
+            s2_state = "skipped"
+        elif "ok" in s2_outcomes:
+            s2_state = "ok"
+        elif "rate_limited" in s2_outcomes:
+            s2_state = "rate_limited"
+        else:
+            s2_state = "failed"
+
+        if not arxiv_enabled:
+            arxiv_state = "disabled"
+        else:
+            arxiv_outcomes = getattr(self, "_arxiv_query_outcomes", None)
+            if arxiv_outcomes is None:
+                arxiv_state = "ok" if n_arxiv else "failed"
+            else:
+                arxiv_state = "ok" if "ok" in arxiv_outcomes else "failed"
+
+        return {
+            "semantic_scholar": s2_state,
+            "arxiv": arxiv_state,
+            "n_papers": len(papers),
+            "degraded": n_s2 == 0 or len(papers) == 0,
+            "n_semantic_scholar": n_s2,
+            "n_arxiv": n_arxiv,
+        }
+
+    def _search_literature_sources(
+        self, user_prompt: str | None, arxiv_enabled: bool
+    ) -> dict:
+        """The S2 + arXiv search itself (see ``_search_literature``)."""
         # 1. Run S2 search (primary source)
         s2_context = self._search_semantic_scholar(user_prompt)
         s2_papers = s2_context.get("papers", [])
 
         # 2. Run arXiv search with same queries
         arxiv_cfg = self.config.get("arxiv", {})
-        if not arxiv_cfg.get("enabled", True):
-            return s2_context
+        if not arxiv_enabled:
+            return dict(s2_context)
 
         queries = self._generate_search_queries(user_prompt)
         arxiv_per_query = int(arxiv_cfg.get("max_results_per_query", 10))
         arxiv_papers = self._search_arxiv(queries, max_results_per_query=arxiv_per_query)
 
         if not arxiv_papers:
-            return s2_context
+            return dict(s2_context)
 
         # 3. Deduplicate arXiv papers against S2 results by title Jaccard
         s2_title_tokens = [
@@ -1052,7 +1266,13 @@ class ProblemFormulator(BaseAgent):
             "",
             "## Retrieved Literature (Semantic Scholar + arXiv)",
             "```json",
-            json.dumps(s2_context, indent=2),
+            # retrieval_status is bookkeeping for run_status.json, not
+            # literature; leaving it out keeps this block what it was.
+            json.dumps(
+                {k: v for k, v in s2_context.items() if k != "retrieval_status"}
+                if isinstance(s2_context, dict) else s2_context,
+                indent=2,
+            ),
             "```",
         ]
         # V3.2 Arc D: deterministic design-feasibility report + gap
@@ -1150,7 +1370,8 @@ class ProblemFormulator(BaseAgent):
                 "",
                 "## Task",
                 (
-                    "Design a prediction research question using the HSLS:09 dataset. "
+                    "Design a prediction research question using the "
+                    f"{_dataset_label(registry, getattr(self.ctx, 'dataset_name', None))} dataset. "
                     "Select 8-12 of the most relevant papers from the retrieved literature "
                     "(copy their paperId, title, authors, year, abstract exactly) to populate "
                     "literature_context.papers. Ground the novelty claim using these papers. "
@@ -1193,8 +1414,11 @@ class ProblemFormulator(BaseAgent):
         verified: list[dict] = []
         suspicious: list[dict] = []
 
+        mailto = _crossref_mailto(self.config)
         for paper in literature_context.get("papers", []):
-            status = _verify_paper_three_layers(paper, real_ids, real_title_tokens)
+            status = _verify_paper_three_layers(
+                paper, real_ids, real_title_tokens, crossref_mailto=mailto
+            )
             if status == "VERIFIED":
                 verified.append({**paper, "verification_status": "VERIFIED"})
             elif status == "SUSPICIOUS":

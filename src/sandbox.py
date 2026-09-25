@@ -12,7 +12,9 @@ import os
 import re
 import pathlib
 import subprocess
+import sys
 import warnings
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -95,6 +97,33 @@ BLAS_THREAD_VARS = (
 DEFAULT_INNER_THREADS = 2
 
 
+#: Environment variable NAMES that say they hold a credential. Generated
+#: code never needs one: it makes no network calls and talks to no
+#: provider. What it can do is print os.environ while debugging, and its
+#: stdout/stderr go into the retry prompt sent to the provider and into
+#: prompts/<agent>/.../rendered_prompt.txt in the run folder.
+#:
+#: A denylist, not an allowlist, on purpose: Python needs SYSTEMROOT on
+#: Windows, R needs R_HOME/R_LIBS*, the bridge needs EDM_ARS_RSCRIPT and
+#: EDM_ARS_R_HELPERS, and conda/venv activation leaves a dozen more. None
+#: of those names matches below.
+_SECRET_NAME = re.compile(
+    r"(?i)(?:API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|SECRET|PASSWORD|PASSWD"
+    r"|CREDENTIALS?|CONNECTION_?STRING"
+    r"|(?:^|_)TOKENS?(?:_|$)|(?:^|_)PAT$|(?:^|_)KEYS?$)"
+)
+
+
+def is_secret_name(name: str) -> bool:
+    """True when an environment variable name marks it as a credential."""
+    return bool(_SECRET_NAME.search(name))
+
+
+def scrub_secrets(env: Mapping[str, str]) -> dict[str, str]:
+    """Return a copy of *env* without the credential-named variables."""
+    return {k: v for k, v in env.items() if not is_secret_name(k)}
+
+
 def blas_thread_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """Cap the inner BLAS/OpenMP pools for generated analysis code.
 
@@ -113,11 +142,47 @@ def blas_thread_env(base: dict[str, str] | None = None) -> dict[str, str]:
     pool from that, so it oversubscribes inside the quota.
 
     An operator who has already set any of these vars keeps their value.
+
+    Credential-named variables are dropped (see ``_SECRET_NAME``) whether
+    the base is the host environment or an explicit mapping, so no caller
+    can hand a key to generated code by accident.
     """
-    env = dict(base if base is not None else os.environ)
+    env = scrub_secrets(base if base is not None else os.environ)
     threads = os.environ.get("EDMARS_INNER_THREADS", str(DEFAULT_INNER_THREADS))
     for var in BLAS_THREAD_VARS:
         env.setdefault(var, threads)
+    return env
+
+
+def child_env(
+    base: Mapping[str, str] | None = None,
+    rscript_path: str | None = None,
+) -> dict[str, str]:
+    """The environment LLM-generated code runs with.
+
+    ``blas_thread_env`` (credentials dropped, inner thread pools capped)
+    plus two things the executor relies on:
+
+    * UTF-8 stdio. On a Windows host the child's stdout defaults to the
+      ANSI code page, so a generated script died with UnicodeEncodeError
+      at its first ``print`` of a check mark, an arrow or a Greek letter --
+      usually at the very end of a long run, costing a retry. The executor
+      decodes the pipes as UTF-8, so the child must write UTF-8; these are
+      forced, not defaulted, because a stray PYTHONIOENCODING=cp1252 in
+      the host env would bring the crash back.
+    * ``EDM_ARS_RSCRIPT`` from config ``r_bridge.rscript_path``. The psy_*
+      wrappers run inside the child and never read config, so the setting
+      only reaches ``r_bridge.find_rscript`` through the environment. An
+      operator's own EDM_ARS_RSCRIPT wins over the config value.
+
+    Rscript, started by the bridge from inside the child, inherits all of
+    this -- including the missing credentials.
+    """
+    env = blas_thread_env(dict(base) if base is not None else None)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    if rscript_path and not env.get("EDM_ARS_RSCRIPT", "").strip():
+        env["EDM_ARS_RSCRIPT"] = str(rscript_path)
     return env
 
 
@@ -145,11 +210,41 @@ def check_portability(code: str) -> list[str]:
     return findings
 
 
+#: Returned when the interpreter itself cannot be started -- the shell's
+#: "command not found" code, so it cannot be mistaken for a script error.
+INTERPRETER_NOT_STARTED = 127
+
+
 class SubprocessExecutor:
     """Execute LLM-generated code via bare subprocess.run().
 
     Mirrors the interface of DockerSandbox.run() so the two are interchangeable.
+
+    The script runs under the SAME interpreter as the pipeline
+    (``sys.executable``), not whatever ``python`` the OS finds first. On
+    Windows a venv's python.exe is a redirector that starts the base
+    install, and CreateProcess searches the running image's own directory
+    before PATH, so a bare ``python`` resolved to the base interpreter even
+    inside an activated venv -- one without the packages the README had
+    just installed. On macOS a bare ``python`` often does not exist at all.
+    ``python_executable`` (config ``sandbox.python_executable``) overrides
+    the choice for operators who deliberately run analysis code elsewhere.
     """
+
+    def __init__(
+        self,
+        python_executable: str | None = None,
+        rscript_path: str | None = None,
+    ) -> None:
+        self.python_executable: str | None = (
+            os.path.expanduser(os.path.expandvars(str(python_executable)))
+            if python_executable else None
+        )
+        self.rscript_path: str | None = str(rscript_path) if rscript_path else None
+
+    def interpreter(self) -> str:
+        """The Python the generated script will run under."""
+        return self.python_executable or sys.executable or "python"
 
     def run(
         self,
@@ -174,7 +269,9 @@ class SubprocessExecutor:
 
         Returns
         -------
-        dict with keys: stdout, stderr, returncode
+        dict with keys: stdout, stderr, returncode. stdout and stderr are
+        always ``str``; returncode is 127 (``INTERPRETER_NOT_STARTED``)
+        when the interpreter could not be started at all.
         """
         # Write code to a temp file instead of passing via -c to avoid
         # Windows command-line length limit (WinError 206, ~32k char cap).
@@ -213,20 +310,43 @@ class SubprocessExecutor:
             }
 
         script_path = os.path.join(output_dir, "_generated_script.py")
+        exe = self.interpreter()
         try:
             with open(script_path, "w", encoding="utf-8") as fh:
                 fh.write(code)
-            result = subprocess.run(
-                ["python", script_path],
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-                cwd=output_dir,
-                env=blas_thread_env(),
-            )
+            try:
+                result = subprocess.run(
+                    [exe, script_path],
+                    capture_output=True,
+                    # UTF-8 with replacement, never the locale codec: a
+                    # byte the ANSI code page cannot decode killed the
+                    # reader thread and came back as stdout=None, which the
+                    # agents' retry prompts then sliced into a TypeError.
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout_s,
+                    cwd=output_dir,
+                    env=child_env(rscript_path=self.rscript_path),
+                )
+            except OSError as exc:
+                # Only the interpreter launch lands here: writing the
+                # script above is outside this try on purpose, so a bad
+                # output_dir still raises as it always did.
+                return {
+                    "stdout": "",
+                    "stderr": (
+                        f"Could not start the Python interpreter {exe!r}: "
+                        f"{exc}. Set sandbox.python_executable in config.yaml "
+                        "to a Python that has this project's requirements "
+                        "installed, or leave it unset to use the interpreter "
+                        "running the pipeline."
+                    ),
+                    "returncode": INTERPRETER_NOT_STARTED,
+                }
             return {
-                "stdout": result.stdout,
-                "stderr": result.stderr,
+                "stdout": result.stdout or "",
+                "stderr": result.stderr or "",
                 "returncode": result.returncode,
             }
         except subprocess.TimeoutExpired:
@@ -265,6 +385,8 @@ class DockerSandbox:
         cpu_count: int = 2,
         network_disabled: bool = True,
         auto_build: bool = True,
+        python_executable: str | None = None,
+        rscript_path: str | None = None,
     ) -> None:
         self.image = image
         self.memory_limit = memory_limit
@@ -272,6 +394,11 @@ class DockerSandbox:
         self.network_disabled = network_disabled
         self.auto_build = auto_build
         self._client: Any = None  # lazy-initialised on first run()
+        # Every "fall back to subprocess" path uses this one, so a fallback
+        # runs under the configured interpreter and R, not the defaults.
+        self._fallback = SubprocessExecutor(
+            python_executable=python_executable, rscript_path=rscript_path,
+        )
 
     def _get_client(self) -> Any:
         """Return (and cache) a docker.DockerClient."""
@@ -327,7 +454,7 @@ class DockerSandbox:
                 RuntimeWarning,
                 stacklevel=2,
             )
-            return SubprocessExecutor().run(
+            return self._fallback.run(
                 code=code, output_dir=output_dir,
                 raw_data_path=raw_data_path, timeout_s=timeout_s,
             )
@@ -336,9 +463,11 @@ class DockerSandbox:
         volumes: dict[str, dict[str, str]] = {
             os.path.abspath(output_dir): {"bind": "/workspace", "mode": "rw"},
         }
-        # blas_thread_env with an explicit base: the container gets only
-        # OUTPUT_DIR plus the thread caps, never a copy of the host env.
-        environment: dict[str, str] = blas_thread_env({"OUTPUT_DIR": "/workspace"})
+        # child_env with an explicit base: the container gets only
+        # OUTPUT_DIR plus the thread caps and UTF-8 stdio, never a copy of
+        # the host env. No EDM_ARS_RSCRIPT either: a host path to Rscript
+        # means nothing inside the image, which has no R.
+        environment: dict[str, str] = child_env({"OUTPUT_DIR": "/workspace"})
 
         if raw_data_path is not None:
             raw_data_abs = os.path.abspath(raw_data_path)
@@ -354,7 +483,12 @@ class DockerSandbox:
         try:
             container = client.containers.create(
                 self.image,
-                command=code,
+                # A LIST, never the bare string. docker-py shlex-splits a
+                # str command, so with ENTRYPOINT ["python", "-c"] the
+                # container ran `python -c import` (SyntaxError), and an
+                # apostrophe in a comment raised "No closing quotation"
+                # before the container was even created.
+                command=[code],
                 volumes=volumes,
                 environment=environment,
                 mem_limit=self.memory_limit,
@@ -416,7 +550,7 @@ class DockerSandbox:
                         RuntimeWarning,
                         stacklevel=2,
                     )
-                return SubprocessExecutor().run(
+                return self._fallback.run(
                     code=code, output_dir=output_dir,
                     raw_data_path=raw_data_path, timeout_s=timeout_s,
                 )
@@ -426,7 +560,7 @@ class DockerSandbox:
                     RuntimeWarning,
                     stacklevel=2,
                 )
-                return SubprocessExecutor().run(
+                return self._fallback.run(
                     code=code, output_dir=output_dir,
                     raw_data_path=raw_data_path, timeout_s=timeout_s,
                 )
@@ -442,6 +576,34 @@ class DockerSandbox:
                     pass
 
 
+#: What to do about a LaTeX tool that could not be started, per tool: a
+#: missing biber on a machine that has pdflatex is a different fix from
+#: having no TeX distribution at all.
+_LATEX_TOOL_HINTS: dict[str, str] = {
+    "pdflatex": (
+        "install a TeX distribution (TeX Live, MiKTeX or TinyTeX) and make "
+        "sure pdflatex is on PATH"
+    ),
+    "bibtex": (
+        "bibtex ships with every TeX distribution; make sure the "
+        "distribution's bin folder is on PATH"
+    ),
+    "biber": (
+        "biblatex manuscripts need biber; install it with your TeX "
+        "distribution's package manager (e.g. tlmgr install biber)"
+    ),
+}
+
+
+def _file_stamp(path: str) -> tuple[int, int] | None:
+    """(mtime_ns, size) of *path*, or None when it does not exist."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int = 120) -> dict[str, Any]:
     """Run the full pdflatex → bibtex → pdflatex → pdflatex compilation sequence.
 
@@ -452,11 +614,34 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
 
     Returns:
         dict with keys:
-          ``success`` (bool), ``steps`` (list of step result dicts with
-          ``cmd``, ``returncode``, ``stdout``, ``stderr``).
+          ``success`` (bool) -- every step ran cleanly AND this compile
+          wrote the PDF. Return codes alone cannot decide it: pdflatex in
+          nonstopmode exits 1 both for recoverable errors and for a fatal
+          abort that writes nothing, which used to be logged as
+          "paper.pdf written" with no paper.pdf on disk.
+          ``pdf_exists`` (bool) -- ``<base>.pdf`` exists and was written by
+          THIS compile: it appeared, or its modification stamp changed,
+          between the start of the first pass and the end of the last.
+          Comparing the file with itself, rather than with the wall clock,
+          holds on synced and network folders whose timestamps are coarse
+          or skewed.
+          ``stale_pdf`` (bool) -- a ``<base>.pdf`` is on disk but this
+          compile did not write it (it is left over from an earlier run).
+          ``pdf_path`` (str) -- where the PDF is expected.
+          ``missing_tool`` (str | None) -- the first of pdflatex / bibtex /
+          biber that could not be started because it is not installed or
+          not on PATH.
+          ``failed_step`` (str | None) -- the command line of the first
+          step that failed; when every step exited 0/1 but no PDF appeared,
+          the last pdflatex pass.
+          ``message`` (str) -- one plain-English line for the log.
+          ``steps`` (list of step result dicts with ``cmd``,
+          ``returncode``, ``stdout``, ``stderr``).
     """
     base = tex_file.replace(".tex", "")
+    pdf_path = os.path.join(output_dir, base + ".pdf")
     steps_results: list[dict[str, Any]] = []
+    missing: list[str] = []
 
     def _run(cmd: list[str]) -> dict[str, Any]:
         try:
@@ -464,7 +649,11 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
                 cmd,
                 cwd=output_dir,
                 capture_output=True,
+                # TeX and biber write UTF-8 (or raw 8-bit) bytes; the locale
+                # codec lost the whole stream on the first undecodable one.
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_s,
             )
             return {
@@ -474,11 +663,19 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
                 "stderr": proc.stderr[-2000:] if proc.stderr else "",
             }
         except FileNotFoundError:
+            missing.append(cmd[0])
             return {
                 "cmd": " ".join(cmd),
                 "returncode": -1,
                 "stdout": "",
                 "stderr": f"{cmd[0]!r} not found — is it installed and on PATH?",
+            }
+        except OSError as exc:
+            return {
+                "cmd": " ".join(cmd),
+                "returncode": -1,
+                "stdout": "",
+                "stderr": f"{cmd[0]!r} could not be started: {exc}",
             }
         except subprocess.TimeoutExpired:
             return {
@@ -502,6 +699,7 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
     except OSError:
         pass
 
+    stamp_before = _file_stamp(pdf_path)
     for cmd in [
         pdflatex_cmd,
         bib_engine,
@@ -513,9 +711,58 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
         # If pdflatex exits non-zero on first pass, abort early
         if result["returncode"] not in (0, 1) and cmd == pdflatex_cmd:
             break
+    stamp_after = _file_stamp(pdf_path)
 
-    success = all(s["returncode"] in (0, 1) for s in steps_results)
-    return {"success": success, "steps": steps_results}
+    pdf_exists = stamp_after is not None and stamp_after != stamp_before
+    stale_pdf = stamp_after is not None and not pdf_exists
+    steps_ok = all(s["returncode"] in (0, 1) for s in steps_results)
+    success = steps_ok and pdf_exists
+
+    failed = next(
+        (s for s in steps_results if s["returncode"] not in (0, 1)), None
+    )
+    failed_step: str | None = None
+    if failed is not None:
+        failed_step = failed["cmd"]
+    elif not pdf_exists:
+        passes = [s for s in steps_results if s["cmd"] == " ".join(pdflatex_cmd)]
+        failed_step = passes[-1]["cmd"] if passes else " ".join(pdflatex_cmd)
+
+    missing_tool = missing[0] if missing else None
+    pdf_name = base + ".pdf"
+    if missing_tool:
+        message = (
+            f"{missing_tool} was not found: "
+            f"{_LATEX_TOOL_HINTS.get(missing_tool, 'install it and put it on PATH')}."
+        )
+        if pdf_exists:
+            message += f" {pdf_name} was written without it."
+    elif success:
+        message = f"{pdf_name} written."
+    elif pdf_exists and failed is not None:
+        message = (
+            f"{pdf_name} written, but `{failed['cmd']}` failed "
+            f"(rc={failed['returncode']}); citations or cross-references "
+            "may be incomplete."
+        )
+    elif stale_pdf:
+        message = (
+            f"LaTeX produced no new {pdf_name}; the one on disk is left over "
+            f"from an earlier compile. See {base}.log."
+        )
+    else:
+        message = f"LaTeX produced no {pdf_name}. See {base}.log."
+
+    return {
+        "success": success,
+        "pdf_exists": pdf_exists,
+        "stale_pdf": stale_pdf,
+        "pdf_path": pdf_path,
+        "missing_tool": missing_tool,
+        "failed_step": failed_step,
+        "message": message,
+        "steps": steps_results,
+    }
 
 
 def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecutor:
@@ -524,10 +771,23 @@ def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecuto
     If sandbox.enabled is False (or the key is absent), returns SubprocessExecutor.
     If Docker daemon is not reachable, emits a RuntimeWarning and returns
     SubprocessExecutor.
+
+    Every executor returned -- including the subprocess one a Docker
+    sandbox falls back to -- carries ``sandbox.python_executable`` (null =
+    the interpreter running the pipeline) and ``r_bridge.rscript_path``
+    (exported to generated code as EDM_ARS_RSCRIPT).
     """
-    sandbox_cfg: dict[str, Any] = config.get("sandbox", {})
+    sandbox_cfg: dict[str, Any] = config.get("sandbox") or {}
+    python_executable = sandbox_cfg.get("python_executable") or None
+    rscript_path = (config.get("r_bridge") or {}).get("rscript_path") or None
+
+    def _subprocess() -> SubprocessExecutor:
+        return SubprocessExecutor(
+            python_executable=python_executable, rscript_path=rscript_path,
+        )
+
     if not sandbox_cfg.get("enabled", False):
-        return SubprocessExecutor()
+        return _subprocess()
 
     if not _DOCKER_AVAILABLE:
         warnings.warn(
@@ -536,7 +796,7 @@ def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecuto
             RuntimeWarning,
             stacklevel=2,
         )
-        return SubprocessExecutor()
+        return _subprocess()
 
     try:
         client = docker.from_env()
@@ -548,7 +808,7 @@ def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecuto
             RuntimeWarning,
             stacklevel=2,
         )
-        return SubprocessExecutor()
+        return _subprocess()
 
     return DockerSandbox(
         image=sandbox_cfg.get("image", "edm-ars-sandbox:latest"),
@@ -556,4 +816,6 @@ def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecuto
         cpu_count=sandbox_cfg.get("cpu_count", 2),
         network_disabled=sandbox_cfg.get("network_disabled", True),
         auto_build=sandbox_cfg.get("auto_build", True),
+        python_executable=python_executable,
+        rscript_path=rscript_path,
     )
