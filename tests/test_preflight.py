@@ -84,7 +84,9 @@ def test_missing_key_fails_and_is_never_echoed(
 def test_key_value_never_appears(
     config: dict, data_file: str, all_tools: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-secret-value-123456")
+    # Not shaped like a real key: the public-path audit rejects anything
+    # that is (tests/test_public_paths.py).
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake deepseek value 42")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     config["per_stage_providers"] = {"analyst": {"provider": "openai", "model": "gpt-x"}}
     findings = check_run_prerequisites(
@@ -93,7 +95,7 @@ def test_key_value_never_appears(
     assert [f.code for f in findings] == ["KEY_MISSING"]
     assert "OPENAI_API_KEY" in findings[0].message
     assert "analyst" in findings[0].message
-    assert all("sk-secret" not in " ".join(f) for f in findings)
+    assert all("fake deepseek value" not in " ".join(f) for f in findings)
 
 
 def test_missing_raw_data_names_the_exact_file(
