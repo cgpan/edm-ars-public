@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from src import events
+from src.config import PROJECT_ROOT
 from src.agents.analyst import Analyst
 from src.agents.base import BaseAgent
 from src.agents.critic import Critic
@@ -679,7 +680,10 @@ class Orchestrator:
         # V4 psychometrics: executor subprocesses import the copied
         # r_bridge.py flat; give them a deterministic path to the
         # certified R scripts (inherited via os.environ).
-        r_helpers = Path("r_helpers").resolve()
+        # Anchored at the repository, not the working directory: a run
+        # started from another folder found no r_helpers/ and no skills/
+        # (C5), and the skill registry then loaded zero skills silently.
+        r_helpers = PROJECT_ROOT / "r_helpers"
         if r_helpers.is_dir():
             os.environ.setdefault("EDM_ARS_R_HELPERS", str(r_helpers))
 
@@ -697,7 +701,7 @@ class Orchestrator:
         # V2.0 skill registry: load all SKILL.md files under skills/.
         # Inert during the transition (agents whose system prompts have
         # no {{SKILLS}} placeholder fall through to the original prompt).
-        self.skill_registry = SkillRegistry(skills_root=Path("skills"))
+        self.skill_registry = SkillRegistry(skills_root=PROJECT_ROOT / "skills")
 
         # Load findings memory if enabled (non-fatal on failure)
         self.findings_memory: FindingsMemory | None = None

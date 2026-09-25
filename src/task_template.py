@@ -7,7 +7,17 @@ configuration without hardcoding assumptions.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+#: The Critic opens this file. It used to be the relative string
+#: "data_registry/evaluation_rubrics/methodological_checklist.yaml",
+#: which resolves against the working directory, so a run started from
+#: outside the repository failed at CRITIQUING (C5).
+_CHECKLIST_PATH = str(
+    Path(__file__).resolve().parents[1]
+    / "data_registry" / "evaluation_rubrics" / "methodological_checklist.yaml"
+)
 
 if TYPE_CHECKING:
     from src.dataset_adapter import DatasetAdapter
@@ -81,7 +91,7 @@ class PredictionTemplate(TaskTemplate):
         }
 
     def get_critic_checklist_path(self) -> str:
-        return "data_registry/evaluation_rubrics/methodological_checklist.yaml"
+        return _CHECKLIST_PATH
 
     def get_paper_template_path(self, config: dict) -> str:
         return config["paths"]["paper_template"]
@@ -362,7 +372,7 @@ class CausalSOOTemplate(TaskTemplate):
         # B5 (causal-critic-checklist skill) is a separate hand-off; until
         # then, the Critic stage in causal mode runs on V1 prompt content
         # plus the methodology skills attached via _STAGE_SKILLS["Critic"].
-        return "data_registry/evaluation_rubrics/methodological_checklist.yaml"
+        return _CHECKLIST_PATH
 
     def get_paper_template_path(self, config: dict) -> str:
         return config["paths"]["paper_template"]
@@ -668,7 +678,7 @@ class CausalDIDTemplate(TaskTemplate):
                 "higher_is_better": None}
 
     def get_critic_checklist_path(self) -> str:
-        return "data_registry/evaluation_rubrics/methodological_checklist.yaml"
+        return _CHECKLIST_PATH
 
     def get_paper_template_path(self, config: dict) -> str:
         return config["paths"]["paper_template"]
@@ -710,7 +720,7 @@ class PsychometricsTemplate(TaskTemplate):
                 "higher_is_better": None}
 
     def get_critic_checklist_path(self) -> str:
-        return "data_registry/evaluation_rubrics/methodological_checklist.yaml"
+        return _CHECKLIST_PATH
 
     def get_paper_template_path(self, config: dict) -> str:
         return config["paths"]["paper_template"]
