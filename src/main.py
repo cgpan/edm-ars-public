@@ -469,12 +469,29 @@ def _needs_spec_message(task_type: str, config_path: str) -> str:
 
 #: Words that mark a measurement question. classify_intent knows only
 #: prediction / causal / targeting, so a psychometrics question would
-#: otherwise pass silently as prediction.
+#: otherwise pass silently as prediction. Kept to terms prediction
+#: prompts do not use: "reliably predict", "cross-validated" and
+#: "predictive validity" are ordinary prediction wording.
 _MEASUREMENT_PATTERN = re.compile(
-    r"\b(reliab\w*|validity|validat\w*|psychometric\w*|measurement"
-    r"|invarian\w*|differential item functioning|dif|factor structure"
+    r"\b(reliability|psychometric\w*"
+    r"|(construct|content|convergent|discriminant|structural|factorial) validity"
+    r"|measurement (invariance|model|quality|properties|equivalence)"
+    r"|invarian(t|ce)|differential item functioning|dif|factor structure"
     r"|factor analy\w*|cfa|irt|item response|cognitive diagnos\w*"
-    r"|omega|cronbach)\b",
+    r"|omega|cronbach\w*)\b",
+    re.IGNORECASE,
+)
+#: "How reliable / valid is the <scale>?" is a measurement question; "can
+#: we reliably predict ... from survey items" is not. These words count only
+#: next to a scale word and with no prediction wording in the prompt.
+_QUALITY_WORDS = re.compile(r"\b(reliab\w*|valid(ity|ated|ate)?)\b", re.IGNORECASE)
+_SCALE_WORDS = re.compile(
+    r"\b(scales?|subscales?|instruments?|measures?|items?|questionnaires?"
+    r"|surveys?|inventory|inventories)\b",
+    re.IGNORECASE,
+)
+_PREDICTIVE_WORDS = re.compile(
+    r"\b(predict\w*|forecast\w*|early[- ]warning|at[- ]risk|classif\w*)\b",
     re.IGNORECASE,
 )
 #: "cause"/"causes" are not in classify_intent's keyword list.
@@ -489,7 +506,14 @@ def _prompt_intent(prompt: str) -> str:
         intent = classify_intent(prompt)
     except Exception:  # noqa: BLE001 - a notice must never stop a run
         intent = "prediction"
-    if intent == "prediction" and _MEASUREMENT_PATTERN.search(prompt):
+    if intent == "prediction" and (
+        _MEASUREMENT_PATTERN.search(prompt)
+        or (
+            _QUALITY_WORDS.search(prompt)
+            and _SCALE_WORDS.search(prompt)
+            and not _PREDICTIVE_WORDS.search(prompt)
+        )
+    ):
         return "measurement"
     if intent == "prediction" and _CAUSE_PATTERN.search(prompt):
         return "causal"

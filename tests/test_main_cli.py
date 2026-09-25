@@ -1002,3 +1002,17 @@ def test_prompt_notices_name_the_study_type_that_fits(
 
 def test_because_is_not_a_causal_question() -> None:
     assert main_mod._prompt_intent("Because of low attendance, who drops out?") == "prediction"
+
+
+@pytest.mark.parametrize("prompt", [
+    "Can we reliably predict dropout from ninth-grade survey items?",
+    "Predict college enrollment with cross-validated models.",
+    "Which students are at risk of failing algebra, and how valid are the predictions?",
+])
+def test_prediction_wording_gets_no_measurement_notice(prompt: str) -> None:
+    assert main_mod._prompt_intent(prompt) == "prediction"
+
+
+def test_is_this_scale_valid_is_a_measurement_question() -> None:
+    assert main_mod._prompt_intent(
+        "Is the school engagement scale valid for English learners?") == "measurement"
