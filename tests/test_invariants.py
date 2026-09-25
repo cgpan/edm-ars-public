@@ -465,6 +465,92 @@ def test_no_log_at_all_claims_nothing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# INV_UNDEFINED_CITATION -- against the lines pdflatex actually writes
+# ---------------------------------------------------------------------------
+#
+# Captured from MiKTeX pdflatex 2025 on minimal documents (kernel \cite,
+# natbib \citep/\citet, biblatex+biber with a key missing from the .bib).
+# The previous pattern required "' undefined" right after the key and so
+# matched none of these: every real log reads "on page N" in between.
+
+_KERNEL_UNDEFINED = (
+    "LaTeX Warning: Citation `foo2020' on page 1 undefined on input line 3.\n"
+    "\n"
+    "\n"
+    # TeX hard-wraps the log at 79 characters, splitting a long key.
+    "LaTeX Warning: Citation `averyveryveryveryveryveryverylongcitationkeyname2020ab\n"
+    "cdefgh' on page 1 undefined on input line 3.\n"
+    "\n"
+    "LaTeX Warning: There were undefined references.\n"
+)
+_NATBIB_UNDEFINED = (
+    "Package natbib Warning: Citation `foo2020' on page 1 undefined on input line 4.\n"
+    "\n"
+    "Package natbib Warning: Citation `bar2019' on page 1 undefined on input line 4.\n"
+    "\n"
+    "Package natbib Warning: There were undefined citations.\n"
+)
+_BIBLATEX_UNDEFINED = (
+    "LaTeX Warning: Citation 'foo2020' on page 1 undefined on input line 5.\n"
+    "\n"
+    "LaTeX Warning: Citation 'bar2019' on page 1 undefined on input line 5.\n"
+    "\n"
+    "LaTeX Warning: Empty bibliography on input line 6.\n"
+)
+_BIBLATEX_OLD_MISSING_ENTRY = (
+    "Package biblatex Warning: The following entry could not be found\n"
+    "(biblatex)                in the database:\n"
+    "(biblatex)                ghost2019\n"
+    "(biblatex)                Please verify the spelling and rerun\n"
+    "(biblatex)                LaTeX afterwards.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "log, keys",
+    [
+        (
+            _KERNEL_UNDEFINED,
+            {"foo2020", "averyveryveryveryveryveryverylongcitationkeyname2020abcdefgh"},
+        ),
+        (_NATBIB_UNDEFINED, {"foo2020", "bar2019"}),
+        (_BIBLATEX_UNDEFINED, {"foo2020", "bar2019"}),
+        (_BIBLATEX_OLD_MISSING_ENTRY, {"ghost2019"}),
+    ],
+    ids=["kernel", "natbib", "biblatex", "biblatex-missing-entry"],
+)
+def test_undefined_citations_in_real_log_lines_fire(tmp_path, log, keys):
+    run = _run(tmp_path, paper__log=log, paper__pdf="%PDF-1.5 stub")
+    hits = _by_code(run, "INV_UNDEFINED_CITATION")
+    assert len(hits) == 1
+    assert hits[0].severity == "critical"
+    assert set(hits[0].evidence["undefined"]) == keys
+
+
+def test_a_log_with_only_the_summary_line_names_no_key(tmp_path):
+    """"There were undefined references" alone is not a key to report."""
+    run = _run(
+        tmp_path,
+        paper__log="LaTeX Warning: There were undefined references.\n",
+        paper__pdf="%PDF-1.5 stub",
+    )
+    assert "INV_UNDEFINED_CITATION" not in _codes(run)
+
+
+def test_a_resolved_bibliography_is_silent(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__log=(
+            "This is pdfTeX, Version 3.14\n"
+            "(./paper.bbl)\n"
+            "Output written on paper.pdf (1 page).\n"
+        ),
+        paper__pdf="%PDF-1.5 stub",
+    )
+    assert "INV_UNDEFINED_CITATION" not in _codes(run)
+
+
+# ---------------------------------------------------------------------------
 # INV_LATEX_ENVIRONMENT_UNBALANCED
 # ---------------------------------------------------------------------------
 

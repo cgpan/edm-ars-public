@@ -2376,6 +2376,57 @@ _FATAL_LATEX = (
     "Fatal error occurred",
 )
 
+#: An undefined citation as the kernel, natbib and biblatex actually print
+#: it. All three put "on page N" between the key and "undefined"::
+#:
+#:     LaTeX Warning: Citation `foo2020' on page 1 undefined on input line 3.
+#:     Package natbib Warning: Citation `foo2020' on page 1 undefined on ...
+#:     LaTeX Warning: Citation 'foo2020' on page 1 undefined on input line 5.
+#:
+#: (the last one is biblatex, which opens with a straight quote). The
+#: pattern this replaced required "' undefined" straight after the key,
+#: matched none of them, and so never fired on a real log: a PDF full of
+#: [?] was released as clean. "on page N" stays optional for the
+#: pre-2.09-style message some classes still emit.
+_UNDEFINED_CITATION = re.compile(
+    r"Citation [`']([^'\s]+)' (?:on page \S+ )?undefined"
+)
+#: Older biblatex reports a key missing from the .bib this way, over
+#: several ``(biblatex)``-prefixed continuation lines.
+_BIBLATEX_MISSING_ENTRY = re.compile(
+    r"The following entry could not be found\s*\n\(biblatex\)\s+in the "
+    r"database:\s*\n\(biblatex\)\s+(\S+)"
+)
+#: TeX hard-wraps its log at ``max_print_line`` (79 in TeX Live and
+#: MiKTeX), so a long citation key arrives split across two lines.
+_TEX_LOG_LINE_WIDTH = 79
+
+
+def _unwrap_tex_log(log: str) -> str:
+    """Rejoin lines TeX split at the log width, so a pattern can see a
+    warning whole. A line exactly as wide as the limit is a wrapped one;
+    joining the rare genuine 79-character line to its successor only
+    concatenates text and cannot manufacture a match."""
+    out: list[str] = []
+    carry = ""
+    for line in log.splitlines():
+        if len(line) >= _TEX_LOG_LINE_WIDTH:
+            carry += line
+            continue
+        out.append(carry + line)
+        carry = ""
+    if carry:
+        out.append(carry)
+    return "\n".join(out)
+
+
+def _undefined_citations(log: str) -> list[str]:
+    """Keys the final LaTeX pass reported as undefined, in log order."""
+    text = _unwrap_tex_log(log)
+    keys = _UNDEFINED_CITATION.findall(text)
+    keys += _BIBLATEX_MISSING_ENTRY.findall(text)
+    return keys
+
 
 def check_latex_compile_errors(a: RunArtifacts) -> list[Finding]:
     """Errors in the run's own LaTeX log.
@@ -2401,7 +2452,7 @@ def check_latex_compile_errors(a: RunArtifacts) -> list[Finding]:
         for ln in log.splitlines()
         if ln.startswith("! ") or ln.startswith("!pdfTeX error")
     ]
-    undefined = re.findall(r"Citation `([^']+)' undefined", log)
+    undefined = _undefined_citations(log)
     unused_opts = re.findall(r"Unused global option\(s\):\s*\n?\s*\[([^\]]*)\]", log)
     out: list[Finding] = []
     markers = [m for m in _FATAL_LATEX if m in log]
