@@ -1,12 +1,18 @@
 # EDM-ARS: Educational Data Mining Automated Research System
 
 ## What
-Multi-agent pipeline that automates prediction-focused EDM research.
-Six agents (ProblemFormulator → DataEngineer → Analyst → Critic →
-OutlineAgent → Writer) coordinated by a state-machine orchestrator, plus an
-optional seventh (Verifier, `src/agents/verifier.py`) that reads the finished
-manuscript. Given HSLS:09 data and a research prompt, produces a complete
-LaTeX paper with real citations.
+Multi-agent pipeline that automates educational data mining research on
+curated public-use datasets. Five study types: prediction (`prediction`),
+observational causal inference (`causal_soo`), individualised treatment rules
+(`causal_itr`), cross-cohort difference-in-differences (`causal_did`) and
+psychometrics (`psychometrics`). Six agents (ProblemFormulator → DataEngineer →
+Analyst → Critic → OutlineAgent → Writer) coordinated by a state-machine
+orchestrator, plus an optional seventh (Verifier, `src/agents/verifier.py`) that
+reads the finished manuscript. Given a dataset and a research prompt (or, for
+every study type except prediction, a locked research spec passed with
+`--research-spec`), it produces a complete draft LaTeX paper with real
+citations. Everything it produces is an AI-generated draft; see
+`DISCLAIMER.md` and `PRIVACY.md`.
 
 **Verification.** After the Writer — and after the review gate, when that is
 enabled — a `VERIFYING` stage holds the finished manuscript against the run's
@@ -21,55 +27,62 @@ archived manuscripts and the four templates. Note that setting
 `verification.blocking_codes` at all overrides `blocking`: only the listed
 codes stop a run.
 
-**V2.0 architecture** uses a skill-based system: composable knowledge units
-(SKILL.md files) are matched at runtime by `SkillRegistry` and injected into
-agent prompts via a `{{SKILLS}}` placeholder. See "V2.0 Skill-Based Architecture"
-below. V2.0 ships partial: DataEngineer is slim and skill-injected (production
-verified); the other four agents retain V1 monolithic prompts pending V2.1
-work (see runbook below).
+**Skill-based architecture.** Composable knowledge units (SKILL.md files) are
+matched at runtime by `SkillRegistry` and injected into agent prompts via a
+`{{SKILLS}}` placeholder. The six pipeline agents' prompts in
+`agent_prompts/` (one per agent and study type) are slim and skill-injected;
+the older monolithic prompts are kept beside them as
+`agent_prompts/<agent>.v1.yaml.bak` for reference only. See "Skill-Based
+Architecture" below.
 
-## V3 Status (tag v3.0.0, 2026-07-08)
-
-Causal-inference capability phase COMPLETE: four task types (prediction,
-causal_soo, causal_itr, causal_did), ten certified estimation methods
-(M1-M10), three runnable datasets (hsls09_public, els_2002,
-did_els_hsls_panel), calibrated LSAR gate with median sampling. All task
-types have gate-passing papers. The full change log and the
-deferred-work backlog are kept internally and are not part of this mirror. Next phase:
-V4 psychometrics (plan in discussion).
+## Status
+Five study types, ten certified estimation methods (M1-M10) plus the
+psychometric battery (P1-P7, estimated in R through `src/r_bridge.py`), four
+curated datasets (hsls09_public, els_2002, did_els_hsls_panel,
+assistments_0910), and an optional calibrated review gate (LSAR, a separate
+public repository: https://github.com/cgpan/LSAR-public) with median sampling
+for borderline scores. Regression discontinuity and instrumental variables are
+certified on synthetic data but have no runnable dataset. The change log and
+backlog are kept internally and are not part of this mirror.
 
 ## Authoritative Spec
-@SPEC.md is the single source of truth. When in doubt, follow the SPEC.
+@SPEC.md is the original design specification and the reference for schemas
+and agent contracts. Its model IDs, provider and sandbox default are
+historical: `config.yaml` and the code are current where they differ.
 
 ## Tech Stack
-- Python 3.11+
-- Anthropic SDK (claude-sonnet-4-6 for most agents, claude-opus-4-6 for Critic)
-- pandas, scikit-learn, xgboost, shap, matplotlib, seaborn
+- Python 3.11 or 3.12 (not 3.13+: `dowhy<0.13` cannot be installed there)
+- LLM providers behind `BaseAgent.call_llm()`: DeepSeek by default (OpenAI-compatible endpoint via the `openai` SDK), OpenAI or any OpenAI-compatible server, Anthropic, and MiniMax (legacy). Models per agent are set in `config.yaml`.
+- pandas, scikit-learn, xgboost, shap, matplotlib, seaborn, dowhy
 - PyYAML for registry parsing
-- requests for Semantic Scholar API
-- Docker (optional; sandboxed code execution for LLM-generated analysis code)
-- docker Python SDK >= 7.0 (host-side; optional — falls back to subprocess if absent)
+- requests for Semantic Scholar, arXiv and Crossref
+- LaTeX (pdflatex + bibtex for the ACM template; biber for the APA 7 journal template)
+- R 4.4+ with jsonlite, lavaan, mirt, CDM (MASS ships with R) — psychometrics only
+- Docker (optional, EXPERIMENTAL, off by default: `sandbox.enabled: false`); the default executor runs generated code as a local child process with API keys stripped from its environment
 - No frameworks (custom orchestrator, no LangChain/LangGraph)
 
 ## Project Layout
-- SPEC.md — definitive implementation spec (READ THIS FIRST)
-- config.yaml — central configuration (model IDs, paths, pipeline params)
-- data/raw/ — HSLS:09 CSV (gitignored, ~24K rows)
+- SPEC.md — original implementation spec (schemas, agent designs)
+- DISCLAIMER.md, PRIVACY.md — user-facing disclaimer and data-handling notice; keep them true to the code
+- config.yaml — central configuration (providers, model IDs, paths, pipeline params)
+- .env.example — every environment variable the pipeline reads, with empty values
+- requirements.txt (runtime), requirements-dev.txt (tests, lint, types), requirements-lsar.txt (review gate), requirements-sandbox.txt (Docker image)
+- data/raw/ — dataset files (gitignored; see README "Data setup" for exact names)
 - data_registry/datasets/ — YAML variable registries (Tier 1 curated, Tier 2 auto)
 - data_registry/task_templates/ — task workflow definitions
-- agent_prompts/ — YAML files with system prompts for each agent
-- templates/ — LaTeX paper template (V2 bundled in skills/writing/acm-acmart-sigconf-template/)
-- skills/ — V2.0 skill library; one SKILL.md per skill; layers: task-type/, dataset/, methodology/, writing/
+- agent_prompts/ — YAML files with system prompts for each agent and study type
+- templates/ — LaTeX templates: paper_template_v2.tex (ACM sigconf) and paper_template_journal.tex (APA 7)
+- skills/ — skill library; one SKILL.md per skill; layers: task-type/, dataset/, methodology/, writing/
 - src/ — all Python source code
 - src/agents/ — one module per agent, all inherit from BaseAgent
 - src/skills/ — skill registry infrastructure (schema, loader, matcher, composer, registry facade)
+- r_helpers/ — certified R scripts the psychometric helpers run
+- runs/fixtures/ — example locked research specs; runs/configs/ — configs of archived validation runs
+- scripts/ — onboarding, synthetic-DGP gates, diagnostics (verify_skill_flow.py, audit_public_paths.py, ...)
 - tests/ — pytest test suite
-- regression/ — Phase 2c regression artifacts (slim drafts in proposed_slim/, run captures by phase)
-- audit/ — Phase 0 + Phase 2c audit documents
-- scripts/ — diagnostics (verify_skill_flow.py, fingerprint_run.py, sanity checks)
 - output/ — pipeline run outputs (gitignored)
 
-## V2.0 Skill-Based Architecture
+## Skill-Based Architecture
 
 EDM-ARS uses a skill-based architecture for methodology, dataset-specific
 knowledge, task-type workflows, and writing conventions. Skills live in
@@ -90,10 +103,15 @@ agent's system prompt via a `{{SKILLS}}` placeholder.
 
 See `skills/README.md` for the expanded mandatory criterion.
 
-### Adoption status (V2.0 ships partial)
-- **DataEngineer**: slim (130 lines, was 363) — production verified on OpenAI gpt-5.4 + MiniMax-M2.7
-- **ProblemFormulator, Analyst, Critic, Writer, OutlineAgent**: V1 monolithic prompts retained pending V2.1 slim work
-- **Reason**: V2.0 slim cascade exposed multiple latent rules that V1 monolithic prompts contained implicitly. Retention rule for sample-size, qcut duplicates, one-hot cardinality guard, etc. — all surfaced and fixed during Phase 2c. Additional rules remain to be discovered via continued slim attempts. Rather than block shipping, V2.0 ships with one slim verified and the rest deferred.
+### Rules learned while slimming the prompts
+Slimming the monolithic prompts exposed rules they had carried implicitly
+(sample-size retention, qcut duplicates, the one-hot cardinality guard, and
+others); each was harvested into a skill. When a prompt is slimmed, the
+previous version is kept as `agent_prompts/<agent>.v1.yaml.bak` (tests check
+that the backups exist). Output contracts must never live in
+a skill that a per-layer cap can drop: tag such skills `mandatory`, and check
+the rendered prompt through the orchestrator path (`match_and_compose` with
+caps and context), never a bare `match()`.
 
 ### Adding a new skill
 1. Create `skills/<layer>/<name>/SKILL.md` with required frontmatter (see `skills/README.md`).
@@ -101,45 +119,42 @@ See `skills/README.md` for the expanded mandatory criterion.
 3. If the skill's violation produces silent corruption / structural incompleteness, tag `rule_severity: mandatory`.
 4. Run `pytest tests/`.
 
-### V2.1 slim runbook
-Future work to slim the four remaining agent prompts:
-1. Apply the slim draft from `regression/proposed_slim/<agent>.yaml` to `agent_prompts/<agent>.yaml` (back up the v1 to `agent_prompts/<agent>.v1.yaml.bak`).
-2. Run regression on OpenAI gpt-5.4 (or stronger) — `regression/regression_config_openai.yaml`.
-3. If pipeline fails on a rule violation: harvest the rule from the V1 monolithic prompt into the relevant skill (mandatory if silent corruption / structural).
-4. Tag mandatory; re-verify with `scripts/verify_skill_flow.py`.
-5. Re-run regression. Continue until clean.
-6. Repeat for the next agent. Recommended order matches dependency: ProblemFormulator → Analyst → Critic → Writer + OutlineAgent.
-
 ## Key Commands
-- Run tests: `pytest tests/ -v`
-- Lint: `ruff check src/ tests/`
-- Type check: `mypy src/`
+- Install dev tools: `pip install -r requirements-dev.txt`
+- Run tests: `python -m pytest tests/ -q` (offline; about 15 minutes)
+- Lint: `ruff check src/ tests/` (known findings remain; not yet a gate)
+- Type check: `mypy src/` (not yet clean)
+- Public-mirror audit: `python scripts/audit_public_paths.py` (must report 0 findings)
+- Pre-flight without spending: `python -m src.main --dry-run`
 - Run pipeline: `python -m src.main --dataset hsls09_public`
-- Build sandbox image: `docker build -t edm-ars-sandbox:latest .`
-- Build via Compose: `docker compose build sandbox`
-- Run pipeline without sandbox (subprocess fallback): set `sandbox.enabled: false` in config.yaml
+- Locked spec: `python -m src.main --research-spec runs/fixtures/<spec>.json --output-dir output/<name>`
+- Resume: `python -m src.main --output-dir output/<name> --resume`
+- Build the experimental sandbox image: `docker build -t edm-ars-sandbox:latest .`
 
 ## Coding Rules
 - Type hints on ALL functions and method signatures
 - Agent system prompts live in agent_prompts/*.yaml, NEVER hardcoded in Python
 - **Skill content lives in `skills/<layer>/<name>/SKILL.md`, not in agent prompts.** To add capabilities, add a skill — do not bloat agent prompts.
-- All LLM calls go through BaseAgent.call_llm() — never call Anthropic / OpenAI APIs directly
+- All LLM calls go through BaseAgent.call_llm() — never call provider APIs directly
 - All random operations use random_state=42
 - Config values come from config.yaml via src/config.py — never hardcode model IDs
+- A new config key is read with `.get()` and a default, and is added to config.yaml with a comment in the same change
 - Each agent is a separate module in src/agents/. Do not merge agents.
 - Log all pipeline events to output/{run_dir}/pipeline.log
 - Follow the inter-agent message schemas defined in SPEC §6 exactly
-- Sandbox has NO network access (network_disabled: true); LLM-generated code must not make HTTP calls
+- LLM-generated code must not make HTTP calls. Only the Docker sandbox enforces this (network_disabled: true); the default local executor does not, so it is a rule for prompts and skills, not a guarantee
 - When requirements-sandbox.txt changes, rebuild the image: `docker build -t edm-ars-sandbox:latest .`
-- subprocess.run() must ONLY appear in src/sandbox.py (SubprocessExecutor); never in agent or base code
-- Writer agent uses templates/paper_template.tex — NEVER generates LaTeX preamble from scratch
+- Running generated code happens only in src/sandbox.py; subprocess calls stay in src/sandbox.py, apart from the existing R bridge (src/r_bridge.py) and LaTeX/review-gate paths — never add one in agent or base code
+- The Writer fills templates/paper_template_v2.tex (conference) or templates/paper_template_journal.tex (journal, `writer.venue_format: journal`) — NEVER generates a LaTeX preamble from scratch
 - Paper authors are fixed (EDM-ARS, AI_Name, Human_Author_Name) — never modified by agents. The two placeholder names are yours to fill in; the Writer asserts the block is still present, not what it says.
+- When behaviour changes what leaves the user's computer or what runs on it, update PRIVACY.md / DISCLAIMER.md in the same change
 
 ## IMPORTANT
-- NEVER put API keys in code. Use ANTHROPIC_API_KEY env variable.
-- Critic agent MUST use opus model. All others use sonnet.
+- NEVER put API keys in code, config.yaml, tests or docs. Keys come from environment variables or a gitignored .env (DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, MINIMAX_API_KEY, SEMANTIC_SCHOLAR_API_KEY).
+- The Critic runs on the strongest model tier configured for the active provider (SPEC); with the default DeepSeek config every reasoning-heavy agent uses deepseek-v4-pro and only the outline and verifier stages use the cheap tier.
 - Test set is ALWAYS 20% of analytic sample, stratified for classification.
 - NEVER impute the outcome variable. Drop rows with missing outcomes.
+- Public mirror: no absolute user paths, usernames or emails in any tracked file.
 
 ## Context Docs (read when relevant)
 - @SPEC.md — full system spec with all schemas and agent designs
