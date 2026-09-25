@@ -1,197 +1,22 @@
 """Shared fixtures and fakes for the providers/datasets/toolchain/LSAR tests.
 
-Other edmars modules (model, paths, settings, proc, secrets) are built on
-a sibling branch. When one of them is missing here, a minimal stand-in
-that follows the fixed API in CLI_SPEC section 18 is registered, so these
-tests run on this branch alone. Once the branches are merged the real
-modules exist and no stand-in is installed.
-
 Fixtures are imported into each test module by name (pytest discovers
-them there); nothing here is a conftest, so it cannot collide with the
-package conftest another branch adds.
+them there). The stand-ins this file once registered for sibling modules
+(model, paths, settings, proc, secrets, ui) are gone: the real modules
+exist, and the tests run against them.
 """
 
 from __future__ import annotations
 
-import importlib
-import os
-import shutil
 import socket
 import subprocess
-import sys
-import types
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal
+from typing import Any, Callable, Iterator
 
 import pytest
 import requests
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-# ---------------------------------------------------------------------------
-# Stand-ins for modules owned by other branches
-# ---------------------------------------------------------------------------
-
-
-def _build_model(mod: types.ModuleType) -> None:
-    @dataclass
-    class Check:
-        name: str
-        status: Literal["ok", "warn", "fail", "info"]
-        detail: str
-        fix: str | None = None
-
-    Check.__module__ = mod.__name__
-    mod.Check = Check  # type: ignore[attr-defined]
-
-
-def _build_paths(mod: types.ModuleType) -> None:
-    def home_override() -> Path | None:
-        value = os.environ.get("EDMARS_HOME")
-        return Path(value) if value else None
-
-    def app_root() -> Path:
-        value = os.environ.get("EDMARS_APP_ROOT")
-        return Path(value) if value else REPO_ROOT
-
-    def config_dir() -> Path:
-        home = home_override()
-        return home if home else Path.home() / ".edm-ars-test-config"
-
-    def data_dir() -> Path:
-        home = home_override()
-        return (home / "data") if home else Path.home() / ".edm-ars-test-data"
-
-    def cache_dir() -> Path:
-        home = home_override()
-        return (home / "cache") if home else Path.home() / ".edm-ars-test-cache"
-
-    def settings_path() -> Path:
-        return config_dir() / "settings.yaml"
-
-    def sync_provider(path: Path) -> str | None:
-        return None
-
-    for fn in (home_override, app_root, config_dir, data_dir, cache_dir,
-               settings_path, sync_provider):
-        setattr(mod, fn.__name__, fn)
-
-
-def _build_settings(mod: types.ModuleType) -> None:
-    import copy
-
-    import yaml
-
-    defaults: dict[str, Any] = {
-        "schema": 1, "datasets": {}, "latex": {"mode": None, "pdflatex": None},
-        "r": {"rscript": None, "packages_ok": False},
-        "lsar": {"enabled": False, "auto_review": False, "home": None, "ref": None},
-    }
-
-    def _path() -> Path:
-        from edmars import paths
-
-        return Path(paths.settings_path())
-
-    def get(settings: dict[str, Any], dotted: str, default: Any = None) -> Any:
-        node: Any = settings
-        for part in dotted.split("."):
-            if not isinstance(node, dict) or part not in node:
-                return default
-            node = node[part]
-        return node
-
-    def set_(settings: dict[str, Any], dotted: str, value: Any) -> None:
-        node = settings
-        parts = dotted.split(".")
-        for part in parts[:-1]:
-            if not isinstance(node.get(part), dict):
-                node[part] = {}
-            node = node[part]
-        node[parts[-1]] = value
-
-    def load() -> dict[str, Any]:
-        data = copy.deepcopy(defaults)
-        if _path().is_file():
-            data.update(yaml.safe_load(_path().read_text(encoding="utf-8")) or {})
-        return data
-
-    def save(settings: dict[str, Any]) -> None:
-        _path().parent.mkdir(parents=True, exist_ok=True)
-        tmp = _path().with_suffix(".tmp")
-        tmp.write_text(yaml.safe_dump(settings), encoding="utf-8")
-        os.replace(tmp, _path())
-
-    mod.DEFAULTS = defaults  # type: ignore[attr-defined]
-    for fn in (get, set_, load, save):
-        setattr(mod, fn.__name__, fn)
-
-
-def _build_proc(mod: types.ModuleType) -> None:
-    def run(args: list[str], *, timeout: float | None = None,
-            env: dict[str, str] | None = None,
-            cwd: str | None = None) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(  # noqa: S603 - test stand-in for edmars.proc
-            list(args), capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout, env=env, cwd=cwd,
-            stdin=subprocess.DEVNULL,
-        )
-
-    def which(name: str) -> str | None:
-        return shutil.which(name)
-
-    mod.run = run  # type: ignore[attr-defined]
-    mod.which = which  # type: ignore[attr-defined]
-
-
-def _build_secrets(mod: types.ModuleType) -> None:
-    def get_secret(name: str) -> str | None:
-        return os.environ.get(name) or None
-
-    mod.get_secret = get_secret  # type: ignore[attr-defined]
-
-
-def _build_ui(mod: types.ModuleType) -> None:
-    import contextlib
-
-    def _say(msg: str = "") -> None:
-        print(msg)
-
-    for name in ("ok", "info", "warn", "fail", "say"):
-        setattr(mod, name, _say)
-    mod.panel = lambda title, body: print(f"[{title}]\n{body}")  # type: ignore[attr-defined]
-
-    @contextlib.contextmanager
-    def status(message: str) -> Iterator[None]:
-        print(message)
-        yield
-
-    mod.status = status  # type: ignore[attr-defined]
-
-
-def _install(name: str, build: Callable[[types.ModuleType], None]) -> None:
-    full = f"edmars.{name}"
-    try:
-        importlib.import_module(full)
-        return
-    except ModuleNotFoundError as exc:
-        if exc.name != full:
-            raise
-    import edmars
-
-    mod = types.ModuleType(full)
-    mod.__dict__["__edmars_test_stub__"] = True
-    build(mod)
-    sys.modules[full] = mod
-    setattr(edmars, name, mod)
-
-
-for _name, _builder in (("model", _build_model), ("paths", _build_paths),
-                        ("settings", _build_settings), ("proc", _build_proc),
-                        ("secrets", _build_secrets), ("ui", _build_ui)):
-    _install(_name, _builder)
 
 
 # ---------------------------------------------------------------------------

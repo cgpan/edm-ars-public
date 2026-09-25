@@ -1,212 +1,24 @@
 """Shared support for the run/live-view/results tests.
 
-Two jobs:
-
-1. The runner, view and results modules call sibling modules that other
-   work packages own (``edmars.paths``, ``proc``, ``secrets``, ``ui``,
-   ``model``, ``settings``). When one of them is not present on this
-   branch, a minimal stand-in that follows the CLI spec (section 18) is
-   installed under its real name. Once the real module exists, the
-   stand-in is never used -- the tests only rely on the section-18 API,
-   and patch behaviour (spawning, keyring) explicitly.
-2. Fixtures that build synthetic run folders for every way a run can end.
+Fixtures that build synthetic run folders for every way a run can end.
+The tests run against the real sibling modules (``edmars.paths``,
+``proc``, ``secrets``, ``ui``, ``model``, ``settings``) and patch
+behaviour (spawning, keyring) explicitly.
 
 Nothing here touches the network, the real keyring or the real home
 directory: ``EDMARS_HOME`` points at a temporary folder.
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
-import re
-import subprocess
 import sys
-import types
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-# ---------------------------------------------------------------------------
-# Stand-ins (installed only when the real module is missing)
-# ---------------------------------------------------------------------------
-
-
-def _stub_paths() -> types.ModuleType:
-    m = types.ModuleType("edmars.paths")
-
-    def home_override() -> Path | None:
-        value = os.environ.get("EDMARS_HOME")
-        return Path(value) if value else None
-
-    def _home() -> Path:
-        override = home_override()
-        if override is None:
-            raise RuntimeError("tests must set EDMARS_HOME")
-        return override
-
-    def app_root() -> Path:
-        value = os.environ.get("EDMARS_APP_ROOT")
-        return Path(value) if value else REPO_ROOT
-
-    m.home_override = home_override  # type: ignore[attr-defined]
-    m.app_root = app_root  # type: ignore[attr-defined]
-    m.config_dir = lambda: _home()  # type: ignore[attr-defined]
-    m.data_dir = lambda: _home() / "data"  # type: ignore[attr-defined]
-    m.cache_dir = lambda: _home() / "cache"  # type: ignore[attr-defined]
-    m.settings_path = lambda: _home() / "settings.yaml"  # type: ignore[attr-defined]
-    m.default_studies_dir = lambda: _home() / "studies"  # type: ignore[attr-defined]
-    m.sync_provider = lambda path: None  # type: ignore[attr-defined]
-    return m
-
-
-def _stub_proc() -> types.ModuleType:
-    m = types.ModuleType("edmars.proc")
-
-    def run(args: list[str], *, timeout: float | None = None, env: dict[str, str] | None = None,
-            cwd: Path | str | None = None) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(args, timeout=timeout, env=env, cwd=cwd, capture_output=True,
-                              text=True, encoding="utf-8", errors="replace", check=False)
-
-    def spawn_detached(args: list[str], *, cwd: Path, env: dict[str, str], log_path: Path) -> int:
-        raise AssertionError("tests must patch edmars.proc.spawn_detached")
-
-    def pid_alive(pid: int) -> bool:
-        import psutil
-
-        return psutil.pid_exists(pid)
-
-    def terminate_tree(pid: int, grace_s: float = 30) -> None:
-        raise AssertionError("tests must patch edmars.proc.terminate_tree")
-
-    m.run = run  # type: ignore[attr-defined]
-    m.spawn_detached = spawn_detached  # type: ignore[attr-defined]
-    m.which = lambda name: None  # type: ignore[attr-defined]
-    m.pid_alive = pid_alive  # type: ignore[attr-defined]
-    m.terminate_tree = terminate_tree  # type: ignore[attr-defined]
-    m.keep_awake = lambda pid: None  # type: ignore[attr-defined]
-    return m
-
-
-_SECRET_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]{8,}")
-
-
-def _stub_secrets() -> types.ModuleType:
-    m = types.ModuleType("edmars.secrets")
-
-    def child_secrets(names: Iterable[str]) -> dict[str, str]:
-        return {n: os.environ[n] for n in names if os.environ.get(n)}
-
-    def redact(text: str) -> str:
-        return _SECRET_PATTERN.sub("[redacted]", text)
-
-    m.child_secrets = child_secrets  # type: ignore[attr-defined]
-    m.redact = redact  # type: ignore[attr-defined]
-    m.get_secret = lambda name: os.environ.get(name)  # type: ignore[attr-defined]
-    return m
-
-
-def _stub_ui() -> types.ModuleType:
-    from rich.console import Console
-
-    m = types.ModuleType("edmars.ui")
-
-    class NonInteractiveError(RuntimeError):
-        pass
-
-    state = {"plain": True}
-    m.NonInteractiveError = NonInteractiveError  # type: ignore[attr-defined]
-    m.console = Console(highlight=False)  # type: ignore[attr-defined]
-    m.is_plain = lambda: state["plain"]  # type: ignore[attr-defined]
-    m.set_plain = lambda flag: state.__setitem__("plain", bool(flag))  # type: ignore[attr-defined]
-    m.opened = []  # type: ignore[attr-defined]
-    m.open_path = lambda path: m.opened.append(Path(path))  # type: ignore[attr-defined]
-
-    def select(message: str, choices: list[tuple[str, str]], default: str | None = None) -> str:
-        if default is None:
-            raise NonInteractiveError(message)
-        return default
-
-    m.select = select  # type: ignore[attr-defined]
-    for name in ("ok", "info", "warn", "fail"):
-        setattr(m, name, lambda msg, _n=name: print(f"[{_n}] {msg}"))
-    m.panel = lambda title, body: print(f"{title}\n{body}")  # type: ignore[attr-defined]
-    return m
-
-
-def _stub_model() -> types.ModuleType:
-    m = types.ModuleType("edmars.model")
-
-    @dataclass
-    class StudyPlan:
-        task_type: str
-        dataset: str
-        research_question: str
-        prompt: str | None = None
-        spec: dict | None = None
-        example_id: str | None = None
-        experimental: bool = False
-        venue: str = "EDM"
-        paper_format: str = "conference"
-        review: bool = False
-
-    @dataclass
-    class Check:
-        name: str
-        status: Literal["ok", "warn", "fail", "info"]
-        detail: str
-        fix: str | None = None
-
-    m.StudyPlan = StudyPlan  # type: ignore[attr-defined]
-    m.Check = Check  # type: ignore[attr-defined]
-    return m
-
-
-def _stub_settings() -> types.ModuleType:
-    m = types.ModuleType("edmars.settings")
-    m.DEFAULTS = {}  # type: ignore[attr-defined]
-    m.load = lambda: {}  # type: ignore[attr-defined]
-    m.save = lambda settings: None  # type: ignore[attr-defined]
-    return m
-
-
-_FACTORIES = {
-    "paths": _stub_paths,
-    "proc": _stub_proc,
-    "secrets": _stub_secrets,
-    "ui": _stub_ui,
-    "model": _stub_model,
-    "settings": _stub_settings,
-}
-
-STUBBED: list[str] = []
-
-
-def _install_stubs() -> None:
-    import edmars
-
-    for name, factory in _FACTORIES.items():
-        full = f"edmars.{name}"
-        if full in sys.modules:
-            continue
-        try:
-            spec = importlib.util.find_spec(full)
-        except (ImportError, ValueError):
-            spec = None
-        if spec is not None:
-            continue
-        module = factory()
-        sys.modules[full] = module
-        setattr(edmars, name, module)
-        STUBBED.append(name)
-
-
-_install_stubs()
 
 
 # ---------------------------------------------------------------------------

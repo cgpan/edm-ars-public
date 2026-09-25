@@ -15,12 +15,8 @@ from typing import Any
 
 import pytest
 
-from tests.cli import _study_stubs
-
-_study_stubs.install()
-
-from edmars import study  # noqa: E402
-from edmars.model import Check, StudyPlan  # noqa: E402
+from edmars import study
+from edmars.model import Check, StudyPlan
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_FILES = {
