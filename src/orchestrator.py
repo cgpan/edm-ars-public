@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import csv
+import dataclasses
 import json
 import os
 import shutil
+import time
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -220,6 +223,49 @@ def _resolve_skill_caps(task_type: str) -> dict[str, int]:
     return _SKILL_CAPS_BY_TASK_TYPE.get(task_type, _DEFAULT_SKILL_CAPS)
 
 
+class CheckpointCorruptError(ValueError):
+    """``checkpoint.json`` exists but cannot be read back.
+
+    Raised from ``Orchestrator.__init__`` instead of a bare
+    ``JSONDecodeError`` so the message names the file and says what to
+    do. With atomic saves this should only come from an external edit or
+    a file written by an older version.
+    """
+
+
+def _atomic_write_text(path: str, text: str) -> None:
+    """Replace ``path`` with ``text`` so a reader never sees half a file.
+
+    ``open(path, "w")`` truncates first and writes in chunks: a kill, a
+    full disk or a serialisation error part-way through used to leave a
+    partial ``checkpoint.json`` -- the run's only resume point -- that the
+    next ``--resume`` could not parse. The text is written to a sibling
+    temp file, flushed to disk and moved over the target in one step.
+    """
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                # Windows refuses to replace a file another process has
+                # open (an editor, a status viewer). Retry briefly.
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -233,6 +279,15 @@ class Orchestrator:
         self._user_prompt: Optional[str] = None
 
         os.makedirs(ctx.output_dir, exist_ok=True)
+
+        # A resumed run is the run in the checkpoint, not whatever the
+        # command line says this time. Adopt the checkpoint's dataset,
+        # task type and locked spec BEFORE the template, adapter and
+        # agents are built from them (D2) -- restoring them afterwards
+        # would leave a causal run running prediction prompts.
+        checkpoint = self._read_checkpoint()
+        if checkpoint is not None:
+            self._adopt_checkpoint_identity(checkpoint)
 
         # V4 psychometrics: executor subprocesses import the copied
         # r_bridge.py flat; give them a deterministic path to the
@@ -290,7 +345,8 @@ class Orchestrator:
         self.writer = Writer(ctx, "writer", config, **agent_kwargs)
 
         # Resume from checkpoint if present
-        self._load_checkpoint()
+        if checkpoint is not None:
+            self._load_checkpoint(checkpoint)
         self._log("Orchestrator", f"Code executor: {executor_type}")
         if self._pending_memory_warning:
             self._log("Orchestrator", self._pending_memory_warning)
@@ -1480,31 +1536,117 @@ class Orchestrator:
         }
 
     def _save_checkpoint(self) -> None:
-        path = os.path.join(self.ctx.output_dir, "checkpoint.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(self.ctx.to_dict(), f, indent=2)
+        """Persist the context atomically (D1).
 
-    def _load_checkpoint(self) -> None:
+        Serialised to a string first, so a value json cannot encode raises
+        before anything on disk changes; then written to a temp file and
+        moved over checkpoint.json in one step. A kill or a full disk
+        mid-write can no longer leave the run's only resume point
+        half-written.
+        """
+        path = os.path.join(self.ctx.output_dir, "checkpoint.json")
+        text = json.dumps(self.ctx.to_dict(), indent=2)
+        _atomic_write_text(path, text)
+
+    def _read_checkpoint(self) -> Optional[dict]:
+        """Return the parsed checkpoint, None when there is none.
+
+        Raises :class:`CheckpointCorruptError` naming the file when it
+        exists but cannot be parsed, instead of a bare JSONDecodeError out
+        of the constructor.
+        """
         path = os.path.join(self.ctx.output_dir, "checkpoint.json")
         if not os.path.exists(path):
-            return
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise CheckpointCorruptError(
+                f"{path} exists but is not valid JSON ({exc}). It is this "
+                "run's resume point and cannot be read. Move it aside to "
+                "start this directory afresh, or restore it from a copy."
+            ) from exc
+        if not isinstance(data, dict) or "current_state" not in data:
+            raise CheckpointCorruptError(
+                f"{path} does not look like an EDM-ARS checkpoint (no "
+                "current_state). Move it aside to start this directory afresh."
+            )
+        return data
+
+    def _adopt_checkpoint_identity(self, data: dict) -> None:
+        """Make the context describe the checkpointed run (D2).
+
+        ``--resume`` used to take dataset, task type and locked spec from
+        the command line while every artifact came from the checkpoint,
+        so the README's resume example re-typed a locked causal run as an
+        HSLS prediction run with nothing warning anyone. The checkpoint
+        wins; a disagreeing flag is reported, not obeyed.
+        """
+        def _warn(message: str) -> None:
+            self._log("Orchestrator", f"WARNING: {message}")
+            warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+        ck_dataset = data.get("dataset_name")
+        if ck_dataset and ck_dataset != self.ctx.dataset_name:
+            _warn(
+                f"--dataset {self.ctx.dataset_name!r} disagrees with the "
+                f"checkpoint in {self.ctx.output_dir}, which is a "
+                f"{ck_dataset!r} run. Resuming it as {ck_dataset!r}."
+            )
+            self.ctx.dataset_name = ck_dataset
+            if data.get("raw_data_path"):
+                self.ctx.raw_data_path = data["raw_data_path"]
+        ck_task = data.get("task_type")
+        if ck_task and ck_task != self.ctx.task_type:
+            _warn(
+                f"task type {self.ctx.task_type!r} (from config or "
+                f"--research-spec) disagrees with the checkpoint, which is a "
+                f"{ck_task!r} run. Resuming it as {ck_task!r}."
+            )
+            self.ctx.task_type = ck_task
+        if "locked_research_spec" in data:
+            ck_locked = data.get("locked_research_spec")
+            if (
+                self.ctx.locked_research_spec is not None
+                and ck_locked != self.ctx.locked_research_spec
+            ):
+                _warn(
+                    "--research-spec differs from the locked spec this run "
+                    "started with; the checkpoint's spec is kept."
+                )
+            self.ctx.locked_research_spec = ck_locked
+
+    #: Fields ``_load_checkpoint`` does not copy: where the run lives and
+    #: the live event handle; the identity fields, which
+    #: ``_adopt_checkpoint_identity`` already settled (a relocated raw
+    #: data path for the SAME dataset is kept); and the revision budget,
+    #: which follows the current config.
+    _NOT_RESTORED = frozenset(
+        {
+            "output_dir",
+            "event_sink",
+            "dataset_name",
+            "raw_data_path",
+            "task_type",
+            "locked_research_spec",
+            "max_revision_cycles",
+        }
+    )
+
+    def _load_checkpoint(self, data: Optional[dict] = None) -> None:
+        if data is None:
+            data = self._read_checkpoint()
+            if data is None:
+                return
         loaded = PipelineContext.from_dict(data)
-        # Mutate in-place so agent references stay valid
-        self.ctx.current_state = loaded.current_state
-        self.ctx.completed_stages = loaded.completed_stages
-        self.ctx.revision_cycle = loaded.revision_cycle
-        self.ctx.research_spec = loaded.research_spec
-        self.ctx.literature_context = loaded.literature_context
-        self.ctx.retrieved_literature = loaded.retrieved_literature
-        self.ctx.data_report = loaded.data_report
-        self.ctx.results_object = loaded.results_object
-        self.ctx.review_report = loaded.review_report
-        self.ctx.paper_text = loaded.paper_text
-        self.ctx.review_gate_result = loaded.review_gate_result
-        self.ctx.errors = loaded.errors
-        self.ctx.log = loaded.log
+        # Mutate in place so agent references stay valid. Every dataclass
+        # field is copied, so a field added later cannot be silently left
+        # behind the way paper_outline and run_start_time were.
+        for f in dataclasses.fields(PipelineContext):
+            if f.name in self._NOT_RESTORED:
+                continue
+            setattr(self.ctx, f.name, getattr(loaded, f.name))
         self._log("Orchestrator", f"Resumed from checkpoint (state={loaded.current_state})")
 
     # ------------------------------------------------------------------
