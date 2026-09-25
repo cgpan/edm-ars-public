@@ -25,6 +25,33 @@ from src.dataset_adapter import HSLS09_TEMPORAL_ORDER as TEMPORAL_ORDER  # noqa:
 # ---------------------------------------------------------------------------
 
 
+#: How the generation-mode task names each dataset. HSLS:09 keeps the
+#: exact wording every earlier prompt used.
+_DATASET_LABELS: dict[str, str] = {
+    "hsls09_public": "HSLS:09",
+    "els_2002": "ELS:2002",
+    "assistments_0910": "ASSISTments 2009-10",
+    "did_els_hsls_panel": "ELS:2002 x HSLS:09 cross-cohort panel",
+}
+
+
+def _dataset_label(registry: dict | None, dataset_name: str | None) -> str:
+    """Short name of the run's dataset for the PF task line (C1).
+
+    The generation branch always asked for "a prediction research question
+    using the HSLS:09 dataset", whatever dataset the run had loaded.
+    """
+    reg = registry if isinstance(registry, dict) else {}
+    fallback = dataset_name if isinstance(dataset_name, str) else ""
+    key = str(reg.get("name") or fallback or "")
+    return (
+        _DATASET_LABELS.get(key)
+        or str(reg.get("full_name") or "").strip()
+        or key
+        or "HSLS:09"
+    )
+
+
 def _build_registry_var_map(registry: dict) -> dict[str, dict]:
     """Return a flat {variable_name: metadata_dict} map from all registry sections."""
     var_map: dict[str, dict] = {}
@@ -1343,7 +1370,8 @@ class ProblemFormulator(BaseAgent):
                 "",
                 "## Task",
                 (
-                    "Design a prediction research question using the HSLS:09 dataset. "
+                    "Design a prediction research question using the "
+                    f"{_dataset_label(registry, getattr(self.ctx, 'dataset_name', None))} dataset. "
                     "Select 8-12 of the most relevant papers from the retrieved literature "
                     "(copy their paperId, title, authors, year, abstract exactly) to populate "
                     "literature_context.papers. Ground the novelty claim using these papers. "
