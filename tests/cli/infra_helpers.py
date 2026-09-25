@@ -153,6 +153,24 @@ def _build_secrets(mod: types.ModuleType) -> None:
     mod.get_secret = get_secret  # type: ignore[attr-defined]
 
 
+def _build_ui(mod: types.ModuleType) -> None:
+    import contextlib
+
+    def _say(msg: str = "") -> None:
+        print(msg)
+
+    for name in ("ok", "info", "warn", "fail", "say"):
+        setattr(mod, name, _say)
+    mod.panel = lambda title, body: print(f"[{title}]\n{body}")  # type: ignore[attr-defined]
+
+    @contextlib.contextmanager
+    def status(message: str) -> Iterator[None]:
+        print(message)
+        yield
+
+    mod.status = status  # type: ignore[attr-defined]
+
+
 def _install(name: str, build: Callable[[types.ModuleType], None]) -> None:
     full = f"edmars.{name}"
     try:
@@ -172,7 +190,7 @@ def _install(name: str, build: Callable[[types.ModuleType], None]) -> None:
 
 for _name, _builder in (("model", _build_model), ("paths", _build_paths),
                         ("settings", _build_settings), ("proc", _build_proc),
-                        ("secrets", _build_secrets)):
+                        ("secrets", _build_secrets), ("ui", _build_ui)):
     _install(_name, _builder)
 
 

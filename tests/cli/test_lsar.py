@@ -286,37 +286,39 @@ def test_uv_dry_run_output_is_parsed(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert changes == ["pymupdf4llm 1.27.2.2 -> 0.0.27"]
 
 
-def test_checks_when_not_installed() -> None:
+def test_not_ready_is_always_a_failure(tmp_path: Path) -> None:
+    """Callers ask before switching LSAR on; "no fail" must mean "ready"."""
     settings_dict = _load_settings()
-    assert [c.status for c in lsar.checks(settings_dict)] == ["info"]
-    settings_dict["lsar"]["enabled"] = True
-    only = lsar.checks(settings_dict)
-    assert [c.status for c in only] == ["fail"] and only[0].fix == "edmars setup lsar"
+    for enabled in (False, True):
+        settings_dict["lsar"]["enabled"] = enabled
+        only = lsar.checks(settings_dict)
+        assert [c.status for c in only] == ["fail"]
+        assert only[0].fix == "edmars setup reviewer"
+    settings_dict["lsar"]["enabled"] = False
+    settings_dict["lsar"]["home"] = str(tmp_path / "gone")
+    assert [c.status for c in lsar.checks(settings_dict)] == ["fail"]
 
 
-def test_checks_report_retired_models_missing_key_and_deep_import(
+def test_checks_report_retired_models_and_deep_import(
     monkeypatch: pytest.MonkeyPatch, real_run: Any
 ) -> None:
     settings_dict = _load_settings()
     monkeypatch.setattr(proc, "run", FakePip(real_run))
     lsar.install(settings_dict, session=serve_bytes(_targz(_tree())))
     settings_dict["lsar"]["enabled"] = True
-    from edmars import secrets
-
-    monkeypatch.setattr(secrets, "get_secret", lambda name: None)
     by_name = {c.name: c for c in lsar.checks(settings_dict, deep=True)}
     assert by_name["Automated reviewer (LSAR)"].status == "ok"
     assert COMMIT[:12] in by_name["Automated reviewer (LSAR)"].detail
     assert by_name["LSAR model settings"].status == "warn"
     assert "ingestion: deepseek-v4-flash" in by_name["LSAR model settings"].detail
-    assert by_name["DeepSeek key for LSAR"].status == "fail"
     assert by_name["LSAR loads in Python"].status == "ok"
     assert by_name["LSAR's Python packages"].status in ("ok", "warn", "fail")
+    assert "LSAR loads in Python" not in [c.name for c in lsar.checks(settings_dict)]
 
-    monkeypatch.setattr(secrets, "get_secret", lambda name: "present")
-    names = [c.name for c in lsar.checks(settings_dict)]
-    assert "DeepSeek key for LSAR" not in names
-    assert "LSAR loads in Python" not in names
+    monkeypatch.setattr(lsar.importlib.util, "find_spec",
+                        lambda name, *a: None if name == "tenacity" else object())
+    packages = {c.name: c for c in lsar.checks(settings_dict)}["LSAR's Python packages"]
+    assert packages.status == "fail" and "tenacity" in packages.detail
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +404,7 @@ def test_review_run_writes_only_its_own_folder_and_redacts_the_key(
     run = _run_folder(tmp_path)
     before = {p.name: p.read_bytes() for p in run.iterdir() if p.is_file()}
 
-    result = lsar.review_run(run, {"lsar": {"home": str(home)}}, timeout_s=300)
+    result = lsar.review_paper(run, {"lsar": {"home": str(home)}}, timeout_s=300)
 
     assert result["venue"] == "AERA_OPEN"
     assert result["score"] == 6.8 and result["benchmark"] == 6.6 and result["passed"] is True
@@ -420,9 +422,9 @@ def test_review_run_failures_are_explained(
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(lsar.LsarReviewError, match="no paper PDF"):
-        lsar.review_run(empty, settings)
+        lsar.review_paper(empty, settings)
     with pytest.raises(lsar.LsarReviewError, match="not installed"):
-        lsar.review_run(empty, {"lsar": {}})
+        lsar.review_paper(empty, {"lsar": {}})
 
     run = _run_folder(tmp_path, venue=None)
     from edmars import secrets
@@ -432,7 +434,7 @@ def test_review_run_failures_are_explained(
         monkeypatch.setattr(secrets, "child_secrets", lambda names: {})
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     with pytest.raises(lsar.LsarReviewError, match="DeepSeek key"):
-        lsar.review_run(run, settings)
+        lsar.review_paper(run, settings)
 
     monkeypatch.setattr(secrets, "get_secret", lambda name: "present")
     if hasattr(secrets, "child_secrets"):
@@ -440,7 +442,7 @@ def test_review_run_failures_are_explained(
                             lambda names: {"DEEPSEEK_API_KEY": "present"})
     monkeypatch.setenv("FAKE_LSAR_FAIL", "1")
     with pytest.raises(lsar.LsarReviewError, match="exit code 3"):
-        lsar.review_run(run, settings, timeout_s=300)
+        lsar.review_paper(run, settings, timeout_s=300)
 
 
 def test_a_second_install_replaces_the_first(
@@ -454,6 +456,34 @@ def test_a_second_install_replaces_the_first(
     assert (home / "lsar" / "pipeline.py").read_text(encoding="utf-8") == "VALUE = 2\n"
     assert not list(lsar.lsar_root().glob(".old-*"))
     assert not list(lsar.lsar_root().glob(".staging-*"))
+
+
+def test_edmars_review_shows_the_result_and_returns_an_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from edmars import secrets, ui
+
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(ui, "panel", lambda title, body: shown.append((title, body)))
+    monkeypatch.setattr(ui, "ok", lambda msg: shown.append(("ok", msg)))
+    monkeypatch.setattr(ui, "fail", lambda msg: shown.append(("fail", msg)))
+    monkeypatch.setattr(secrets, "get_secret", lambda name: "present" if "DEEPSEEK" in name else None)
+    if hasattr(secrets, "child_secrets"):
+        monkeypatch.setattr(secrets, "child_secrets", lambda names: {"DEEPSEEK_API_KEY": "present"})
+    home = _home(tmp_path)
+    run = _run_folder(tmp_path, venue="EDM")
+
+    assert lsar.review_run(run, {"lsar": {"home": str(home)}}) == 0
+    body = next(b for t, b in shown if t == "Automated review (LSAR)")
+    assert "Score: 6.8 / 10 (Accept)" in body
+    assert "Benchmark for this venue: 6.30 (the score is at or above it)" in body
+    assert "about 2 points" in body
+
+    shown.clear()
+    empty = tmp_path / "empty-run"
+    empty.mkdir()
+    assert lsar.review_run(empty, {"lsar": {"home": str(home)}}) == 1
+    assert shown and shown[0][0] == "fail" and "no paper PDF" in shown[0][1]
 
 
 def test_requirements_for_another_python_are_skipped(tmp_path: Path) -> None:

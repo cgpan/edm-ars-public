@@ -270,33 +270,27 @@ def _read_install_record(home: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _deepseek_key_present() -> bool:
-    try:
-        from edmars import secrets
-
-        return bool(secrets.get_secret("DEEPSEEK_API_KEY"))
-    except ImportError:  # pragma: no cover - secrets module always ships
-        return bool(os.environ.get("DEEPSEEK_API_KEY"))
-
-
 def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
-    """Doctor lines for LSAR. ``deep`` also imports it in a child Python."""
+    """Is LSAR ready to review? ``deep`` also imports it in a child Python.
+
+    Anything that would make a review skip itself -- not installed, files
+    missing, a runtime package missing -- is ``fail`` whether or not the
+    reviewer is switched on: callers ask this before turning it on, and
+    "no fail" must mean "ready". (The DeepSeek key is the caller's check:
+    the doctor and the wizard both look it up in the key store.)
+    """
     title = "Automated reviewer (LSAR)"
     enabled = bool(_get(settings, "lsar.enabled"))
     home_value = _get(settings, "lsar.home")
     if not home_value:
-        if enabled:
-            return [Check(title, "fail", "Turned on, but not installed.",
-                          fix="edmars setup lsar")]
-        return [Check(title, "info",
-                      "Not set up (optional). It scores each finished paper against a "
-                      "benchmark and adds about 20-40 minutes per study.",
-                      fix="edmars setup lsar")]
+        return [Check(title, "fail",
+                      "Not installed. It scores each finished paper against a benchmark "
+                      "and adds about 20-40 minutes per study.",
+                      fix="edmars setup reviewer")]
     home = Path(str(home_value))
     problems = _file_problems(home)
     if problems:
-        return [Check(title, "fail" if enabled else "warn", " ".join(problems),
-                      fix="edmars setup lsar")]
+        return [Check(title, "fail", " ".join(problems), fix="edmars setup reviewer")]
 
     ref = str(_get(settings, "lsar.ref") or LSAR_REF)
     state = "on" if enabled else "installed but turned off"
@@ -307,10 +301,10 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
     unmet = _read_install_record(home).get("unmet_pins") or []
     if missing:
         out.append(Check(
-            "LSAR's Python packages", "fail" if enabled else "warn",
+            "LSAR's Python packages", "fail",
             "Missing: " + ", ".join(missing) + ". Without them every review is "
             "skipped.",
-            fix="edmars setup lsar",
+            fix="edmars setup reviewer",
         ))
     elif unmet:
         out.append(Check(
@@ -328,22 +322,14 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
             "LSAR's config.yaml sends these steps to a model id the provider no "
             f"longer serves ({'; '.join(retired)}). Those steps fail quietly and the "
             "related-work part of each review is thinner than it should be.",
-            fix="Update LSAR when a fixed version is published: edmars setup lsar",
-        ))
-
-    if enabled and not _deepseek_key_present():
-        out.append(Check(
-            "DeepSeek key for LSAR", "fail",
-            "LSAR's scoring is calibrated on DeepSeek, so it needs a DeepSeek key "
-            "even when your studies use another AI service.",
-            fix="edmars setup lsar",
+            fix="Update LSAR when a fixed version is published: edmars setup reviewer",
         ))
 
     if deep:
         deep_problems = verify(home)
         if deep_problems:
             out.append(Check("LSAR loads in Python", "fail", " ".join(deep_problems),
-                             fix="edmars setup lsar"))
+                             fix="edmars setup reviewer"))
         else:
             out.append(Check("LSAR loads in Python", "ok",
                              "lsar.pipeline imports in a fresh Python."))
@@ -793,14 +779,14 @@ def _review_env(names: Sequence[str]) -> dict[str, str]:
     return env
 
 
-def review_run(
+def review_paper(
     run_dir: str | Path,
     settings: Mapping[str, Any],
     *,
     venue: str | None = None,
     timeout_s: float = 5400,
 ) -> dict[str, Any]:
-    """Review a finished run's paper with LSAR (``edmars review RUN``).
+    """Review a finished run's paper with LSAR and return the result.
 
     Runs LSAR's own ``scripts/run_review.py`` in a child Python on the
     run's ``paper_for_review.pdf`` (the gate's citation-cleaned copy) or
@@ -818,7 +804,7 @@ def review_run(
     run_dir = Path(run_dir)
     home_value = _get(settings, "lsar.home")
     if not home_value:
-        raise LsarReviewError("LSAR is not installed. Run: edmars setup lsar")
+        raise LsarReviewError("LSAR is not installed. Run: edmars setup reviewer")
     home = Path(str(home_value))
     problems = _file_problems(home)
     if problems:
@@ -837,7 +823,7 @@ def review_run(
     if not env.get("DEEPSEEK_API_KEY"):
         raise LsarReviewError(
             "LSAR needs a DeepSeek key (its scoring is calibrated on DeepSeek). "
-            "Add one with: edmars setup lsar"
+            "Add one with: edmars setup reviewer"
         )
     name = lsar_venue(venue or _run_venue(run_dir))
     out_dir = run_dir / REVIEW_FOLDER
@@ -895,3 +881,49 @@ def review_run(
         "report_md": out_dir / "LSAR_Review_Report.md",
         "report_json": report_json,
     }
+
+
+def review_run(
+    run_dir: str | Path,
+    settings: Mapping[str, Any],
+    *,
+    venue: str | None = None,
+) -> int:
+    """``edmars review RUN``: review the paper and tell the user how it went.
+
+    Returns 0 when a report was written, 1 otherwise; every problem is
+    shown as a plain message (nothing is raised for expected failures).
+    """
+    from edmars import ui
+
+    run_dir = Path(run_dir)
+    note = ("Reviewing the paper with LSAR. This usually takes 10-40 minutes; "
+            "you can leave this window open.")
+    try:
+        status_cm = getattr(ui, "status", None)
+        if status_cm is not None:
+            with status_cm(note):
+                result = review_paper(run_dir, settings, venue=venue)
+        else:  # pragma: no cover - ui without a spinner
+            ui.info(note)
+            result = review_paper(run_dir, settings, venue=venue)
+    except LsarReviewError as exc:
+        ui.fail(str(exc))
+        return 1
+    score, benchmark = result["score"], result["benchmark"]
+    lines = [f"Venue: {result['venue']}"]
+    if score is not None:
+        lines.append(f"Score: {score:.1f} / 10"
+                     + (f" ({result['recommendation']})" if result["recommendation"] else ""))
+    if benchmark is not None and score is not None:
+        verdict = "at or above" if result["passed"] else "below"
+        lines.append(f"Benchmark for this venue: {benchmark:.2f} (the score is {verdict} it)")
+    else:
+        lines.append("No calibrated benchmark for this venue: the score is shown on its own.")
+    lines.append(f"Full review: {result['report_md']}")
+    lines.append("Two readings of the same paper can differ by about 2 points. "
+                 "Treat the score as a rough signal, not a verdict or a prediction "
+                 "of acceptance.")
+    ui.panel("Automated review (LSAR)", "\n".join(lines))
+    ui.ok(f"Review saved in {result['output_dir']}")
+    return 0
