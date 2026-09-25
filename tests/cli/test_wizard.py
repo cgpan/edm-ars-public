@@ -455,6 +455,9 @@ def test_advanced_options(fx: Fakes) -> None:
     assert saved["defaults"]["venue"] == "JEDM"
     assert saved["defaults"]["paper_format"] == "journal"
     assert "does not stop the study" in fx.ui.output
+    # Study-finished notifications were never built; the menu must not offer them.
+    menu = next(c for kind, m, c in fx.ui.prompts if m == "Advanced options")
+    assert not any("otif" in label for _, label in menu or [])
 
 
 def _venue_labels(fx: Fakes) -> dict[str, str]:

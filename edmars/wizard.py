@@ -2035,7 +2035,6 @@ class _Wizard:
             fmt = str(self.get("defaults.paper_format", "conference") or "conference")
             venue = str(self.get("defaults.venue", "EDM") or "EDM")
             awake = bool(self.get("defaults.keep_awake", True))
-            notify = bool(self.get("defaults.notify", True))
             models = self.get("models", {}) or {}
             mailto = self.get("literature.crossref_mailto", None)
             tavily = secrets.secret_source(TAVILY_ENV)
@@ -2044,7 +2043,6 @@ class _Wizard:
                 ("format", f"Default paper format: {fmt}"),
                 ("venue", f"Default venue: {venue}"),
                 ("awake", f"Keep the computer awake during studies: {'on' if awake else 'off'}"),
-                ("notify", f"Notify me when a study finishes: {'on' if notify else 'off'}"),
                 ("models", f"AI models: {'custom' if models else 'recommended'}"),
                 ("mailto", f"Contact email for Crossref (optional): {'set' if mailto else 'not set'}"),
                 ("tavily", f"Tavily key for the reviewer's web search (optional): {'saved' if tavily else 'not set'}"),
@@ -2066,8 +2064,6 @@ class _Wizard:
                 self.set("defaults.venue", picked)
             elif answer == "awake":
                 self.set("defaults.keep_awake", self.yes("Keep the computer awake while a study runs?", default=awake))
-            elif answer == "notify":
-                self.set("defaults.notify", self.yes("Show a notification when a study finishes?", default=notify))
             elif answer == "models":
                 self._ask_models()
             elif answer == "mailto":

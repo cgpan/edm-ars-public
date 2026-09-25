@@ -56,7 +56,6 @@ DEFAULTS: dict[str, Any] = {
         "paper_format": "conference",
         "budget_usd": None,
         "keep_awake": True,
-        "notify": True,
     },
     "author": {"name": None, "affiliation": None},
     "setup_progress": {"last_completed_screen": None},
