@@ -71,7 +71,7 @@ stages:
     title: "Automated peer review (LSAR)"
     now: >-
       LSAR, an automated reviewer, is scoring the paper against papers
-      accepted at the venue. This step often takes 20 to 40 minutes.
+      accepted at the venue. This step often takes 10 to 45 minutes.
   VERIFYING:
     title: "Final checks"
     now: "Checking the paper against the study's own numbers, figures and citations."

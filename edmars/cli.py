@@ -929,6 +929,8 @@ def review_cmd(
     yes: YesOpt = False,
 ) -> None:
     """Run the automated reviewer (LSAR) on a finished study's paper."""
+    from edmars import estimates
+
     non_interactive = _modes(plain, yes)
     settings = _settings()
     lsar = _module("lsar")
@@ -941,7 +943,7 @@ def review_cmd(
     run_dir = _resolve_run(settings, run, prefer_active=False)
     _confirm_spend(
         f"Review the paper in {run_dir.name}? This sends it to DeepSeek and usually "
-        "takes 20 to 40 minutes.",
+        f"takes {estimates.MANUAL_REVIEW_TIME}.",
         non_interactive,
     )
     outcome = _call_with(review, run_dir=run_dir, settings=settings)

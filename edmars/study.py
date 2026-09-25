@@ -141,11 +141,10 @@ VENUES: dict[str, str] = {
 JOURNAL_VENUES: frozenset[str] = frozenset({"JEDM", "JLA", "AERA_OPEN"})
 
 # R6 text constants. Ranges, not promises; ASCII so --plain output is safe.
-TIME_WITHOUT_REVIEW = "usually 10-35 minutes"
-TIME_WITH_REVIEW = (
-    "usually 35-60 minutes with the automated review, occasionally about 2 hours"
-)
-# One source for prices, shared with setup (edmars/estimates.py).
+# Times and the DeepSeek price come from edmars/estimates.py, the one
+# source every screen and the README share.
+TIME_WITHOUT_REVIEW = estimates.TIME_WITHOUT_REVIEW
+TIME_WITH_REVIEW = estimates.TIME_WITH_REVIEW
 COST_DEEPSEEK = estimates.COST_DEEPSEEK
 COST_OTHER = (
     "not estimated for this AI service; live token counts are shown while the "
@@ -2828,7 +2827,7 @@ def _ask_options(ui: Any, settings: dict | None, plan: StudyPlan) -> StudyPlan:
         review = bool(
             ui.confirm(
                 "Run the automated peer review (LSAR) after the paper is written? "
-                "It adds about 20-40 minutes, and scores vary by about 2 points "
+                f"It adds {estimates.REVIEW_TIME}, and scores vary by about 2 points "
                 "between runs.",
                 default=plan.review,
             )
