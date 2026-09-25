@@ -752,6 +752,13 @@
             'set "PYTHONUTF8=1"',
             'set "PYTHONHOME="',
             'set "PYTHONPATH="',
+            # uv makes environments without pip, so `edmars setup` installs
+            # LSAR's packages with the uv that built this one (edmars.lsar
+            # reads EDMARS_UV). That uv may not be on PATH (a private copy
+            # in <Dir>\uv), and a user's own uv may be removed later: then
+            # the variable is left unset and edmars falls back to PATH and
+            # ensurepip instead of a path that no longer exists.
+            ('if exist "' + (ConvertTo-CmdPath $uv) + '" set "EDMARS_UV=' + (ConvertTo-CmdPath $uv) + '"'),
             # -P: do not put the current folder first on the import path,
             # so a user's own src\ or edmars\ folder cannot shadow ours.
             ('"' + (ConvertTo-CmdPath $venvPy) + '" -P -m edmars %*'),

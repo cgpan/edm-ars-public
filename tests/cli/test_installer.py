@@ -107,6 +107,27 @@ def test_launchers_follow_the_cli_contract() -> None:
         assert "SHA256SUMS" in text
 
 
+def test_launchers_pass_on_the_uv_that_built_the_environment() -> None:
+    # uv creates environments without pip, so edmars.lsar installs LSAR's
+    # packages with the uv named in EDMARS_UV. The launcher sets it for
+    # every install (a private uv in <dir>/uv is not on PATH), and only when
+    # that uv still exists, so a user who later removes their own uv gets
+    # edmars' PATH/ensurepip fallback instead of a dead path.
+    sh, ps1 = _text(INSTALL_SH), _text(INSTALL_PS1)
+    assert re.search(r"printf 'if \[ -x %s \]; then\\n' \"\$\(shell_quote \"\$UV\"\)\"", sh)
+    assert "printf '    EDMARS_UV=%s\\n' \"$(shell_quote \"$UV\")\"" in sh
+    assert "printf '    export EDMARS_UV\\n'" in sh
+    assert ("('if exist \"' + (ConvertTo-CmdPath $uv) + '\" set \"EDMARS_UV=' "
+            "+ (ConvertTo-CmdPath $uv) + '\"')") in ps1
+    # Not only for a private uv: a uv found in ~/.local/bin or ~/.cargo/bin
+    # is not necessarily on PATH either. So no condition on it between the
+    # start of the launcher text and the line that runs Python.
+    sh_block = sh[sh.index("printf '#!/bin/sh\\n'"): sh.index("printf 'exec %s -P -m edmars")]
+    ps_block = ps1[ps1.index("$cmdLines = @("): ps1.index("'exit /b %ERRORLEVEL%'")]
+    assert "EDMARS_UV" in sh_block and "UV_PRIVATE" not in sh_block
+    assert "EDMARS_UV" in ps_block and "uvPrivate" not in ps_block
+
+
 def test_install_sh_shape() -> None:
     sh = _text(INSTALL_SH)
     assert sh.startswith("#!/bin/sh\n")
@@ -347,6 +368,81 @@ def test_install_sh_passes_shellcheck() -> None:
     result = subprocess.run(["shellcheck", "-s", "sh", str(INSTALL_SH)],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout
+
+
+def _sh_path(path: Path) -> str:
+    """``path`` as the sh under test spells it (Git Bash wants /c/...)."""
+    if not ON_WINDOWS:
+        return str(path)
+    cygpath = shutil.which("cygpath")
+    if cygpath is None:
+        pytest.skip("no cygpath to translate Windows paths for sh")
+    return subprocess.run([cygpath, "-u", str(path)], capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def _launcher_writer() -> str:
+    """install.sh's own shell_quote() and launcher-writing lines, verbatim."""
+    sh = _text(INSTALL_SH)
+    quote = re.search(r"^shell_quote\(\) \{\n.*?\n\}\n", sh, re.MULTILINE | re.DOTALL)
+    assert quote is not None
+    start = sh.index('    LAUNCHER_TMP="$BIN_DIR/.edmars.$$"\n')
+    end = sh.index('    mv -f "$LAUNCHER_TMP" "$LAUNCHER"\n')
+    return quote.group(0) + sh[start:end]
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+@pytest.mark.parametrize("uv_exists", [True, False])
+def test_install_sh_launcher_sets_the_environment_and_runs(tmp_path: Path, uv_exists: bool) -> None:
+    # Runs the launcher text install.sh writes, with a stand-in Python that
+    # prints what it was given. Paths carry a space and a quote on purpose.
+    root = tmp_path / "it's here"
+    app, bin_dir, venv_bin = root / "app" / "9.9.9", root / "bin", root / "venv" / "bin"
+    for folder in (app, bin_dir, venv_bin):
+        folder.mkdir(parents=True)
+    fake_py = venv_bin / "python"
+    fake_py.write_bytes(
+        b"#!/bin/sh\n"
+        b"printf 'uv=%s\\n' \"${EDMARS_UV-<unset>}\"\n"
+        b"printf 'root=%s\\n' \"$EDMARS_APP_ROOT\"\n"
+        b"printf 'utf8=%s\\n' \"$PYTHONUTF8\"\n"
+        b"printf 'pythonpath=%s\\n' \"${PYTHONPATH-<unset>}\"\n"
+        b"for a in \"$@\"; do printf 'arg=%s\\n' \"$a\"; done\n"
+    )
+    fake_py.chmod(0o755)
+    uv = root / "uv" / "uv"
+    if uv_exists:
+        uv.parent.mkdir()
+        uv.write_bytes(b"#!/bin/sh\nexit 0\n")
+        uv.chmod(0o755)
+    def q(path: Path) -> str:
+        return "'" + _sh_path(path).replace("'", "'\\''") + "'"
+
+    harness = (
+        "set -eu\n"
+        "LAUNCHER_MARK='mark'\nVERSION='9.9.9'\n"
+        f"APP_DIR={q(app)}\nVENV_PY={q(fake_py)}\nUV={q(uv)}\nBIN_DIR={q(bin_dir)}\n"
+        + _launcher_writer()
+        + 'mv -f "$LAUNCHER_TMP" "$BIN_DIR/edmars"\n'
+    )
+    script = tmp_path / "harness.sh"
+    script.write_bytes(harness.encode("utf-8"))
+    env = _clean_env(tmp_path, PYTHONPATH="should-be-cleared")
+    built = subprocess.run([SH, str(script)], capture_output=True, text=True, env=env)
+    assert built.returncode == 0, built.stderr
+    launcher = bin_dir / "edmars"
+    text = launcher.read_text(encoding="utf-8")
+    assert text.startswith("#!/bin/sh\n# mark (EDM-ARS 9.9.9).\n")
+    ran = subprocess.run([SH, _sh_path(launcher), "version", "two words"],
+                         capture_output=True, text=True, env=env)
+    assert ran.returncode == 0, ran.stderr
+    lines = ran.stdout.splitlines()
+    expected_uv = f"uv={_sh_path(uv)}" if uv_exists else "uv=<unset>"
+    assert expected_uv in lines
+    assert f"root={_sh_path(app)}" in lines
+    assert "utf8=1" in lines and "pythonpath=<unset>" in lines
+    assert [line for line in lines if line.startswith("arg=")] == [
+        "arg=-P", "arg=-m", "arg=edmars", "arg=version", "arg=two words"]
 
 
 @pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")

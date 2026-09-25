@@ -647,6 +647,16 @@ main() {
         printf 'PYTHONUTF8=1\n'
         printf 'export PYTHONUTF8\n'
         printf 'unset PYTHONHOME PYTHONPATH\n'
+        # uv makes environments without pip, so `edmars setup` installs
+        # LSAR's packages with the uv that built this one (edmars.lsar reads
+        # EDMARS_UV). That uv may not be on PATH (a private copy in
+        # <dir>/uv), and a user's own uv may be removed later: then the
+        # variable is left unset and edmars falls back to PATH and ensurepip
+        # instead of a path that no longer exists.
+        printf 'if [ -x %s ]; then\n' "$(shell_quote "$UV")"
+        printf '    EDMARS_UV=%s\n' "$(shell_quote "$UV")"
+        printf '    export EDMARS_UV\n'
+        printf 'fi\n'
         # -P: do not put the current folder first on the import path, so
         # a user's own src/ or edmars/ folder cannot shadow ours.
         printf 'exec %s -P -m edmars "$@"\n' "$(shell_quote "$VENV_PY")"
