@@ -203,3 +203,12 @@ def test_full_log_state_renders(run_home: Path) -> None:
     assert "Best: XGBoost, AUC 0.78 [0.76-0.80]" in text
     assert "Finished" in text
     assert "Ctrl+C" not in text
+
+
+def test_an_experimental_plan_is_labelled_on_the_live_view(run_home: Path) -> None:
+    run = make_run(run_home, log=FULL_LOG, study={"experimental": True})
+    text = view.screen_text(load_state(run), width=80, plain=True, now=NOW)
+    assert "[EXPERIMENTAL] plan - not a tested example study" in text
+    tested = make_run(run_home, name="2026-09-25_1400_tested_ef01", log=FULL_LOG)
+    assert "EXPERIMENTAL" not in view.screen_text(load_state(tested), width=80,
+                                                  plain=True, now=NOW)

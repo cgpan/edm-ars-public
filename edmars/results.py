@@ -27,7 +27,15 @@ from pathlib import Path
 from typing import Any
 
 from edmars.endstates import READY_KINDS, Outcome, classify, messages, quote_path
-from edmars.runstate import RunState, fmt_ci, fmt_num, fmt_score, load_state
+from edmars.runstate import (
+    EXPERIMENTAL_LINE,
+    EXPERIMENTAL_WHY,
+    RunState,
+    fmt_ci,
+    fmt_num,
+    fmt_score,
+    load_state,
+)
 
 Line = tuple[str, str]  # (text, rich style)
 
@@ -183,6 +191,8 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
 
     if outcome.kind in READY_KINDS:
         add(f"{g} {outcome.label}", style)
+        if state.experimental:
+            add(EXPERIMENTAL_LINE, "bold")
         if state.question:
             add(f'"{state.question}"', "italic")
         add(outcome.headline)
@@ -236,6 +246,8 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
         return out
     else:
         add(f"{g} {outcome.label}: {outcome.title or outcome.headline}", style)
+        if state.experimental:
+            add(EXPERIMENTAL_LINE, "bold")
         if state.question:
             add(f'"{state.question}"', "italic")
         add()
@@ -399,6 +411,9 @@ def render_summary_html(outcome: Outcome, state: RunState, run_dir: Path) -> str
     if state.question:
         add(f'<p class="q">&ldquo;{_e(state.question)}&rdquo;</p>')
     add(f'<p><span class="badge {_e(outcome.kind)}">{_e(outcome.label)}</span></p>')
+    if state.experimental:
+        add(f'<p class="note"><strong>{_e(EXPERIMENTAL_LINE)}.</strong> '
+            f"{_e(EXPERIMENTAL_WHY)}</p>")
     add(f"<p>{_e(outcome.headline)}</p>")
     sentence = result_sentence(state)
     if sentence and outcome.kind in READY_KINDS:

@@ -27,6 +27,7 @@ from typing import Any, Callable
 from rich.cells import cell_len
 
 from edmars.runstate import (
+    EXPERIMENTAL_LINE,
     RunState,
     StateReader,
     fmt_duration,
@@ -170,6 +171,8 @@ def render_screen(
     right = f"Started {_local(state.started)} · now {_local(ref)}"
     for text in _two_col(left, right, width, plain):
         add(text, "dim")
+    if state.experimental:
+        add(EXPERIMENTAL_LINE, "bold yellow")
 
     fraction, low, high = progress(state, ref)
     step, total = step_position(state)
