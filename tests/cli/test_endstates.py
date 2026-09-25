@@ -185,6 +185,26 @@ def test_ready_gate_not_run_is_never_a_zero_score(run_home: Path) -> None:
     assert "0.0" not in out.headline + out.why
 
 
+def test_a_review_that_could_not_be_scored_is_explained_in_plain_words(run_home: Path) -> None:
+    # review_gate.py records "lsar_scoring_failed: <up to 200 characters>";
+    # the headline used to be that raw text, cut off mid-sentence, and the
+    # explanation blamed the DeepSeek key or the network.
+    detail = "Stage 5 scoring failed (the scoring model's answer could not be used: No valid JSON" + "x" * 150
+    gate = {"enabled": True, "ran": False, "skip_reason": f"lsar_scoring_failed: {detail}", "passed": None,
+            "score": None, "threshold": None, "advisory": None, "venue": "EDM"}
+    run = _ready_run(run_home, status=v2_status(reason_code="GATE_NOT_RUN", gate=gate))
+    out = classify(run)
+    assert out.label == "Ready, not reviewed" and out.code == "LSAR_SCORING_FAILED"
+    assert out.headline == ("Your paper is written, but the automated peer review gave no score: "
+                            "LSAR wrote a review but could not score it, so there is no score.")
+    assert "lsar_scoring_failed" not in out.headline + out.why + out.fix
+    assert "key" not in out.why and "network" not in out.why
+    assert "edmars review" in (out.command or "")
+    no_result = dict(gate, skip_reason="lsar_no_result")
+    run2 = _ready_run(run_home / "b", status=v2_status(reason_code="GATE_NOT_RUN", gate=no_result))
+    assert classify(run2).headline.endswith("LSAR finished without producing a review.")
+
+
 def test_released_pipeline_gate_that_could_not_run_is_not_reviewed(run_home: Path) -> None:
     # Released code records a gate that never ran as passed=false, score 0.0.
     run = _ready_run(run_home, review_gate_enabled=True,

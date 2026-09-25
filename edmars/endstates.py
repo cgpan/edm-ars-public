@@ -427,6 +427,8 @@ def _gate_code(reason: Any) -> str:
     text = str(reason or "")
     if text.startswith(("lsar_not_found", "lsar_import_failed", "not_available")):
         return "LSAR_MISSING"
+    if text.startswith("lsar_scoring_failed"):
+        return "LSAR_SCORING_FAILED"
     return "LSAR_FAILED"
 
 
@@ -743,8 +745,9 @@ def _ready(run_dir: Path, state: RunState, status: dict[str, Any] | None,
     elif code == "GATE_NOT_RUN":
         label = str(labels.get("not_reviewed", "Ready, not reviewed"))
         reason = gate_skip_text(gate.get("skip_reason"))
-        headline = f"Your paper is written, but the automated peer review did not run: {reason}"
         out_code = _gate_code(gate.get("skip_reason"))
+        verb = "gave no score" if out_code == "LSAR_SCORING_FAILED" else "did not run"
+        headline = f"Your paper is written, but the automated peer review {verb}: {reason}"
         entry = failure_entry(out_code)
         why = fill(entry.get("why"), **ctx)
         fix = fill(entry.get("fix"), **ctx)

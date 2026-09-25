@@ -109,7 +109,8 @@ def _gate_line(state: RunState, outcome: Outcome) -> str | None:
     m = state.metrics
     if m.get("gate_ran") is False:
         reason = m.get("gate_skip_reason")
-        text = "Automated peer review (LSAR): did not run."
+        verb = "no score" if outcome.code == "LSAR_SCORING_FAILED" else "did not run"
+        text = f"Automated peer review (LSAR): {verb}."
         return f"{text} {gate_skip_text(reason)}" if reason else text
     if m.get("gate_score") is None:
         if state.lsar_enabled:
@@ -219,7 +220,7 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
         ]
         if state.metrics.get("gate_score") is None:
             actions.append(("Automated peer review", f"edmars review {run}"))
-        elif outcome.code in ("LSAR_MISSING", "LSAR_FAILED"):
+        elif outcome.code in ("LSAR_MISSING", "LSAR_FAILED", "LSAR_SCORING_FAILED"):
             actions.append(("Automated peer review", f"edmars review {run}"))
         if outcome.code in ("LSAR_MISSING",):
             # Setting up the reviewer comes before asking it for a review.
