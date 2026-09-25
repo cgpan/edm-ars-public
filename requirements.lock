@@ -1,0 +1,115 @@
+# requirements.lock -- exact package versions for installing EDM-ARS.
+#
+# Frozen from a clean Python 3.11.14 (win32) environment that passed the full
+# offline test suite (2482 passed, 32 skipped). That environment was built from
+# requirements.txt (without docker) plus requirements-cli.txt and pytest;
+# the test-only packages (pytest, pluggy, iniconfig) are left out here.
+#
+# Deliberately NOT included:
+#   docker    the Docker sandbox is optional and off by default. Install it
+#             yourself (pip install "docker>=7.0") only if you turn it on.
+#   torch, lightgbm   not dependencies of EDM-ARS; generated analysis code
+#             must not rely on them.
+#
+# One environment on one operating system was tested. A line with a
+# `sys_platform` marker is installed on that platform only.
+# Resolved for the pinned versions but NOT part of the tested environment:
+# cryptography, jeepney, nvidia-nccl-cu12, secretstorage.
+#
+# Used by install/install.sh, install/install.ps1 and CI:
+#     uv pip install -r requirements.lock -r requirements-cli.txt
+# Regenerate with scripts/make_lock.py after the suite passes in the new
+# environment; do not edit versions by hand.
+annotated-types==0.8.0  # via pydantic
+anthropic==0.57.1  # via -r requirements.txt
+anyio==4.15.1  # via anthropic, httpx, openai
+causal-learn==0.1.4.8  # via dowhy
+certifi==2026.7.22  # via httpcore, httpx, requests
+cffi==2.1.1  # via clarabel, cryptography
+charset-normalizer==3.5.1  # via requests
+clarabel==0.11.1  # via cvxpy
+click==8.5.0  # via typer
+cloudpickle==3.1.2  # via shap
+colorama==0.4.6 ; sys_platform == 'win32'  # via tqdm
+contourpy==1.3.3  # via matplotlib
+cryptography==50.0.1 ; sys_platform == 'linux'  # via secretstorage
+cvxpy==1.7.5  # via dowhy
+cycler==0.12.1  # via matplotlib
+cython==0.29.37  # via dowhy
+distro==1.9.0  # via anthropic, openai
+dowhy==0.12  # via -r requirements.txt
+fonttools==4.66.0  # via matplotlib
+graphviz==0.21  # via causal-learn
+h11==0.16.0  # via httpcore
+httpcore==1.0.9  # via httpx
+httpx==0.28.1  # via anthropic, openai
+idna==3.20  # via anyio, httpx, requests
+imbalanced-learn==0.13.0  # via -r requirements.txt
+importlib-metadata==9.0.1 ; python_full_version < '3.12'  # via keyring
+jaraco-classes==3.4.0  # via keyring
+jeepney==0.9.0 ; sys_platform == 'linux'  # via keyring, secretstorage
+jinja2==3.1.6  # via osqp
+jiter==0.17.0  # via anthropic, openai
+joblib==1.5.1  # via causal-learn, dowhy, imbalanced-learn, osqp, scikit-learn
+keyring==23.13.1  # via -r requirements-cli.txt
+kiwisolver==1.5.1  # via matplotlib
+llvmlite==0.49.0  # via numba
+markdown-it-py==4.2.0  # via rich
+markupsafe==3.0.3  # via jinja2
+matplotlib==3.10.9  # via causal-learn, seaborn, -r requirements.txt
+mdurl==0.1.2  # via markdown-it-py
+momentchi2==0.1.8  # via causal-learn
+more-itertools==11.1.0  # via jaraco-classes
+mpmath==1.3.0  # via sympy
+networkx==3.6.1  # via causal-learn, dowhy
+numba==0.67.0  # via dowhy, shap
+numpy==1.26.4  # via causal-learn, clarabel, contourpy, cvxpy, dowhy, imbalanced-learn, matplotlib, momentchi2, numba, osqp, pandas, patsy, scikit-learn, scipy, scs, seaborn, shap, statsmodels, xgboost, -r requirements.txt
+nvidia-nccl-cu12==2.32.3 ; platform_machine != 'aarch64' and sys_platform == 'linux'  # via xgboost
+openai==1.95.0  # via -r requirements.txt
+osqp==1.1.3  # via cvxpy
+packaging==26.3  # via matplotlib, patsy, shap, statsmodels
+pandas==2.2.3  # via causal-learn, dowhy, seaborn, shap, statsmodels, -r requirements.txt
+patsy==1.0.3  # via statsmodels
+pillow==12.3.0  # via matplotlib
+platformdirs==4.3.8  # via -r requirements-cli.txt
+prompt-toolkit==3.0.53  # via questionary
+psutil==7.0.0  # via -r requirements-cli.txt
+pycparser==3.0 ; implementation_name != 'PyPy'  # via cffi
+pydantic==2.13.5  # via anthropic, openai
+pydantic-core==2.46.5  # via pydantic
+pydot==4.0.1  # via causal-learn
+pygments==2.21.0  # via rich
+pymupdf==1.27.2.2  # via -r requirements.txt
+pyparsing==3.3.3  # via matplotlib, pydot
+python-dateutil==2.9.0.post0  # via matplotlib, pandas
+python-dotenv==1.1.1  # via -r requirements.txt
+pytz==2026.4  # via pandas
+pywin32-ctypes==0.2.3 ; sys_platform == 'win32'  # via keyring
+pyyaml==6.0.2  # via -r requirements.txt
+questionary==2.1.0  # via -r requirements-cli.txt
+requests==2.32.3  # via -r requirements.txt
+rich==14.0.0  # via typer, -r requirements-cli.txt
+scikit-learn==1.6.1  # via causal-learn, dowhy, imbalanced-learn, shap, sklearn-compat, -r requirements.txt
+scipy==1.16.3  # via causal-learn, clarabel, cvxpy, dowhy, imbalanced-learn, momentchi2, osqp, scikit-learn, scs, shap, statsmodels, xgboost, -r requirements.txt
+scs==3.3.1  # via cvxpy
+seaborn==0.13.2  # via -r requirements.txt
+secretstorage==3.5.0 ; sys_platform == 'linux'  # via keyring
+setuptools==84.0.0  # via osqp
+shap==0.47.2  # via -r requirements.txt
+shellingham==1.5.4  # via typer
+six==1.17.0  # via python-dateutil
+sklearn-compat==0.1.6  # via imbalanced-learn
+slicer==0.0.8  # via shap
+sniffio==1.3.1  # via anthropic, openai
+statsmodels==0.14.6  # via causal-learn, dowhy
+sympy==1.14.0  # via dowhy
+threadpoolctl==3.6.0  # via imbalanced-learn, scikit-learn
+tqdm==4.70.1  # via causal-learn, dowhy, openai, shap
+typer==0.16.0  # via -r requirements-cli.txt
+typing-extensions==4.16.0  # via anthropic, anyio, openai, pydantic, pydantic-core, shap, typer, typing-inspection
+typing-inspection==0.4.4  # via pydantic
+tzdata==2026.4  # via pandas
+urllib3==2.8.0  # via requests
+wcwidth==0.9.1  # via prompt-toolkit
+xgboost==2.1.4  # via -r requirements.txt
+zipp==4.1.0 ; python_full_version < '3.12'  # via importlib-metadata
