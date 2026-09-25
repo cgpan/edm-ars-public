@@ -232,6 +232,11 @@ def _expected_error(exc: BaseException) -> bool:
 # --- Helpers -------------------------------------------------------------------------
 
 
+def _exit(code: Any) -> typer.Exit:
+    """An Exit carrying a module's return value (anything but an int means 0)."""
+    return typer.Exit(code if isinstance(code, int) else 0)
+
+
 def _settings() -> dict[str, Any]:
     from edmars import settings
 
@@ -311,7 +316,7 @@ def _watch_then_results(run_dir: Path) -> None:
     code = view.watch(run_dir, plain=ui.is_plain())
     if code == 0:
         results = _module("results")
-        raise typer.Exit(results.show(run_dir))
+        raise _exit(results.show(run_dir))
     if code == 11:
         ui.info(
             "The study was stopped. Your finished steps are saved; continue it later "
@@ -518,7 +523,7 @@ def setup_cmd(
     if accept_disclosure:
         options["accept_disclosure"] = True
     wizard = _module("wizard")
-    raise typer.Exit(wizard.run_setup(section, non_interactive=non_interactive, options=options or None))
+    raise _exit(wizard.run_setup(section, non_interactive=non_interactive, options=options or None))
 
 
 @app.command("doctor")
@@ -540,7 +545,7 @@ def doctor_cmd(
     if json_out:
         ui.set_machine_output(True)
     doctor = _module("doctor")
-    raise typer.Exit(doctor.main(deep=deep and not quick, json_out=json_out, bundle=bundle))
+    raise _exit(doctor.main(deep=deep and not quick, json_out=json_out, bundle=bundle))
 
 
 @app.command("new")
@@ -691,7 +696,7 @@ def results_cmd(
     settings = _settings()
     run_dir = _resolve_run(settings, run, prefer_active=False)
     results = _module("results")
-    raise typer.Exit(results.show(run_dir, open_.value if open_ is not None else None))
+    raise _exit(results.show(run_dir, open_.value if open_ is not None else None))
 
 
 @app.command("stop")
@@ -758,7 +763,7 @@ def review_cmd(run: RunArg = None, plain: PlainOpt = False, yes: YesOpt = False)
         non_interactive,
     )
     outcome = _call_with(review, run_dir=run_dir, settings=settings)
-    raise typer.Exit(outcome if isinstance(outcome, int) else 0)
+    raise _exit(outcome)
 
 
 # --- data -------------------------------------------------------------------------------
@@ -994,7 +999,7 @@ def update_cmd(
     """Check for a newer version of EDM-ARS and say how to install it."""
     _modes(plain, yes)
     maintenance = _module("maintenance")
-    raise typer.Exit(maintenance.update(check_only=check))
+    raise _exit(maintenance.update(check_only=check))
 
 
 @app.command("uninstall")
@@ -1014,7 +1019,7 @@ def uninstall_cmd(
     """Remove EDM-ARS's settings, stored keys and downloads from this computer."""
     non_interactive = _modes(plain, yes)
     maintenance = _module("maintenance")
-    raise typer.Exit(
+    raise _exit(
         maintenance.uninstall(
             assume_yes=non_interactive,
             remove_datasets=remove_datasets,

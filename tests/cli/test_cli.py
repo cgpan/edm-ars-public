@@ -471,3 +471,8 @@ def test_uninstall_needs_yes_without_a_terminal() -> None:
     result = invoke("uninstall", "--yes")
     assert result.exit_code == 0, result.output
     assert not paths.settings_path().exists()
+
+
+def test_a_module_returning_nothing_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_module(monkeypatch, "doctor", main=lambda **_kwargs: None)
+    assert invoke("doctor").exit_code == 0
