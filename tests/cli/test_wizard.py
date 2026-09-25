@@ -59,7 +59,6 @@ FULL_FLOW = [
     "later",           # S8 R
     "skip",            # S9 reviewer
     "Ada Lovelace",    # S10 name
-    "",                # S10 affiliation
     "skip",            # S10 advanced
 ]
 
@@ -73,7 +72,9 @@ def test_full_flow_saves_every_answer_and_never_shows_the_key(fx: Fakes) -> None
     assert saved["acknowledged"]["version"] == ACK
     assert saved["provider"] == "deepseek"
     assert saved["author"]["name"] == "Ada Lovelace"
-    assert saved["author"]["affiliation"] is None
+    # Nothing reads an affiliation, so setup no longer asks for one.
+    assert "affiliation" not in saved["author"]
+    assert not any("university" in m.lower() for m in prompt_messages(fx))
     assert saved["latex"]["mode"] == "none"
     assert saved["setup_progress"]["last_completed_screen"] == "S11"
     assert saved["setup_progress"]["completed_at"]
@@ -144,10 +145,39 @@ def test_notice_must_be_accepted_to_continue(fx: Fakes) -> None:
     assert "[PRIVACY.md](PRIVACY.md)" in fx.ui.output
 
 
+def test_accepting_the_notice_is_never_what_enter_does(fx: Fakes) -> None:
+    # Pressing Enter through setup used to record consent: "accept" was the
+    # default and the first option. Now there is no default and the arrow-key
+    # menu starts on "Read the full disclaimer first".
+    fx.ui.script = ["continue", DEFAULT]
+    with pytest.raises(AssertionError, match="offers no default"):
+        run()
+    assert not fx.saved().get("acknowledged")
+    message, choices = next((m, c) for kind, m, c in fx.ui.prompts if m.startswith("Do you understand"))
+    assert fx.ui.defaults[message] is None
+    assert choices is not None and choices[0][0] != "accept"
+    assert "Enter alone does not accept" in message
+
+
+def test_dataset_terms_need_an_explicit_agreement(fx: Fakes) -> None:
+    fx.ui.script = ["download", DEFAULT]
+    with pytest.raises(AssertionError, match="offers no default"):
+        run("datasets")
+    assert "terms_accepted_at" not in (fx.saved().get("datasets", {}).get("hsls09_public") or {})
+    message, choices = next((m, c) for kind, m, c in fx.ui.prompts if m.startswith("Do you agree"))
+    assert fx.ui.defaults[message] is None
+    assert choices is not None and choices[0][0] == "no"
+
+
 def test_non_tty_prompt_failure_is_a_clear_message(fx: Fakes) -> None:
-    fx.ui.script = [NonInteractiveError("stdin is not a terminal")]
+    fx.ui.script = [NonInteractiveError("EDM-ARS needs an answer to \"Ready\" but cannot ask (it reached the end "
+                                        "of the input, so no one is there to answer).")]
     assert run() == 1
-    assert "without a terminal" in fx.ui.output
+    # Shown once, as written: it used to be wrapped in "Setup needs an answer,
+    # but it is running without a terminal (...)", which is false at end of input.
+    assert "[x] EDM-ARS needs an answer to \"Ready\" but cannot ask" in fx.ui.output
+    assert "without a terminal" not in fx.ui.output
+    assert "Run `edmars setup` in a terminal window" in fx.ui.output
 
 
 # ---------------------------------------------------------------------------
@@ -422,15 +452,69 @@ def test_reviewer_back_from_the_key_returns_to_the_question(fx: Fakes) -> None:
 
 
 def test_advanced_options(fx: Fakes) -> None:
-    fx.ui.script = ["Grace Hopper", "Example University", "show", "budget", "US$2.50", "venue", "JEDM",
+    fx.ui.script = ["Grace Hopper", "show", "budget", "US$2.50", "venue", "JEDM",
                     "format", "journal", "done"]
     assert run("advanced") == 0
     saved = fx.saved()
-    assert saved["author"] == {"name": "Grace Hopper", "affiliation": "Example University"}
+    assert saved["author"] == {"name": "Grace Hopper"}
+    assert "journal-format papers" in fx.ui.output
     assert saved["defaults"]["budget_usd"] == 2.5
     assert saved["defaults"]["venue"] == "JEDM"
     assert saved["defaults"]["paper_format"] == "journal"
     assert "does not stop the study" in fx.ui.output
+    # Study-finished notifications were never built; the menu must not offer them.
+    menu = next(c for kind, m, c in fx.ui.prompts if m == "Advanced options")
+    assert not any("otif" in label for _, label in menu or [])
+
+
+def test_spending_warning_says_where_it_appears_and_when_it_cannot(fx: Fakes) -> None:
+    fx.ui.script = ["", "show", "budget", "3", "done"]
+    assert run("advanced") == 0
+    assert "a warning appears in the study's progress messages" in fx.ui.output
+    assert "prices only for DeepSeek" not in fx.ui.output
+
+    fx.write_settings(provider="openai")
+    fx.ui.lines.clear()
+    fx.ui.script = ["", "show", "budget", "3", "done"]
+    assert run("advanced") == 0
+    # Only DeepSeek's models have prices, so the warning can never fire here.
+    assert "prices only for DeepSeek's models" in fx.ui.output and "will not appear" in fx.ui.output
+
+
+def _venue_labels(fx: Fakes) -> dict[str, str]:
+    menu = [choices for kind, message, choices in fx.ui.prompts if message == "Default venue"]
+    assert menu, "the Default venue menu was not shown"
+    return dict(menu[-1] or [])
+
+
+def test_venue_labels_come_from_the_installed_reviewers_calibration(fx: Fakes) -> None:
+    # JEDM and AERA Open carry a benchmark in the installed calibration, so
+    # the review gate holds papers to it; setup once said "no benchmark".
+    calibration = fx.lsar.home / "calibration"
+    calibration.mkdir(parents=True)
+    (calibration / "anchors_edm.yaml").write_text(
+        "overall_p25_full: 6.3\n"
+        "venues:\n"
+        "  JEDM: {p25: 5.15}\n"
+        "  AERA_OPEN: {p25: 6.6}\n"
+        "  JLA: {}\n",
+        encoding="utf-8")
+    fx.write_settings(lsar={"enabled": True, "auto_review": True, "home": str(fx.lsar.home)})
+    fx.ui.script = ["", "show", "venue", "AERA_OPEN", "done"]
+    assert run("advanced") == 0
+    labels = _venue_labels(fx)
+    assert "benchmark (6.6)" in labels["AERA_OPEN"] and "no benchmark" not in labels["AERA_OPEN"]
+    assert "benchmark (5.15)" in labels["JEDM"]
+    assert "benchmark (6.3)" in labels["EDM"]
+    assert "score only, no benchmark" in labels["JLA"]
+    assert fx.saved()["defaults"]["venue"] == "AERA_OPEN"
+
+
+def test_venue_labels_say_nothing_about_reviews_without_the_reviewer(fx: Fakes) -> None:
+    fx.ui.script = ["", "show", "venue", DEFAULT, "done"]
+    assert run("advanced") == 0
+    labels = _venue_labels(fx)
+    assert not any("benchmark" in label or "reviewer" in label for label in labels.values())
 
 
 # ---------------------------------------------------------------------------
@@ -479,6 +563,32 @@ def test_openai_needs_a_model_because_none_is_shipped(fx: Fakes) -> None:
     assert set(models.values()) == {"gpt-a"}
     assert {"critic", "writer", "revision_writer", "outline_agent"} <= set(models)
     assert "EDM-ARS will use OpenAI" in fx.ui.output
+
+
+def test_openai_model_list_offers_text_models_newest_first_with_no_default(fx: Fakes) -> None:
+    # GET /v1/models lists every model the account can reach. Sorted A-Z and
+    # cut at 40, the old menu pre-selected babbage-002 for every step and cut
+    # off the gpt-5 models the prompt told people to pick.
+    listed = ["babbage-002", "chatgpt-4o-latest", "dall-e-2", "dall-e-3", "davinci-002", "gpt-3.5-turbo",
+              "gpt-3.5-turbo-0125", "gpt-4", "gpt-4-0613", "gpt-4.1", "gpt-4o", "gpt-4o-2024-08-06",
+              "gpt-4o-audio-preview", "gpt-4o-mini", "gpt-4o-mini-tts", "gpt-4o-realtime-preview",
+              "gpt-4o-search-preview", "gpt-4o-transcribe", "gpt-5", "gpt-5-mini", "gpt-5.1", "gpt-image-1",
+              "o1", "o3", "o3-mini", "o4-mini", "omni-moderation-latest", "text-embedding-3-large",
+              "text-embedding-3-small", "tts-1", "whisper-1"]
+    listed += [f"ft:gpt-3.5-turbo:example-org:tuned-{i}" for i in range(40)]
+    fx.providers.results[OTHER_KEY] = KeyCheck("OK", "key accepted", models=listed)
+    fx.ui.script = ["openai", "paste", OTHER_KEY, "gpt-5"]
+    assert run("ai") == 0
+    assert set(fx.saved()["models"].values()) == {"gpt-5"}
+    message, choices = next((m, c) for kind, m, c in fx.ui.prompts if m.startswith("Which OpenAI model"))
+    assert fx.ui.defaults[message] is None
+    offered = [value for value, _ in choices or []]
+    assert offered[0] == "gpt-5.1" and {"gpt-5", "gpt-5-mini", "gpt-4o", "o3"} <= set(offered)
+    for unusable in ("babbage-002", "davinci-002", "dall-e-3", "tts-1", "whisper-1", "gpt-image-1",
+                     "text-embedding-3-large", "omni-moderation-latest", "gpt-4o-realtime-preview",
+                     "gpt-4o-transcribe", "gpt-4o-search-preview", "gpt-4o-audio-preview"):
+        assert unusable not in offered
+    assert "__type__" in offered
 
 
 def test_noninteractive_openai_without_a_model_fails(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:

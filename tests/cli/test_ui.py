@@ -195,6 +195,17 @@ def test_plain_select_by_number_value_and_default(typed, capsys: pytest.CaptureF
     assert ui.select("Which AI service?", choices) == "local"
 
 
+def test_plain_select_without_a_default_needs_a_pick(typed, capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
+    # Consent prompts (the setup notice, a dataset's terms) pass no default:
+    # an empty line must ask again, never answer.
+    typed("", "2")
+    picked = ui.select("Do you accept?", [("read", "Read it first"), ("accept", "I accept")], default=None)
+    assert picked == "accept"
+    out = capsys.readouterr().out
+    assert "(default)" not in out
+    assert "Please type one of the numbers shown." in out
+
+
 def test_plain_select_refuses_disabled_options(typed, capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
     typed("2", "1")
     picked = ui.select(
@@ -238,6 +249,18 @@ def test_select_rejects_a_default_that_is_not_a_choice() -> None:
         ui.select("Pick", [])
 
 
+def test_plain_prompts_do_not_double_the_colon_or_the_default_mark(typed, capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
+    # `edmars new` printed "Your question:: " and "... conference (default)  (default)".
+    typed("How do grades relate to belonging?")
+    assert ui.text("Your question:") == "How do grades relate to belonging?"
+    typed("")
+    picked = ui.select("Which venue?", [("EDM", "EDM conference (default)"), ("JLA", "JLA")], default="EDM")
+    assert picked == "EDM"
+    out = capsys.readouterr().out
+    assert "Your question: " in out and "::" not in out
+    assert "(default)  (default)" not in out and "EDM conference (default)" in out
+
+
 def test_plain_text_validates_and_uses_default(typed, capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
     typed("bad", "  good  ")
     answer = ui.text("Word", validate=lambda v: v == "good" or "Please type good.")
@@ -259,6 +282,28 @@ def test_plain_confirm(typed) -> None:  # type: ignore[no-untyped-def]
 def test_plain_secret_reads_a_stripped_line(typed) -> None:  # type: ignore[no-untyped-def]
     typed("  sk-fake-pasted-0123456789  ")
     assert ui.secret("Paste your key") == "sk-fake-pasted-0123456789"
+
+
+def test_git_bash_secret_erases_every_row_the_key_took(typed, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
+    # mintty echoes the pasted key. Erasing only the last row left 158 of a
+    # 164-character OpenAI key on screen in an 80-column window, right after
+    # the prompt had said the key "stays hidden".
+    import os
+    import shutil
+
+    key = "sk-proj-" + "F" * 156  # fake, 164 characters like a real project key
+    typed(key)
+    monkeypatch.setattr(ui, "is_mintty", lambda: True)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=(80, 24): os.terminal_size((80, 24)))
+    message = "Paste your OpenAI key (it stays hidden; press Enter on an empty line to go back)"
+    assert ui.secret(message) == key
+    out = capsys.readouterr().out
+    prompt = "Paste your OpenAI key (press Enter on an empty line to go back): "
+    assert prompt in out and "stays hidden" not in out
+    rows = -(-(len(prompt) + len(key)) // 80)
+    assert rows >= 3
+    assert out.endswith(f"\x1b[{rows}A\r\x1b[J")
+    assert ui._without_hidden_claim("Paste the server's key (it stays hidden)") == "Paste the server's key"
 
 
 def test_get_console_returns_a_real_console_for_rich_widgets() -> None:

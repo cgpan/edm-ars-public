@@ -258,6 +258,7 @@ def uninstall(
 
     if not keys and not files and not has_datasets and not studies:
         ui.ok("Nothing of EDM-ARS's is stored on this computer (apart from the program).")
+        _explain_left_in_place(current)
         _explain_program_removal()
         return 0
 
@@ -326,9 +327,36 @@ def uninstall(
     for path in problems:
         ui.warn(f"Could not remove {path} (it may be open in another program). Delete it yourself.")
     if not problems:
-        ui.ok("EDM-ARS's settings, keys and downloads were removed.")
+        ui.ok("EDM-ARS's settings, stored keys, automated reviewer and caches were removed.")
+    _explain_left_in_place(current)
     _explain_program_removal()
     return 1 if problems else 0
+
+
+def _explain_left_in_place(current: dict[str, Any]) -> None:
+    """Name what setup installed outside EDM-ARS's folders and uninstall keeps.
+
+    TinyTeX (from `edmars setup pdf`) lives in the folder the official
+    TinyTeX installer uses, where other programs can use it too, so it is
+    listed for the user to delete rather than deleted. R packages from
+    `edmars setup r` went into the user's own R library, shared with their
+    other R work, and are only mentioned.
+    """
+    from edmars import settings as settings_mod
+    from edmars import toolchain, ui
+
+    if str(settings_mod.get(current, "latex.mode", "") or "") == "tinytex":
+        root = toolchain.tinytex_root()
+        if root.is_dir():
+            ui.info(
+                f"TinyTeX (the LaTeX that `edmars setup pdf` installed, {_human(_size(root))}) is still in "
+                f"{root}. Other programs can use it, so it was not removed. If nothing else needs it, "
+                "run `tlmgr path remove` (this undoes the PATH change TinyTeX's installer made), "
+                "then delete that folder."
+            )
+    if settings_mod.get(current, "r.packages_ok", False):
+        ui.info("Uninstall does not touch R: any R packages `edmars setup r` added stay in your R "
+                "library, where your other R work may use them.")
 
 
 def _install_record(root: Path) -> tuple[Path, dict[str, Any]] | None:

@@ -235,7 +235,7 @@ section says `edmars`.
 | `edmars data list\|install\|import\|verify` | Datasets: download (after you accept the terms), use a file you already have, check a file. |
 | `edmars explain TERM` | A plain definition of a term in the results (AUC, SHAP, ATE, DIF, ...). |
 | `edmars privacy` / `edmars disclaimer` | The texts in [PRIVACY.md](PRIVACY.md) and [DISCLAIMER.md](DISCLAIMER.md). |
-| `edmars version` / `edmars update` / `edmars uninstall` | Version; check for a newer release; remove settings, stored keys and downloads (asks about datasets and studies). |
+| `edmars version` / `edmars update` / `edmars uninstall` | Version; check for a newer release; remove settings, stored keys, the automated reviewer and caches (asks about datasets and studies; lists TinyTeX, if setup installed it, for you to delete). |
 
 Every command takes `--plain` (no colour or animation; for screen readers and
 logs). Studies still run the AI-written code on your computer without a

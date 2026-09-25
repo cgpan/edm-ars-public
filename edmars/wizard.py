@@ -1,8 +1,9 @@
 """`edmars setup`: the guided setup wizard (screens S0 to S11).
 
 Written for education researchers who have never used a terminal: plain
-English, one decision per screen, the recommended answer pre-selected,
-links printed in full, keys pasted hidden and checked live, and a clear
+English, one decision per screen, the recommended answer pre-selected
+(except where the answer records consent: the notice and a dataset's
+terms need an explicit choice), links printed in full, keys pasted hidden and checked live, and a clear
 "Saved in <place>" after every key. Progress is saved after each screen,
 so an interrupted setup continues where it stopped.
 
@@ -120,19 +121,21 @@ NONINTERACTIVE_OPTIONS: dict[str, tuple[str, str]] = {
     "r_action": ("EDMARS_R_ACTION", "skip | find | install (install = find R, then add packages)"),
     "rscript": ("EDMARS_RSCRIPT", "path to Rscript for r_action find/install"),
     "lsar_action": ("EDMARS_LSAR_ACTION", "auto | manual | skip (default skip)"),
-    "author_name": ("EDMARS_AUTHOR_NAME", "your name for the paper's author line"),
-    "affiliation": ("EDMARS_AFFILIATION", "your university or organization"),
+    "author_name": ("EDMARS_AUTHOR_NAME", "your name for the author line of journal-format papers"),
     "venue": ("EDMARS_VENUE", "EDM | JEDM | JLA | AERA_OPEN"),
     "paper_format": ("EDMARS_PAPER_FORMAT", "conference | journal"),
     "budget_usd": ("EDMARS_BUDGET_USD", "spending warning per study in US$ (empty = none)"),
 }
 
-#: Venues offered in S10: id -> label.
+#: Venues offered in S10: id -> label. What the automated reviewer does
+#: for each venue is added at display time (:meth:`_Wizard._venue_choices`)
+#: from the installed reviewer's calibration file, never written here: the
+#: file, not this table, decides whether a paper is held to a benchmark.
 VENUES: dict[str, str] = {
-    "EDM": "EDM conference (recommended; reviewer scores are benchmarked against accepted EDM papers)",
-    "JEDM": "Journal of Educational Data Mining (reviewer gives a score only, no benchmark)",
-    "JLA": "Journal of Learning Analytics (reviewer gives a score only, no benchmark)",
-    "AERA_OPEN": "AERA Open (reviewer gives a score only, no benchmark)",
+    "EDM": "EDM conference (recommended)",
+    "JEDM": "Journal of Educational Data Mining",
+    "JLA": "Journal of Learning Analytics",
+    "AERA_OPEN": "AERA Open",
 }
 
 #: Presets for a model server on the user's own computer.
@@ -272,6 +275,35 @@ def _clean_key(text: str) -> str:
     if key.lower().startswith("bearer "):
         key = key[7:].strip()
     return key
+
+
+#: Parts of a model id that mark a model the pipeline cannot use: a
+#: service's model list (OpenAI's especially) also holds embedding,
+#: speech, image, moderation and old completion-only models.
+_NON_TEXT_MODEL_MARKERS: tuple[str, ...] = (
+    "embed", "tts", "whisper", "dall-e", "image", "sora", "babbage", "davinci", "moderation",
+    "realtime", "audio", "transcribe", "search", "computer-use",
+)
+
+#: A dated snapshot suffix: -2024-08-06, -20250929, -0613.
+_SNAPSHOT_SUFFIX = re.compile(r"-(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4})$")
+
+
+def _model_order(model_id: str) -> tuple[bool, tuple[int, int, int], str]:
+    """Sort key putting higher version numbers first (gpt-5.1 before gpt-4o,
+    claude-sonnet-4-5 before claude-3-7-sonnet), then the name. The
+    account's own fine-tuned models ("ft:...") come after the base ones."""
+    base = _SNAPSHOT_SUFFIX.sub("", model_id.lower())
+    numbers = [int(n) for n in re.findall(r"\d+", base)[:3]]
+    numbers += [0] * (3 - len(numbers))
+    return base.startswith("ft:"), (-numbers[0], -numbers[1], -numbers[2]), model_id
+
+
+def _chat_models(model_ids: Sequence[str]) -> list[str]:
+    """The ids worth offering as the model for every step: text models
+    only, newest-looking first, so a cut-off list keeps the strong ones."""
+    keep = {m for m in model_ids if m and not any(mark in m.lower() for mark in _NON_TEXT_MODEL_MARKERS)}
+    return sorted(keep, key=_model_order)
 
 
 def _normalize_rscript(path: Path) -> Path | None:
@@ -415,14 +447,23 @@ class _Wizard:
 
     # -- questions --------------------------------------------------------------
     def choose(self, message: str, choices: Sequence[tuple[str, str]], default: str | None = None,
-               *, back: bool | None = None, quit_: bool = True) -> str:
+               *, back: bool | None = None, quit_: bool = True, explicit: bool = False) -> str:
+        """Ask for one of ``choices``.
+
+        ``explicit`` offers no default, so pressing Enter alone never
+        answers: used where the answer records consent (the notice, a
+        dataset's terms). Put a harmless option first, because the
+        arrow-key menu starts on the first one.
+        """
         options = [(value, _t(_nb(label))) for value, label in choices]
         if self.allow_back if back is None else back:
             options.append((_BACK, "Go back"))
         if quit_:
             options.append((_QUIT, _t("Quit setup for now (your answers so far are saved)")))
         values = [value for value, _ in options]
-        if default not in values:
+        if explicit:
+            default = None
+        elif default not in values:
             default = values[0] if values else None
         answer = self.ui.select(_t(message), options, default=default)
         if answer is None or answer == _QUIT:
@@ -519,7 +560,7 @@ class _Wizard:
             ("r", "R for measurement studies"),
             ("reviewer", "Automated peer review (LSAR)"),
             ("folders", "Where studies are kept"),
-            ("advanced", "Your name on papers, spending warning, paper format, venue"),
+            ("advanced", "Your name on journal-format papers, spending warning, paper format, venue"),
             ("disclosure", "Read the notice about what leaves your computer again"),
             ("check", "Check everything again"),
             ("start-over", "Start over (keeps your studies, datasets and saved keys)"),
@@ -605,12 +646,14 @@ class _Wizard:
                        "and `edmars privacy`, then run setup again with --accept-disclosure.")
             raise _Abort(1)
         while True:
+            # No default, and accepting is not the first option: accepting
+            # must be something the user chose, not what Enter did.
             answer = self.choose(
-                "Do you understand and accept this?",
-                [("accept", "I understand and accept \u2014 continue"),
-                 ("disclaimer", "Read the full disclaimer first"),
-                 ("privacy", "Read the full privacy notice first")],
-                default="accept")
+                "Do you understand and accept this? (Pick an option; pressing Enter alone does not accept.)",
+                [("disclaimer", "Read the full disclaimer first"),
+                 ("privacy", "Read the full privacy notice first"),
+                 ("accept", "I understand and accept \u2014 continue")],
+                explicit=True)
             if answer in ("disclaimer", "privacy"):
                 # Long Markdown texts are printed literally, not as a panel.
                 self.say(disclosure.disclaimer_text() if answer == "disclaimer" else disclosure.privacy_text())
@@ -793,10 +836,12 @@ class _Wizard:
         self.info(f"EDM-ARS has no recommended {label} models, so choose the one every step will use. Pick "
                   "the strongest model your account offers: the steps that write analysis code depend on it. "
                   "You can choose a model per step later in `edmars setup advanced`.")
-        available = sorted(self.last_models or [])
+        available = _chat_models(self.last_models or [])
         if available:
             shown = [(m, m) for m in available[:40]] + [("__type__", "Type a model name")]
-            pick = self.choose(f"Which {label} model should EDM-ARS use?", shown, default=shown[0][0], back=False)
+            # No default: Enter alone must not pick a model for every step.
+            pick = self.choose(f"Which {label} model should EDM-ARS use? (Newest first; models that "
+                               "cannot write text are not listed.)", shown, explicit=True, back=False)
             model = pick if pick != "__type__" else self.ask_text("Model name")
         else:
             model = self.ask_text(f"Model name (as {label} lists it)")
@@ -1387,9 +1432,10 @@ class _Wizard:
         if self.ni:
             self.info(f"Terms accepted for {label} because dataset_action=download was given.")
         else:
-            answer = self.choose("Do you agree to use the data under these terms?",
-                                 [("agree", "I agree \u2014 download it"), ("no", "Don't download")],
-                                 default="agree", back=False)
+            answer = self.choose("Do you agree to use the data under these terms? (Pick an option; pressing "
+                                 "Enter alone does not agree.)",
+                                 [("no", "Don't download"), ("agree", "I agree \u2014 download it")],
+                                 explicit=True, back=False)
             if answer != "agree":
                 return False
         self.set(f"datasets.{name}.terms_accepted_at", _now())
@@ -1966,13 +2012,12 @@ class _Wizard:
         if self.ni:
             self._s10_noninteractive()
             return
-        self.header("S10", "Your name can appear in the author line of your papers. Both questions are optional.")
-        name = self.ask_text("Your name for the paper's author line (press Enter to skip)",
+        self.header("S10", "Your name can appear in the author line of journal-format papers. Conference papers "
+                           "(the default format) list EDM-ARS as the only author; you can add your name to the "
+                           "paper's .tex file yourself. This question is optional.")
+        name = self.ask_text("Your name for the author line of journal-format papers (press Enter to skip)",
                              default=str(self.get("author.name", "") or ""))
-        affiliation = self.ask_text("Your university or organization (press Enter to skip)",
-                                    default=str(self.get("author.affiliation", "") or ""))
         self.set("author.name", name or None)
-        self.set("author.affiliation", affiliation or None)
         self.save()
         answer = self.choose("Change advanced options? Most people skip this.",
                              [("skip", "Skip: keep the recommended defaults"),
@@ -1988,7 +2033,6 @@ class _Wizard:
             fmt = str(self.get("defaults.paper_format", "conference") or "conference")
             venue = str(self.get("defaults.venue", "EDM") or "EDM")
             awake = bool(self.get("defaults.keep_awake", True))
-            notify = bool(self.get("defaults.notify", True))
             models = self.get("models", {}) or {}
             mailto = self.get("literature.crossref_mailto", None)
             tavily = secrets.secret_source(TAVILY_ENV)
@@ -1997,7 +2041,6 @@ class _Wizard:
                 ("format", f"Default paper format: {fmt}"),
                 ("venue", f"Default venue: {venue}"),
                 ("awake", f"Keep the computer awake during studies: {'on' if awake else 'off'}"),
-                ("notify", f"Notify me when a study finishes: {'on' if notify else 'off'}"),
                 ("models", f"AI models: {'custom' if models else 'recommended'}"),
                 ("mailto", f"Contact email for Crossref (optional): {'set' if mailto else 'not set'}"),
                 ("tavily", f"Tavily key for the reviewer's web search (optional): {'saved' if tavily else 'not set'}"),
@@ -2015,12 +2058,10 @@ class _Wizard:
                                      default=fmt, back=False)
                 self.set("defaults.paper_format", picked)
             elif answer == "venue":
-                picked = self.choose("Default venue", list(VENUES.items()), default=venue, back=False)
+                picked = self.choose("Default venue", self._venue_choices(), default=venue, back=False)
                 self.set("defaults.venue", picked)
             elif answer == "awake":
                 self.set("defaults.keep_awake", self.yes("Keep the computer awake while a study runs?", default=awake))
-            elif answer == "notify":
-                self.set("defaults.notify", self.yes("Show a notification when a study finishes?", default=notify))
             elif answer == "models":
                 self._ask_models()
             elif answer == "mailto":
@@ -2035,6 +2076,30 @@ class _Wizard:
                 if key:
                     self._store_key(TAVILY_ENV, key)
             self.save()
+
+    def _venue_choices(self) -> list[tuple[str, str]]:
+        """The venue menu, saying what the installed reviewer does for each.
+
+        With the reviewer on, a venue whose calibration carries a benchmark
+        is held to it by the review gate; any other venue gets a score
+        only. Without the reviewer the labels say nothing about reviews.
+        """
+        home = self.get("lsar.home", None) if self.get("lsar.enabled", False) else None
+        choices: list[tuple[str, str]] = []
+        for key, label in VENUES.items():
+            if home:
+                try:
+                    from edmars import lsar
+
+                    benchmark = lsar.benchmark_for(Path(str(home)), key)
+                except Exception:  # noqa: BLE001 - a label must not break the menu
+                    benchmark = None
+                if benchmark is not None:
+                    label += f" - the reviewer compares its score with a benchmark ({benchmark:g})"
+                else:
+                    label += " - the reviewer gives a score only, no benchmark"
+            choices.append((key, label))
+        return choices
 
     def _ask_budget(self) -> None:
         current = self.get("defaults.budget_usd", None)
@@ -2054,7 +2119,13 @@ class _Wizard:
                 self.warn("Please type an amount above zero.")
                 continue
             self.set("defaults.budget_usd", value)
-            self.info("EDM-ARS will warn you when a study passes this amount. It does not stop the study.")
+            self.info("When a study's measured cost passes this amount, a warning appears in the study's "
+                      "progress messages. It does not stop the study.")
+            provider_id = str(self.get("provider", "deepseek") or "deepseek")
+            if provider_id != "deepseek":
+                label = str(_doctor.provider_meta(provider_id).get("label") or provider_id)
+                self.warn(f"EDM-ARS has prices only for DeepSeek's models. With {label} it cannot measure "
+                          "what a study costs, so this warning will not appear.")
             return
 
     def _ask_models(self) -> None:
@@ -2087,10 +2158,9 @@ class _Wizard:
         self.set("models", {k: v for k, v in chosen.items() if v != defaults.get(k)} if provider_id != "local" else chosen)
 
     def _s10_noninteractive(self) -> None:
-        for option, dotted in (("author_name", "author.name"), ("affiliation", "author.affiliation")):
-            value = self.opt(option)
-            if value is not None:
-                self.set(dotted, str(value) or None)
+        value = self.opt("author_name")
+        if value is not None:
+            self.set("author.name", str(value) or None)
         venue = self.opt("venue")
         if venue is not None:
             venue_id = str(venue).upper().replace(" ", "_")
@@ -2324,8 +2394,11 @@ def run_setup(section: str | None = None, *, non_interactive: bool = False,
     except _Abort as exc:
         return exc.code
     except interrupts as exc:  # type: ignore[misc]
-        ui.fail(_nb(f"Setup needs an answer, but it is running without a terminal ({exc})."))
-        ui.info("Run `edmars setup` in a terminal, or pass --yes with the options for every step.")
+        # The error already says which question and why it could not be
+        # asked (no terminal, --yes, or the end of the input).
+        ui.fail(_nb(str(exc)))
+        ui.info("Run `edmars setup` in a terminal window, or pass --yes with the options for every step "
+                "(see `edmars setup --help`).")
         return 1
     if wizard is not None and wizard.start_study:
         return _launch_first_study()

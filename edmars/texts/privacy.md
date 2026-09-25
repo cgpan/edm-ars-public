@@ -114,16 +114,21 @@ sent, and to whom* above applies. In addition:
 | Item | Where | Notes |
 |---|---|---|
 | API keys | Your operating system's credential store (Windows Credential Manager, macOS Keychain, or the Linux Secret Service), under the name `edm-ars` | Never written into settings or study folders. If no credential store works, `edmars` asks before using a file readable only by your user. A key you set as an environment variable takes priority over a stored one. |
-| Settings | `settings.yaml` in your user configuration folder (`edmars doctor` prints the path) | No secrets. Your name and affiliation (for the paper's author line) and a Crossref contact email, if you give them. |
+| Settings | `settings.yaml` in your user configuration folder (`edmars doctor` prints the path) | No secrets. Your name (for the author line of journal-format papers) and a Crossref contact email, if you give them. |
 | Datasets, the automated reviewer (LSAR) and the findings memory | Your user data folder (on Windows `%LOCALAPPDATA%\edm-ars`) | The findings memory works as described above; each study's `run_config.yaml` shows where it is. |
 | Studies | The studies folder you chose in setup (default `~/EDM-ARS/studies`), one folder per study | The same contents as a run folder above, plus `run_config.yaml` (the settings the study ran with; no secrets), `runner.json` (how it was started, including your question) and `console.log`. Treat study folders like the dataset itself. |
 | Support file | Only if you run `edmars doctor --bundle` | A zip with the check results, your settings with your name, email and home folder removed, version numbers and, if you agree when asked, the last study's logs with keys removed. It never includes `prompts/` or data files. Read it before you share it. |
 
 `edmars` hands your keys to the pipeline only through the environment of
 the process it starts, and the pipeline removes them from the environment
-of the AI-written code, as described in *Keys are kept away from generated
-code*. A key kept in the fallback file (see the table) is a file your user
-account can read, so that code could read it too.
+of the AI-written code, as described in *API keys and the AI-written code*.
+As that section says, this is not a security barrier. The AI-written code
+runs as your user account, with the same Python as `edmars` (which includes
+the `keyring` package), so it can still read your keys: from your
+credential store, from the fallback file (see the table), and from the
+environment of the pipeline process that started it. The same advice
+applies: use a separate key with a spending limit or a small prepaid
+balance, and revoke it and make a new one if you think it was exposed.
 
 **Deleting everything**
 
@@ -133,8 +138,11 @@ and asks separately whether to delete your downloaded datasets and your
 study folders. It then lists the program files the installer created (the
 program, its private Python, the `edmars` command and any PATH change) for
 you to delete once the window is closed, because a running program cannot
-delete itself. Keys you set as environment variables, and data held by an AI
-provider, are removed the same way as described above.
+delete itself. It does not remove TinyTeX, if `edmars setup pdf` installed
+it, because other programs can use it: it names the folder for you to
+delete (run `tlmgr path remove` first). R packages from `edmars setup r`
+stay in your R library. Keys you set as environment variables, and data
+held by an AI provider, are removed the same way as described above.
 
 ## Questions
 

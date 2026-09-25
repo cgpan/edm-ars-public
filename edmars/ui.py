@@ -541,7 +541,7 @@ def select(
         line = f"  {number}) {label}"
         if value in unavailable:
             line += f"  (not available: {unavailable[value]})"
-        elif value == default:
+        elif value == default and "(default)" not in label:
             line += "  (default)"
         say(line)
     default_number = values.index(default) + 1 if default is not None else None
@@ -566,6 +566,12 @@ def select(
             say(f"That option is not available: {unavailable[pick]}")
             continue
         return pick
+
+
+def _prompt_base(message: str) -> str:
+    """``message`` ready for ": " to be added (no "Your question:: ")."""
+    base = message.rstrip()
+    return base[:-1].rstrip() if base.endswith(":") else base
 
 
 def text(message: str, default: str | None = None, validate: Validator | None = None) -> str:
@@ -596,7 +602,7 @@ def text(message: str, default: str | None = None, validate: Validator | None = 
 
     suffix = f" [{default}]" if default else ""
     while True:
-        raw = _read_line(f"{message}{suffix}: ")
+        raw = _read_line(f"{_prompt_base(message)}{suffix}: ")
         if raw is None:
             raise _end_of_input(message)
         value = raw.strip()
@@ -609,8 +615,34 @@ def text(message: str, default: str | None = None, validate: Validator | None = 
         return value
 
 
+def _without_hidden_claim(message: str) -> str:
+    """``message`` without "it stays hidden", for a terminal that shows typing."""
+    message = re.sub(r"\s*\(it stays hidden\)", "", message)
+    return re.sub(r"it stays hidden[;,]\s*", "", message)
+
+
+def _erase_rows(typed_chars: int) -> str:
+    """ANSI codes that erase the ``typed_chars`` characters just echoed.
+
+    After Enter the cursor is at the start of the next row. The prompt and
+    the input filled ceil(typed_chars / width) rows above it; go up that
+    many and clear to the end of the screen. The width is the terminal's
+    when it can be read, else 80 columns. A wider window only means a
+    line or two above the prompt is cleared as well.
+    """
+    import shutil
+
+    width = max(1, shutil.get_terminal_size((80, 24)).columns)
+    rows = max(1, -(-max(typed_chars, 1) // width))
+    return f"\x1b[{rows}A\r\x1b[J"
+
+
 def secret(message: str) -> str:
-    """Ask for a secret (an API key) without showing it on screen."""
+    """Ask for a secret (an API key) without showing it on screen.
+
+    Git Bash's window (mintty) cannot hide typing: there the key is shown
+    while it is pasted and erased from the screen after Enter.
+    """
     if not is_interactive():
         raise NonInteractiveError(
             message,
@@ -634,18 +666,20 @@ def secret(message: str) -> str:
             "the screen after you press Enter. (PowerShell or Windows Terminal "
             "hide it as you type.)"
         )
-        raw = _read_line(f"{message}: ")
+        prompt = f"{_prompt_base(_without_hidden_claim(message))}: "
+        raw = _read_line(prompt)
         if raw is None:
             raise _end_of_input(message)
-        # Move up one line and clear it: mintty understands ANSI escapes.
-        sys.stdout.write("\x1b[1A\x1b[2K")
+        # A long key wraps over several rows; erase every row the prompt and
+        # the key took, not only the last one (mintty understands ANSI escapes).
+        sys.stdout.write(_erase_rows(len(prompt) + len(raw)))
         sys.stdout.flush()
         return raw.strip()
 
     if _isatty(sys.stdin):
-        return getpass.getpass(f"{message}: ").strip()
+        return getpass.getpass(f"{_prompt_base(message)}: ").strip()
 
-    raw = _read_line(f"{message}: ")
+    raw = _read_line(f"{_prompt_base(message)}: ")
     if raw is None:
         raise _end_of_input(message)
     return raw.strip()

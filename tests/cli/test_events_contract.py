@@ -87,3 +87,38 @@ def test_aborted_then_resumed_run_from_the_real_sink(tmp_path: Path) -> None:
     assert {s.key: s.status for s in state.stages}["REVISING"] == "skipped"
     out = classify(run)
     assert out.kind in ("ready", "ready_with_issues")  # no run_status/invariants.json written here
+
+
+def test_a_study_over_its_spending_warning_says_so_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Setup promises a warning when a study passes the budget. The pipeline
+    used to write it only to pipeline.log (a "log" event, which neither the
+    console nor `edmars status` shows)."""
+    import json
+    import types
+
+    import src.cost as cost
+    from src.cost import CostSummary
+    from src.main import _progress_line
+    from src.orchestrator import Orchestrator
+
+    run = tmp_path / "run"
+    sink = EventSink(str(run))
+    _emit_prefix(sink)
+    orch = Orchestrator.__new__(Orchestrator)  # only _check_cost and _log are exercised
+    orch.ctx = types.SimpleNamespace(output_dir=str(run), event_sink=sink, current_state="ANALYZING", log=[])
+    orch.config = {"pipeline": {"cost_budget_usd": 0.10}}
+    monkeypatch.setattr(cost, "load_usage_best", lambda _run_dir: ["one priced call"])
+    monkeypatch.setattr(cost, "load_pricing", lambda _config: {})
+    monkeypatch.setattr(cost, "summarize", lambda _usages, _pricing: CostSummary(n_calls=1, cost_usd=0.25))
+
+    orch._check_cost()
+    orch._check_cost()  # runs after every stage; the warning must not repeat
+
+    state = load_state(run)
+    over = [w for w in state.warnings if "spending warning" in w]
+    assert len(over) == 1 and "US$0.25" in over[0] and "US$0.10" in over[0]
+    assert any("spending warning" in line for line in state.recent)
+    records = [json.loads(line) for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    shown = [_progress_line(r) for r in records if (r.get("data") or {}).get("code") == "COST_OVER_BUDGET"]
+    assert len(shown) == 1 and shown[0] and "COST_OVER_BUDGET" in shown[0]
+    assert "exceeds budget" in (run / "pipeline.log").read_text(encoding="utf-8")

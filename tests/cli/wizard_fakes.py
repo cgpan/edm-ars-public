@@ -69,6 +69,8 @@ class FakeUI:
     def __init__(self) -> None:
         self.script: list[Any] = []
         self.prompts: list[tuple[str, str, list[tuple[str, str]] | None]] = []
+        #: The default each select prompt offered (None: Enter alone does not answer).
+        self.defaults: dict[str, str | None] = {}
         self.lines: list[str] = []
         self.plain = True
         self.console: Any = FakeConsole(self.lines)
@@ -86,8 +88,11 @@ class FakeUI:
         return answer
 
     def select(self, message: str, choices: list[tuple[str, str]], default: str | None = None) -> str:
+        self.defaults[message] = default
         answer = self._next("select", message, list(choices))
         if answer is DEFAULT:
+            # The real prompt asks again when Enter is pressed with no default.
+            assert default is not None, f"{message!r} offers no default; the script must pick an option"
             return str(default)
         values = [v for v, _ in choices]
         assert answer in values, f"{answer!r} is not a choice for {message!r}: {values}"
@@ -194,9 +199,8 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     "latex": {"mode": None, "pdflatex": None},
     "r": {"rscript": None, "packages_ok": False},
     "lsar": {"enabled": False, "auto_review": False, "home": None, "ref": None},
-    "defaults": {"venue": "EDM", "paper_format": "conference", "budget_usd": None, "keep_awake": True,
-                 "notify": True},
-    "author": {"name": None, "affiliation": None},
+    "defaults": {"venue": "EDM", "paper_format": "conference", "budget_usd": None, "keep_awake": True},
+    "author": {"name": None},
     "setup_progress": {"last_completed_screen": None},
 }
 
@@ -595,6 +599,21 @@ class FakeLsar:
     def verify(self, home: Path) -> list[str]:
         return []
 
+    def benchmark_for(self, home: Path, venue: str | None) -> float | None:
+        """Like the real one: the venue's p25 in the reviewer's calibration file."""
+        try:
+            data = yaml.safe_load((Path(home) / "calibration" / "anchors_edm.yaml").read_text(encoding="utf-8"))
+        except OSError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        if (venue or "EDM") == "EDM":
+            value = data.get("overall_p25_full")
+        else:
+            entry = (data.get("venues") or {}).get(venue)
+            value = entry.get("p25") if isinstance(entry, dict) else None
+        return float(value) if value is not None else None
+
 
 class FakeRunner:
     def __init__(self) -> None:
@@ -699,7 +718,8 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fakes:
                                                              "tinytex_bin_dirs", "find_tex_tool",
                                                              "find_rscript", "r_checks", "install_r_packages",
                                                              "docker_info")),
-        "lsar": _module("lsar", fakes.lsar, ("LSAR_REPO", "LSAR_REF", "checks", "install", "verify")),
+        "lsar": _module("lsar", fakes.lsar, ("LSAR_REPO", "LSAR_REF", "checks", "install", "verify",
+                                                    "benchmark_for")),
         "runner": _module("runner", fakes.runner, ("latest_run",)),
         "cli": _module("cli", fakes.cli, ("app",)),
     }
