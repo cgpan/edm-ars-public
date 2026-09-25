@@ -21,7 +21,9 @@
         <Dir>\python            a private Python 3.11 (your own Python is untouched)
         <Dir>\uv                the uv tool, only if you do not have it already
         %USERPROFILE%\.local\bin\edmars.cmd   the command you type
-    Default <Dir>: %LOCALAPPDATA%\edm-ars. `edmars uninstall` removes it all.
+    Default <Dir>: %LOCALAPPDATA%\edm-ars. To remove it: run `edmars
+    uninstall` (settings and keys), then delete <Dir> and edmars.cmd;
+    <Dir>\install.json lists everything this installer created.
 
     This script never closes your PowerShell window: it has no `exit`.
     Works with Windows PowerShell 5.1 and PowerShell 7.
@@ -524,7 +526,8 @@
             Say "  8. Start the setup wizard ('edmars setup')."
         }
         Say ''
-        Say "No administrator rights are needed. To remove everything later, run 'edmars uninstall'."
+        Say 'No administrator rights are needed. To remove it later, run ''edmars uninstall'''
+        Say "(your settings and keys), then delete $base and the command."
 
         if (($null -ne $freeGB) -and ($freeGB -lt $MinFreeGB)) {
             $msg = "only $freeGB GB free on the drive holding $freeParent; EDM-ARS needs at least $MinFreeGB GB (packages, data and outputs)."
@@ -746,7 +749,7 @@
         $cmdLines = @(
             '@echo off',
             "rem $LauncherMark (EDM-ARS $ver).",
-            'rem Re-run the installer to update it; "edmars uninstall" removes it.',
+            'rem Re-run the installer to update it. install.json in the install folder lists everything it created.',
             'setlocal',
             ('set "EDMARS_APP_ROOT=' + (ConvertTo-CmdPath $appDir) + '"'),
             'set "PYTHONUTF8=1"',

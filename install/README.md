@@ -166,10 +166,19 @@ Run `edmars doctor` for a full check of your setup.
 ## Uninstalling
 
 Run `edmars uninstall`: it removes EDM-ARS's settings and stored keys, and
-asks separately before touching datasets or studies. Then delete the install
-folder and the `edmars` command listed above (`install.json` in the install
-folder lists exactly what this installer created, including any PATH
-change).
+asks separately before touching datasets or studies. It cannot delete the
+program it is running from, so then, with no `edmars` window open (first
+look at `install.json` in the install folder: it lists exactly what this
+installer created, including any PATH change):
+
+1. delete the install folder (`<dir>` above, all of it) and the `edmars`
+   command;
+2. undo the PATH change, if the installer made one: on Windows, open
+   "Edit environment variables for your account" and remove the
+   `...\.local\bin` entry from your user `Path` (only if nothing else of
+   yours lives in that folder); on macOS and Linux, delete the block between
+   `# >>> edm-ars >>>` and `# <<< edm-ars <<<` in your shell start-up files
+   (and the fish file `~/.config/fish/conf.d/edm-ars.fish`, if present).
 
 ## For maintainers
 

@@ -29,7 +29,9 @@
 #   <dir>/uv                the uv tool, only if you do not have it already
 #   ~/.local/bin/edmars     the command you type
 # Default <dir>: ~/Library/Application Support/edm-ars (macOS) or
-# ~/.local/share/edm-ars (Linux). `edmars uninstall` removes all of it.
+# ~/.local/share/edm-ars (Linux). To remove it: run `edmars uninstall`
+# (settings and keys), then delete <dir>, the command and the PATH block
+# this script added; <dir>/install.json lists everything it created.
 #
 # The whole script runs from main() at the very end, so a download that
 # is cut off halfway cannot run half an installer.
@@ -156,7 +158,9 @@ Options:
   --help             show this help
 
 Everything is installed inside your user account; no administrator rights
-are needed. `edmars uninstall` removes it again.
+are needed. To remove it: run `edmars uninstall` (settings and keys), then
+delete the install folder and the command; install.json in the install
+folder lists everything this installer created.
 EOF
 }
 
@@ -169,7 +173,7 @@ add_path_block() {
     # $PATH (and $HOME) in it must stay unexpanded here.
     # shellcheck disable=SC2016
     {
-        printf '\n# >>> edm-ars >>> (added by the EDM-ARS installer; `edmars uninstall` removes it)\n'
+        printf '\n# >>> edm-ars >>> (added by the EDM-ARS installer; delete this block to undo)\n'
         printf 'case ":${PATH}:" in *":%s:"*) ;; *) export PATH="%s:$PATH" ;; esac\n' "$PATH_EXPR" "$PATH_EXPR"
         printf '# <<< edm-ars <<<\n'
     } >>"$1"
@@ -432,7 +436,8 @@ main() {
         say "  8. Start the setup wizard ('edmars setup')."
     fi
     say ""
-    say "No administrator rights are needed. To remove everything later, run 'edmars uninstall'."
+    say "No administrator rights are needed. To remove it later, run 'edmars uninstall'"
+    say "(your settings and keys), then delete $APP_BASE and the command."
 
     if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt "$MIN_FREE_GB" ]; then
         if [ "$DRY_RUN" = 1 ]; then
@@ -641,7 +646,7 @@ main() {
     {
         printf '#!/bin/sh\n'
         printf '# %s (EDM-ARS %s).\n' "$LAUNCHER_MARK" "$VERSION"
-        printf '# Re-run the installer to update it; `edmars uninstall` removes it.\n'
+        printf '# Re-run the installer to update it. install.json in the install folder lists everything it created.\n'
         printf 'EDMARS_APP_ROOT=%s\n' "$(shell_quote "$APP_DIR")"
         printf 'export EDMARS_APP_ROOT\n'
         printf 'PYTHONUTF8=1\n'
@@ -694,7 +699,7 @@ main() {
             mkdir -p "$HOME/.config/fish/conf.d"
             # shellcheck disable=SC2016
             {
-                printf '# >>> edm-ars >>> (added by the EDM-ARS installer; `edmars uninstall` removes it)\n'
+                printf '# >>> edm-ars >>> (added by the EDM-ARS installer; delete this file to undo)\n'
                 printf 'if not contains -- "%s" $PATH\n    set -gx PATH "%s" $PATH\nend\n' "$BIN_DIR" "$BIN_DIR"
                 printf '# <<< edm-ars <<<\n'
             } >"$FISH_FILE"

@@ -128,6 +128,15 @@ def test_launchers_pass_on_the_uv_that_built_the_environment() -> None:
     assert "EDMARS_UV" in ps_block and "uvPrivate" not in ps_block
 
 
+def test_scripts_do_not_promise_that_uninstall_removes_the_program() -> None:
+    # `edmars uninstall` removes settings and keys; it cannot delete the
+    # program it runs from, the launcher or the PATH change. Text the user
+    # reads (plan, launcher comments, PATH block) must not claim otherwise.
+    for path in (INSTALL_SH, INSTALL_PS1, README):
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"uninstall\W{0,3}\s+removes\s+(it|all|every)", text, re.IGNORECASE), path.name
+
+
 def test_install_sh_shape() -> None:
     sh = _text(INSTALL_SH)
     assert sh.startswith("#!/bin/sh\n")
