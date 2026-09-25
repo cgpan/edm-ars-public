@@ -918,7 +918,12 @@ def resume_cmd(
 
 @app.command("review")
 @_friendly
-def review_cmd(run: RunArg = None, plain: PlainOpt = False, yes: YesOpt = False) -> None:
+def review_cmd(
+    run: RunArg = None,
+    accept_disclosure: AcceptOpt = False,
+    plain: PlainOpt = False,
+    yes: YesOpt = False,
+) -> None:
     """Run the automated reviewer (LSAR) on a finished study's paper."""
     non_interactive = _modes(plain, yes)
     settings = _settings()
@@ -926,6 +931,9 @@ def review_cmd(run: RunArg = None, plain: PlainOpt = False, yes: YesOpt = False)
     review = getattr(lsar, "review_run", None) or getattr(lsar, "review", None)
     if review is None:
         raise FeatureMissing("lsar.review")
+    # The review sends the paper to DeepSeek, which the notice describes;
+    # like new, run and resume, it needs the current notice accepted.
+    _require_ack(settings, accept_disclosure)
     run_dir = _resolve_run(settings, run, prefer_active=False)
     _confirm_spend(
         f"Review the paper in {run_dir.name}? This sends it to DeepSeek and usually "

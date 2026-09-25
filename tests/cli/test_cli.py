@@ -445,6 +445,7 @@ def test_resume_confirms_spending(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_review_adapts_to_the_lsar_function_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    accept_disclosure()
     folder = make_study()
     seen: list[tuple[Any, Any]] = []
 
@@ -456,6 +457,19 @@ def test_review_adapts_to_the_lsar_function_signature(monkeypatch: pytest.Monkey
     result = invoke("review", folder.name, "--yes")
     assert result.exit_code == 0, result.output
     assert seen == [("EDM", folder)]
+
+
+def test_review_requires_the_disclosure(monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = make_study()
+    reviewed: list[Path] = []
+    fake_module(monkeypatch, "lsar", review=lambda run_dir: reviewed.append(run_dir) or 0)
+    result = invoke("review", folder.name, "--yes")
+    assert result.exit_code == 1
+    assert "accept" in result.output
+    assert reviewed == []  # the paper was not sent anywhere
+    result = invoke("review", folder.name, "--yes", "--accept-disclosure")
+    assert result.exit_code == 0, result.output
+    assert reviewed == [folder]
 
 
 def test_review_without_a_review_function(monkeypatch: pytest.MonkeyPatch) -> None:
