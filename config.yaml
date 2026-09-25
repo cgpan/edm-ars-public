@@ -271,8 +271,10 @@ verification:
   # Promoted on measurement, one code at a time. Setting this list at all
   # overrides `blocking` above: ONLY these codes stop a run.
   #
-  # INV_LATEX_NO_PDF -- pdflatex said it produced no PDF, or no PDF sits
-  # beside the log that proves one was attempted. Measured over all 37
+  # INV_LATEX_NO_PDF -- pdflatex said it produced no PDF, no PDF sits
+  # beside the log that proves one was attempted, or pdflatex never ran
+  # (a manuscript with neither paper.log nor paper.pdf; this third case
+  # was added after the measurement below). Measured over all 37
   # archived manuscripts plus the four templates: one firing, on the one
   # paper that provably did not compile. Zero false positives. This is
   # the least arguable finding the battery can make -- the deliverable

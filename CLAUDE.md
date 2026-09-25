@@ -23,7 +23,10 @@ instructions. The stage writes `invariants.json`, `obligations.json` and
 advisory by default (`verification.blocking: false`): promote a check to
 blocking only once its false-positive rate has been measured. One code is
 promoted — `INV_LATEX_NO_PDF`, measured at zero false positives over 37
-archived manuscripts and the four templates. Note that setting
+archived manuscripts and the four templates. It also fires when pdflatex never
+ran (a manuscript with neither `paper.log` nor `paper.pdf`); that case was
+added after the measurement and has not been re-measured on the archive.
+Note that setting
 `verification.blocking_codes` at all overrides `blocking`: only the listed
 codes stop a run.
 

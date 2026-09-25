@@ -135,11 +135,14 @@ ships `false` — a critical finding is recorded, not fatal — because a check 
 no business stopping a run until somebody has measured its false-positive rate.
 
 One check is promoted. `INV_LATEX_NO_PDF` — pdflatex said it produced no PDF,
-or none sits beside the log that proves one was attempted — is listed in
-`verification.blocking_codes`, so it ends the run `INCOMPLETE` and exits 2.
-It earned that: zero false positives across every archived manuscript and every
-template, and the finding it makes is the least arguable one available, namely
-that the deliverable does not exist. Note that setting `blocking_codes` at all
+none sits beside the log that proves one was attempted, or pdflatex never ran at
+all (not installed or not on `PATH`, so there is a manuscript with neither a log
+nor a PDF beside it) — is listed in `verification.blocking_codes`, so it ends
+the run `INCOMPLETE` and exits 2. It earned that: zero false positives across
+every archived manuscript and every template, and the finding it makes is the
+least arguable one available, namely that the deliverable does not exist. (That
+measurement predates the never-ran case; an archived folder that kept
+`paper.tex` but lost both its log and its PDF would now be flagged.) Note that setting `blocking_codes` at all
 overrides `blocking`: only the listed codes stop a run.
 
 An optional LLM judge (`src/agents/verifier.py`, `verification.judge_enabled`)
