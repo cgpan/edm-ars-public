@@ -115,8 +115,13 @@ and `curl -LsSf <url>/install.sh | sh -s -- --no-onboard` elsewhere.
 
 When you install a new version, the previous one is kept (a study started
 before the update may still be running from it); older ones are removed.
-Your settings, keys, datasets and studies live elsewhere (see `edmars
-privacy`) and are never touched by the installer.
+The installer never touches your settings, keys, datasets or studies. Keys
+are in your system's credential store and studies in the folder you choose.
+Datasets and the reviewer (and, on Windows and macOS, your settings) are kept
+in your user data folder, which is the same folder as the default install
+folder, next to (not inside) `app`, `venv-*`, `python` and `uv` (see `edmars
+privacy`). So to remove the program by hand, delete those entries rather than
+the whole folder, or run `edmars uninstall` first.
 
 **PATH.** Unless you pass `-NoModifyPath` / `--no-modify-path`, the command's
 folder is added to your PATH for your account only: on Windows in your user
@@ -167,12 +172,14 @@ Run `edmars doctor` for a full check of your setup.
 
 Run `edmars uninstall`: it removes EDM-ARS's settings and stored keys, and
 asks separately before touching datasets or studies. It cannot delete the
-program it is running from, so then, with no `edmars` window open (first
-look at `install.json` in the install folder: it lists exactly what this
-installer created, including any PATH change):
+program it is running from, so it ends by listing the program files this
+installer created (read from `install.json` in the install folder). Then,
+with no `edmars` window open:
 
-1. delete the install folder (`<dir>` above, all of it) and the `edmars`
-   command;
+1. delete those entries (`app`, `venv-*`, `python`, `uv` if present,
+   `install.json` and `versions.txt` in `<dir>`) and the `edmars` command.
+   Delete the whole of `<dir>` only if you also want the datasets you kept
+   gone: they live in the same folder;
 2. undo the PATH change, if the installer made one: on Windows, open
    "Edit environment variables for your account" and remove the
    `...\.local\bin` entry from your user `Path` (only if nothing else of

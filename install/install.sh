@@ -30,8 +30,10 @@
 #   ~/.local/bin/edmars     the command you type
 # Default <dir>: ~/Library/Application Support/edm-ars (macOS) or
 # ~/.local/share/edm-ars (Linux). To remove it: run `edmars uninstall`
-# (settings and keys), then delete <dir>, the command and the PATH block
-# this script added; <dir>/install.json lists everything it created.
+# (settings and keys; it asks about datasets and studies), then delete the
+# program files it lists (app, venv-*, python, uv in <dir>), the command
+# and the PATH block this script added. Not all of <dir>: your data folder
+# is the same folder. <dir>/install.json lists everything it created.
 #
 # The whole script runs from main() at the very end, so a download that
 # is cut off halfway cannot run half an installer.
@@ -159,8 +161,8 @@ Options:
 
 Everything is installed inside your user account; no administrator rights
 are needed. To remove it: run `edmars uninstall` (settings and keys), then
-delete the install folder and the command; install.json in the install
-folder lists everything this installer created.
+delete the program files it lists and the command; install.json in the
+install folder lists everything this installer created.
 EOF
 }
 
@@ -440,7 +442,7 @@ main() {
     fi
     say ""
     say "No administrator rights are needed. To remove it later, run 'edmars uninstall'"
-    say "(your settings and keys), then delete $APP_BASE and the command."
+    say "(your settings and keys), then delete the program files it lists from $APP_BASE and the command."
 
     if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt "$MIN_FREE_GB" ]; then
         if [ "$DRY_RUN" = 1 ]; then

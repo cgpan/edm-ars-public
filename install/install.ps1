@@ -22,7 +22,9 @@
         <Dir>\uv                the uv tool, only if you do not have it already
         %USERPROFILE%\.local\bin\edmars.cmd   the command you type
     Default <Dir>: %LOCALAPPDATA%\edm-ars. To remove it: run `edmars
-    uninstall` (settings and keys), then delete <Dir> and edmars.cmd;
+    uninstall` (settings and keys; it asks about datasets and studies), then
+    delete the program files it lists (app, venv-*, python, uv in <Dir>) and
+    edmars.cmd. Not all of <Dir>: your data folder is the same folder.
     <Dir>\install.json lists everything this installer created.
 
     This script never closes your PowerShell window: it has no `exit`.
@@ -527,7 +529,7 @@
         }
         Say ''
         Say 'No administrator rights are needed. To remove it later, run ''edmars uninstall'''
-        Say "(your settings and keys), then delete $base and the command."
+        Say "(your settings and keys), then delete the program files it lists from $base and the command."
 
         if (($null -ne $freeGB) -and ($freeGB -lt $MinFreeGB)) {
             $msg = "only $freeGB GB free on the drive holding $freeParent; EDM-ARS needs at least $MinFreeGB GB (packages, data and outputs)."
