@@ -467,6 +467,29 @@ def test_install_sh_dry_run_changes_nothing(tmp_path: Path) -> None:
     assert list(home.iterdir()) == []  # no shell start-up file touched
 
 
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_install_sh_makes_a_uv_found_through_a_relative_path_absolute(tmp_path: Path) -> None:
+    # The script changes folder before it first runs uv, so a uv found
+    # through a relative PATH entry (PATH=bin:...) must be made absolute.
+    work = tmp_path / "work"
+    fake_uv = work / "relbin" / "uv"
+    fake_uv.parent.mkdir(parents=True)
+    fake_uv.write_bytes(b"#!/bin/sh\necho 'uv 0.10.6 (fake)'\n")
+    fake_uv.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _clean_env(tmp_path, HOME=_sh_path(home))
+    env["PATH"] = "relbin" + os.pathsep + env.get("PATH", "")
+    result = subprocess.run(
+        [SH, _sh_path(INSTALL_SH), "--dry-run", "--from-local", _sh_path(REPO_ROOT),
+         "--dir", _sh_path(tmp_path / "base"), "--bin-dir", _sh_path(tmp_path / "bin")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, env=env, cwd=work, stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"({_sh_path(fake_uv)}, version 0.10.6)" in result.stdout, result.stdout
+
+
 @pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")
 def test_install_sh_refuses_bad_input_before_changing_anything(tmp_path: Path) -> None:
     home = tmp_path / "home"

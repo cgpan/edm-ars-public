@@ -388,6 +388,9 @@ main() {
             uv_seen=$("$uv_candidate" --version 2>/dev/null | awk '{print $2}') || continue
             [ -n "$uv_seen" ] || continue
             if version_ge "$uv_seen" "$UV_MIN_VERSION"; then
+                # A relative PATH entry gives a relative path, which would
+                # stop working once the script changes folder below.
+                case "$uv_candidate" in /*) ;; *) uv_candidate="$(pwd)/$uv_candidate" ;; esac
                 UV=$uv_candidate
                 UV_FOUND_VERSION=$uv_seen
                 break
