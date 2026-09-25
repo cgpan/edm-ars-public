@@ -1651,6 +1651,18 @@ def describe_now(state: RunState, now: datetime | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Final states of a study that ran to its end, whether or not the paper
+#: was released.
+RAN_TO_END_STATES: tuple[str, ...] = ("COMPLETED", "INCOMPLETE")
+
+
+def stopped_early(state: RunState) -> bool:
+    """True for a study that ended before its last step: stopped by the
+    user, crashed, or stopped by an error."""
+    return state.finished and state.final_state is not None \
+        and state.final_state not in RAN_TO_END_STATES
+
+
 def progress(state: RunState, now: datetime | None = None) -> tuple[float, datetime | None, datetime | None]:
     """(fraction done, earliest finish, latest finish) from stage weights.
 
@@ -1661,6 +1673,7 @@ def progress(state: RunState, now: datetime | None = None) -> tuple[float, datet
     ref = now or datetime.now(timezone.utc)
     total = 0.0
     done = 0.0
+    completed = 0.0  # steps that finished, not ones that failed
     remaining = 0.0
     for st in state.stages:
         if st.key == "REVISING" and st.status in ("pending", "skipped"):
@@ -1673,6 +1686,8 @@ def progress(state: RunState, now: datetime | None = None) -> tuple[float, datet
         total += weight
         if st.status in ("done", "failed"):
             done += weight
+            if st.status == "done":
+                completed += weight
         elif st.status == "running":
             spent = (st.duration_s(ref) or 0.0) / 60.0
             left = max(weight - spent, 0.2 * weight)
@@ -1683,6 +1698,8 @@ def progress(state: RunState, now: datetime | None = None) -> tuple[float, datet
     if total <= 0:
         return 0.0, None, None
     fraction = min(done / total, 1.0)
+    if stopped_early(state):
+        return min(completed / total, 1.0), None, None
     if state.finished:
         return 1.0, None, None
     low = ref + timedelta(minutes=remaining * 0.7)
@@ -1691,9 +1708,18 @@ def progress(state: RunState, now: datetime | None = None) -> tuple[float, datet
 
 
 def step_position(state: RunState) -> tuple[int, int]:
-    """(current step number, number of visible steps)."""
+    """(current step number, number of visible steps).
+
+    For a study that stopped early, the step it stopped at.
+    """
     visible = state.visible_stages()
     total = len(visible)
+    if stopped_early(state):
+        for i, st in enumerate(visible, start=1):
+            if st.status == "failed":
+                return i, total
+        done = sum(1 for st in visible if st.status in ("done", "skipped"))
+        return min(done + 1, total), total
     for i, st in enumerate(visible, start=1):
         if st.status == "running":
             return i, total
@@ -1730,6 +1756,7 @@ __all__ = [
     "read_events",
     "stage_title",
     "step_position",
+    "stopped_early",
     "tail_events_from_log",
     "usage_events",
 ]
