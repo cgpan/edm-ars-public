@@ -180,3 +180,31 @@ def test_ownership_check_refuses_outside_paths(edmars_home: Path, tmp_path: Path
     assert not maintenance._is_owned(edmars_home)  # the root itself is never deleted
     assert maintenance._is_owned(edmars_home / "settings.yaml")
     assert maintenance._is_owned(paths.cache_dir(), allow_root=True)
+
+
+def test_uninstall_lists_what_the_installer_recorded(edmars_home: Path, tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch,
+                                                     capsys: pytest.CaptureFixture[str]) -> None:
+    base = tmp_path / "install"
+    app = base / "app" / "0.1.0"
+    app.mkdir(parents=True)
+    for name in ("venv-0.1.0", "python", "uv"):
+        (base / name).mkdir()
+    (base / "data").mkdir()  # settings/datasets can share this folder on Windows
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "edmars.cmd"
+    launcher.write_text("@echo off\n", encoding="utf-8")
+    (base / "install.json").write_text(json.dumps({
+        "schema": 1, "install_dir": str(base), "app_root": str(app), "uv": str(base / "uv" / "uv.exe"),
+        "uv_private": True, "bin_dir": str(bin_dir), "launcher": str(launcher),
+        "path_modified": True, "path_files": [str(tmp_path / ".profile")],
+    }), encoding="utf-8")
+    monkeypatch.setattr(paths, "app_root", lambda: app)
+    assert maintenance.uninstall(assume_yes=True) == 0
+    out = capsys.readouterr().out
+    for item in (base / "app", base / "venv-0.1.0", base / "python", base / "uv", launcher):
+        assert f"  - {item}" in out, item
+    assert str(tmp_path / ".profile") in out  # the PATH lines the installer added
+    # The folder as a whole is never named: datasets may live in it.
+    assert f"  - {base}\n" not in out

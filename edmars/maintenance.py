@@ -331,21 +331,68 @@ def uninstall(
     return 1 if problems else 0
 
 
+def _install_record(root: Path) -> tuple[Path, dict[str, Any]] | None:
+    """The installer's ``install.json`` for the copy running from ``root``.
+
+    The installer puts the app in ``<install dir>/app/<version>`` and
+    records there everything it created (the venv, a private Python and uv,
+    the launcher, the PATH change).
+    """
+    if root.parent.name != "app":
+        return None
+    base = root.parent.parent
+    try:
+        record = json.loads((base / "install.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = None
+    return base, record if isinstance(record, dict) else {}
+
+
 def _explain_program_removal() -> None:
-    """Say how to delete the program itself (it cannot delete itself while running)."""
+    """Say how to delete the program itself (it cannot delete itself while running).
+
+    Only what the installer created is listed. The install folder is not
+    named as a whole: on Windows it is also where settings, datasets and
+    LSAR live (%LOCALAPPDATA%\\edm-ars), and those are handled above.
+    """
     from edmars import paths, ui
 
     root = paths.app_root()
-    if root.parent.name == "app":
-        base = root.parent.parent
-        launcher = Path.home() / ".local" / "bin" / ("edmars.cmd" if os.name == "nt" else "edmars")
-        ui.info("To remove the program itself, close this window and delete:")
-        ui.say(f"  - {base / 'app'}")
-        for venv in sorted(base.glob("venv-*")):
-            ui.say(f"  - {venv}")
-        ui.say(f"  - {launcher}")
-    else:
+    found = _install_record(root)
+    if found is None:
         ui.info(
             f"This copy of EDM-ARS runs from {root}; delete that folder yourself "
             "if you no longer need it."
         )
+        return
+    base, record = found
+    items: list[Path] = [base / "app"]
+    items += sorted(base.glob("venv-*"))
+    items += [base / name for name in ("python", "uv", "install.json", "versions.txt")]
+    if record.get("uv_private") and record.get("uv"):
+        items.append(Path(str(record["uv"])))
+    launcher = record.get("launcher")
+    items.append(Path(str(launcher)) if launcher else
+                 Path.home() / ".local" / "bin" / ("edmars.cmd" if os.name == "nt" else "edmars"))
+    seen: set[str] = set()
+    shown: list[Path] = []
+    for item in items:
+        key = str(item).casefold()
+        if key in seen or not item.exists():
+            continue
+        # A private uv inside <base>/uv is already covered by that folder.
+        if any(paths.is_within(item, parent) and item != parent for parent in shown):
+            continue
+        seen.add(key)
+        shown.append(item)
+    ui.info("To remove the program itself, close this window and delete:")
+    for item in shown:
+        ui.say(f"  - {item}")
+    if record.get("path_modified"):
+        bin_dir = record.get("bin_dir") or (Path(str(launcher)).parent if launcher else None)
+        files = [str(f) for f in (record.get("path_files") or []) if f]
+        if files:
+            ui.say(f"  - and the lines between '# >>> edm-ars >>>' and '# <<< edm-ars <<<' in: {', '.join(files)}")
+        elif os.name == "nt" and bin_dir:
+            ui.say(f"  - and remove {bin_dir} from your user PATH (Settings > System > About > "
+                   "Advanced system settings > Environment Variables)")
