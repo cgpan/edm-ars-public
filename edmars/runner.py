@@ -30,7 +30,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable, Literal
 
 import yaml
 
@@ -628,7 +628,7 @@ def pipeline_check(settings: dict[str, Any], plan: "StudyPlan", *,
         if not isinstance(item, dict):
             continue
         code = str(item.get("code") or "")
-        severity = "fail" if str(item.get("severity")) == "fail" else "warn"
+        severity: Literal["fail", "warn"] = "fail" if str(item.get("severity")) == "fail" else "warn"
         fix = _FINDING_FIXES.get(code)
         fix = fix.format(dataset=_plan_dataset(plan)) if fix else str(item.get("fix") or "")
         checks.append(Check(

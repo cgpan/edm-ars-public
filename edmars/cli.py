@@ -924,7 +924,7 @@ def _progress_printer() -> Callable[..., None]:
     download, extract and verify; a line per phase keeps a 2 GB unzip
     from looking like a hang after "downloaded 100%".
     """
-    state = {"phase": "", "last": -1}
+    state: dict[str, Any] = {"phase": "", "last": -1}
 
     def report(done: Any = 0, total: Any = None, phase: str = "download", *_rest: Any) -> None:
         try:
