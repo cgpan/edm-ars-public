@@ -21,6 +21,9 @@ python-dotenv>=1.0.0
 Jinja2>=3.1.4
 tenacity>=8.2.0
 PyMuPDF>=1.24.0
-pymupdf4llm>=0.0.10,<1.0.0
+# Pinned exactly, as LSAR pins it: the converter every calibration anchor
+# was reviewed with. A different pymupdf4llm changes the text the review
+# and score are built from. (It also pins PyMuPDF to 1.27.2.2.)
+pymupdf4llm==1.27.2.2
 arxiv>=2.1.0
 fpdf2>=2.8.0

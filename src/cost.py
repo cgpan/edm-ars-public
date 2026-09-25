@@ -111,7 +111,8 @@ def load_pricing(config: dict) -> dict:
           currency: USD
           per_million_tokens:
             deepseek-v4-pro:   {input: 0.28, cached_input: 0.028, output: 0.42}
-            deepseek-v4-flash: {input: 0.07, cached_input: 0.007, output: 0.28}
+            deepseek-flash:    {input: 0.07, cached_input: 0.007, output: 0.28,
+                                verified: false}
 
     Returns an empty dict when unconfigured, which makes every cost
     ``None`` — deliberately. A missing rate must surface as "not priced",
