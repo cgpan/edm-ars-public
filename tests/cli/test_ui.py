@@ -249,6 +249,18 @@ def test_select_rejects_a_default_that_is_not_a_choice() -> None:
         ui.select("Pick", [])
 
 
+def test_plain_prompts_do_not_double_the_colon_or_the_default_mark(typed, capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
+    # `edmars new` printed "Your question:: " and "... conference (default)  (default)".
+    typed("How do grades relate to belonging?")
+    assert ui.text("Your question:") == "How do grades relate to belonging?"
+    typed("")
+    picked = ui.select("Which venue?", [("EDM", "EDM conference (default)"), ("JLA", "JLA")], default="EDM")
+    assert picked == "EDM"
+    out = capsys.readouterr().out
+    assert "Your question: " in out and "::" not in out
+    assert "(default)  (default)" not in out and "EDM conference (default)" in out
+
+
 def test_plain_text_validates_and_uses_default(typed, capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
     typed("bad", "  good  ")
     answer = ui.text("Word", validate=lambda v: v == "good" or "Please type good.")

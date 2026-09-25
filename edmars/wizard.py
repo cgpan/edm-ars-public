@@ -2391,8 +2391,11 @@ def run_setup(section: str | None = None, *, non_interactive: bool = False,
     except _Abort as exc:
         return exc.code
     except interrupts as exc:  # type: ignore[misc]
-        ui.fail(_nb(f"Setup needs an answer, but it is running without a terminal ({exc})."))
-        ui.info("Run `edmars setup` in a terminal, or pass --yes with the options for every step.")
+        # The error already says which question and why it could not be
+        # asked (no terminal, --yes, or the end of the input).
+        ui.fail(_nb(str(exc)))
+        ui.info("Run `edmars setup` in a terminal window, or pass --yes with the options for every step "
+                "(see `edmars setup --help`).")
         return 1
     if wizard is not None and wizard.start_study:
         return _launch_first_study()

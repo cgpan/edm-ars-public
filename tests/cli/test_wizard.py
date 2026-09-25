@@ -169,9 +169,14 @@ def test_dataset_terms_need_an_explicit_agreement(fx: Fakes) -> None:
 
 
 def test_non_tty_prompt_failure_is_a_clear_message(fx: Fakes) -> None:
-    fx.ui.script = [NonInteractiveError("stdin is not a terminal")]
+    fx.ui.script = [NonInteractiveError("EDM-ARS needs an answer to \"Ready\" but cannot ask (it reached the end "
+                                        "of the input, so no one is there to answer).")]
     assert run() == 1
-    assert "without a terminal" in fx.ui.output
+    # Shown once, as written: it used to be wrapped in "Setup needs an answer,
+    # but it is running without a terminal (...)", which is false at end of input.
+    assert "[x] EDM-ARS needs an answer to \"Ready\" but cannot ask" in fx.ui.output
+    assert "without a terminal" not in fx.ui.output
+    assert "Run `edmars setup` in a terminal window" in fx.ui.output
 
 
 # ---------------------------------------------------------------------------

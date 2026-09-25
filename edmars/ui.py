@@ -541,7 +541,7 @@ def select(
         line = f"  {number}) {label}"
         if value in unavailable:
             line += f"  (not available: {unavailable[value]})"
-        elif value == default:
+        elif value == default and "(default)" not in label:
             line += "  (default)"
         say(line)
     default_number = values.index(default) + 1 if default is not None else None
@@ -566,6 +566,12 @@ def select(
             say(f"That option is not available: {unavailable[pick]}")
             continue
         return pick
+
+
+def _prompt_base(message: str) -> str:
+    """``message`` ready for ": " to be added (no "Your question:: ")."""
+    base = message.rstrip()
+    return base[:-1].rstrip() if base.endswith(":") else base
 
 
 def text(message: str, default: str | None = None, validate: Validator | None = None) -> str:
@@ -596,7 +602,7 @@ def text(message: str, default: str | None = None, validate: Validator | None = 
 
     suffix = f" [{default}]" if default else ""
     while True:
-        raw = _read_line(f"{message}{suffix}: ")
+        raw = _read_line(f"{_prompt_base(message)}{suffix}: ")
         if raw is None:
             raise _end_of_input(message)
         value = raw.strip()
@@ -660,7 +666,7 @@ def secret(message: str) -> str:
             "the screen after you press Enter. (PowerShell or Windows Terminal "
             "hide it as you type.)"
         )
-        prompt = f"{_without_hidden_claim(message)}: "
+        prompt = f"{_prompt_base(_without_hidden_claim(message))}: "
         raw = _read_line(prompt)
         if raw is None:
             raise _end_of_input(message)
@@ -671,9 +677,9 @@ def secret(message: str) -> str:
         return raw.strip()
 
     if _isatty(sys.stdin):
-        return getpass.getpass(f"{message}: ").strip()
+        return getpass.getpass(f"{_prompt_base(message)}: ").strip()
 
-    raw = _read_line(f"{message}: ")
+    raw = _read_line(f"{_prompt_base(message)}: ")
     if raw is None:
         raise _end_of_input(message)
     return raw.strip()
