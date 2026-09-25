@@ -1,5 +1,5 @@
 """Model tiering (2026-07-11): reasoning-light agents on
-deepseek-v4-flash, reasoning-heavy agents on deepseek-v4-pro.
+deepseek-flash, reasoning-heavy agents on deepseek-v4-pro.
 
 Pins (a) the shipped config.yaml tier assignment, and (b) the
 ReviewGate revision-writer deepseek branch (previously the gate only
@@ -98,6 +98,9 @@ class TestReviewGateProviderRouting:
 
         cfg = self._base_cfg()
         cfg["deepseek"].pop("models")
+        # An arbitrary model id: the test checks the fallback wiring,
+        # not the name. (It happens to be the retired flash id; nothing
+        # in the shipped configs routes to it.)
         cfg["review_gate"]["revision_model"] = "deepseek-v4-flash"
         gate = ReviewGate(cfg, str(tmp_path), log_fn=None)
         assert gate._llm_model == "deepseek-v4-flash"
