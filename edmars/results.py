@@ -221,11 +221,11 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
         elif outcome.code in ("LSAR_MISSING", "LSAR_FAILED"):
             actions.append(("Automated peer review", f"edmars review {run}"))
         actions.append(("Start a new study", "edmars new"))
-        width = max(len(a) for a, _ in actions) + 3
-        for label, cmd in actions:
-            add(f"  {(label + ':').ljust(width)}{cmd}")
         if outcome.code in ("LSAR_MISSING",):
-            add(f"  {'First set up LSAR:'.ljust(width)}edmars setup lsar")
+            actions.insert(-1, ("First set up LSAR", "edmars setup lsar"))
+        for label, cmd in actions:
+            add(f"  {label}:")
+            add(f"    {cmd}", "bold")
     elif outcome.kind == "running":
         add(f"{g} {outcome.label}", style)
         add(outcome.headline)
@@ -283,6 +283,9 @@ def result_text(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bool
             text = to_ascii(text)
         if not text:
             lines.append("")
+            continue
+        if text.lstrip().startswith("edmars "):
+            lines.append(text)  # a command to copy: never wrapped
             continue
         indent = " " * (len(text) - len(text.lstrip(" ")) + 2)
         lines.extend(textwrap.wrap(text, width=max(width, 40), subsequent_indent=indent,

@@ -300,8 +300,9 @@ def fmt_duration(seconds: float | None) -> str:
 # fold: events -> RunState (pure)
 # ---------------------------------------------------------------------------
 
-#: Event types whose ``plain`` text is too frequent to be "recent news".
-_QUIET_TYPES = frozenset({"llm.start", "llm.end", "heartbeat", "agent.note"})
+#: Event types whose ``plain`` text is not "recent news": too frequent,
+#: or (stage boundaries) already shown as the step rows themselves.
+_QUIET_TYPES = frozenset({"llm.start", "llm.end", "heartbeat", "agent.note", "stage.start", "stage.end"})
 
 
 def _add_recent(state: RunState, line: str | None) -> None:

@@ -79,6 +79,7 @@ def test_running_screen_content() -> None:
     assert "Safe to close this window" in text
     assert "Ctrl+C: leave or stop" in text
     assert "trying again with the error message" in text
+    assert "  Framing the question" not in text.splitlines()  # stage starts are rows, not news
 
 
 def test_rich_render_does_not_raise() -> None:

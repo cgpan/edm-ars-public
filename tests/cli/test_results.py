@@ -156,8 +156,10 @@ def test_result_text_wraps(run_home: Path, width: int) -> None:
     run = _ready(run_home)
     text = results.result_text(classify(run), load_state(run), run, plain=True, width=width)
     long_lines = [ln for ln in text.splitlines() if len(ln) > width and " " in ln.strip()
-                  and str(run) not in ln]
+                  and not ln.lstrip().startswith("edmars ")]
     assert not long_lines
+    # commands are whole lines, so they can be copied as they are
+    assert f"    edmars results {run} --open pdf" in text.splitlines()
 
 
 def test_causal_and_psychometric_result_sentences(run_home: Path) -> None:
