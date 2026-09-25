@@ -154,6 +154,29 @@ def blas_thread_env(base: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def child_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment LLM-generated code runs with.
+
+    ``blas_thread_env`` (credentials dropped, inner thread pools capped)
+    plus one thing the executor relies on:
+
+    * UTF-8 stdio. On a Windows host the child's stdout defaults to the
+      ANSI code page, so a generated script died with UnicodeEncodeError
+      at its first ``print`` of a check mark, an arrow or a Greek letter --
+      usually at the very end of a long run, costing a retry. The executor
+      decodes the pipes as UTF-8, so the child must write UTF-8; these are
+      forced, not defaulted, because a stray PYTHONIOENCODING=cp1252 in
+      the host env would bring the crash back.
+
+    Rscript, started by the bridge from inside the child, inherits all of
+    this -- including the missing credentials.
+    """
+    env = blas_thread_env(dict(base) if base is not None else None)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
 def check_silent_misbehaviour(code: str) -> list[str]:
     """Return a message for each pattern that misreports what it does.
 
@@ -232,9 +255,9 @@ class SubprocessExecutor:
 
         Returns
         -------
-        dict with keys: stdout, stderr, returncode. returncode is 127
-        (``INTERPRETER_NOT_STARTED``) when the interpreter could not be
-        started at all.
+        dict with keys: stdout, stderr, returncode. stdout and stderr are
+        always ``str``; returncode is 127 (``INTERPRETER_NOT_STARTED``)
+        when the interpreter could not be started at all.
         """
         # Write code to a temp file instead of passing via -c to avoid
         # Windows command-line length limit (WinError 206, ~32k char cap).
@@ -281,10 +304,16 @@ class SubprocessExecutor:
                 result = subprocess.run(
                     [exe, script_path],
                     capture_output=True,
+                    # UTF-8 with replacement, never the locale codec: a
+                    # byte the ANSI code page cannot decode killed the
+                    # reader thread and came back as stdout=None, which the
+                    # agents' retry prompts then sliced into a TypeError.
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout_s,
                     cwd=output_dir,
-                    env=blas_thread_env(),
+                    env=child_env(),
                 )
             except OSError as exc:
                 # Only the interpreter launch lands here: writing the
@@ -302,8 +331,8 @@ class SubprocessExecutor:
                     "returncode": INTERPRETER_NOT_STARTED,
                 }
             return {
-                "stdout": result.stdout,
-                "stderr": result.stderr,
+                "stdout": result.stdout or "",
+                "stderr": result.stderr or "",
                 "returncode": result.returncode,
             }
         except subprocess.TimeoutExpired:
@@ -417,9 +446,10 @@ class DockerSandbox:
         volumes: dict[str, dict[str, str]] = {
             os.path.abspath(output_dir): {"bind": "/workspace", "mode": "rw"},
         }
-        # blas_thread_env with an explicit base: the container gets only
-        # OUTPUT_DIR plus the thread caps, never a copy of the host env.
-        environment: dict[str, str] = blas_thread_env({"OUTPUT_DIR": "/workspace"})
+        # child_env with an explicit base: the container gets only
+        # OUTPUT_DIR plus the thread caps and UTF-8 stdio, never a copy of
+        # the host env.
+        environment: dict[str, str] = child_env({"OUTPUT_DIR": "/workspace"})
 
         if raw_data_path is not None:
             raw_data_abs = os.path.abspath(raw_data_path)
