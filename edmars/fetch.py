@@ -89,6 +89,14 @@ def _content_range_total(value: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _content_range_start(value: str | None) -> int | None:
+    """First byte from ``Content-Range: bytes a-b/total``."""
+    if not value:
+        return None
+    match = re.search(r"bytes\s+(\d+)-", value)
+    return int(match.group(1)) if match else None
+
+
 def _read_meta(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -144,7 +152,9 @@ def download_file(
         if attempt:
             _sleep(min(2.0 ** attempt, 15.0))
         have = part.stat().st_size if part.exists() else 0
-        headers = {"User-Agent": user_agent()}
+        # identity: byte ranges and Content-Length must count the bytes we
+        # write, which a transparently gzip-encoded response would not.
+        headers = {"User-Agent": user_agent(), "Accept-Encoding": "identity"}
         if have > 0:
             headers["Range"] = f"bytes={have}-"
             validator = meta.get("etag") or meta.get("last_modified")
@@ -163,6 +173,12 @@ def download_file(
                     last_error = "the server rejected the resume request"
                     continue
                 if status == 206 and have > 0:
+                    if _content_range_start(response.headers.get("Content-Range")) != have:
+                        # Not the continuation we asked for; start over.
+                        _unlink(part)
+                        meta = {}
+                        last_error = "the server resumed at the wrong position"
+                        continue
                     mode = "ab"
                     start = have
                     total = _content_range_total(response.headers.get("Content-Range"))
@@ -213,6 +229,9 @@ def download_file(
                     continue
                 break
         except DownloadError:
+            # Refused or oversized: nothing here is worth resuming.
+            _unlink(part)
+            _unlink(meta_path)
             raise
         except requests.exceptions.RequestException as exc:
             last_error = f"{type(exc).__name__}: {exc}"
