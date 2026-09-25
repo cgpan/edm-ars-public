@@ -595,6 +595,21 @@ class FakeLsar:
     def verify(self, home: Path) -> list[str]:
         return []
 
+    def benchmark_for(self, home: Path, venue: str | None) -> float | None:
+        """Like the real one: the venue's p25 in the reviewer's calibration file."""
+        try:
+            data = yaml.safe_load((Path(home) / "calibration" / "anchors_edm.yaml").read_text(encoding="utf-8"))
+        except OSError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        if (venue or "EDM") == "EDM":
+            value = data.get("overall_p25_full")
+        else:
+            entry = (data.get("venues") or {}).get(venue)
+            value = entry.get("p25") if isinstance(entry, dict) else None
+        return float(value) if value is not None else None
+
 
 class FakeRunner:
     def __init__(self) -> None:
@@ -699,7 +714,8 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fakes:
                                                              "tinytex_bin_dirs", "find_tex_tool",
                                                              "find_rscript", "r_checks", "install_r_packages",
                                                              "docker_info")),
-        "lsar": _module("lsar", fakes.lsar, ("LSAR_REPO", "LSAR_REF", "checks", "install", "verify")),
+        "lsar": _module("lsar", fakes.lsar, ("LSAR_REPO", "LSAR_REF", "checks", "install", "verify",
+                                                    "benchmark_for")),
         "runner": _module("runner", fakes.runner, ("latest_run",)),
         "cli": _module("cli", fakes.cli, ("app",)),
     }

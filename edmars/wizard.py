@@ -127,12 +127,15 @@ NONINTERACTIVE_OPTIONS: dict[str, tuple[str, str]] = {
     "budget_usd": ("EDMARS_BUDGET_USD", "spending warning per study in US$ (empty = none)"),
 }
 
-#: Venues offered in S10: id -> label.
+#: Venues offered in S10: id -> label. What the automated reviewer does
+#: for each venue is added at display time (:meth:`_Wizard._venue_choices`)
+#: from the installed reviewer's calibration file, never written here: the
+#: file, not this table, decides whether a paper is held to a benchmark.
 VENUES: dict[str, str] = {
-    "EDM": "EDM conference (recommended; reviewer scores are benchmarked against accepted EDM papers)",
-    "JEDM": "Journal of Educational Data Mining (reviewer gives a score only, no benchmark)",
-    "JLA": "Journal of Learning Analytics (reviewer gives a score only, no benchmark)",
-    "AERA_OPEN": "AERA Open (reviewer gives a score only, no benchmark)",
+    "EDM": "EDM conference (recommended)",
+    "JEDM": "Journal of Educational Data Mining",
+    "JLA": "Journal of Learning Analytics",
+    "AERA_OPEN": "AERA Open",
 }
 
 #: Presets for a model server on the user's own computer.
@@ -2015,7 +2018,7 @@ class _Wizard:
                                      default=fmt, back=False)
                 self.set("defaults.paper_format", picked)
             elif answer == "venue":
-                picked = self.choose("Default venue", list(VENUES.items()), default=venue, back=False)
+                picked = self.choose("Default venue", self._venue_choices(), default=venue, back=False)
                 self.set("defaults.venue", picked)
             elif answer == "awake":
                 self.set("defaults.keep_awake", self.yes("Keep the computer awake while a study runs?", default=awake))
@@ -2035,6 +2038,30 @@ class _Wizard:
                 if key:
                     self._store_key(TAVILY_ENV, key)
             self.save()
+
+    def _venue_choices(self) -> list[tuple[str, str]]:
+        """The venue menu, saying what the installed reviewer does for each.
+
+        With the reviewer on, a venue whose calibration carries a benchmark
+        is held to it by the review gate; any other venue gets a score
+        only. Without the reviewer the labels say nothing about reviews.
+        """
+        home = self.get("lsar.home", None) if self.get("lsar.enabled", False) else None
+        choices: list[tuple[str, str]] = []
+        for key, label in VENUES.items():
+            if home:
+                try:
+                    from edmars import lsar
+
+                    benchmark = lsar.benchmark_for(Path(str(home)), key)
+                except Exception:  # noqa: BLE001 - a label must not break the menu
+                    benchmark = None
+                if benchmark is not None:
+                    label += f" - the reviewer compares its score with a benchmark ({benchmark:g})"
+                else:
+                    label += " - the reviewer gives a score only, no benchmark"
+            choices.append((key, label))
+        return choices
 
     def _ask_budget(self) -> None:
         current = self.get("defaults.budget_usd", None)

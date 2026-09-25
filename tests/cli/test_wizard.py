@@ -433,6 +433,42 @@ def test_advanced_options(fx: Fakes) -> None:
     assert "does not stop the study" in fx.ui.output
 
 
+def _venue_labels(fx: Fakes) -> dict[str, str]:
+    menu = [choices for kind, message, choices in fx.ui.prompts if message == "Default venue"]
+    assert menu, "the Default venue menu was not shown"
+    return dict(menu[-1] or [])
+
+
+def test_venue_labels_come_from_the_installed_reviewers_calibration(fx: Fakes) -> None:
+    # JEDM and AERA Open carry a benchmark in the installed calibration, so
+    # the review gate holds papers to it; setup once said "no benchmark".
+    calibration = fx.lsar.home / "calibration"
+    calibration.mkdir(parents=True)
+    (calibration / "anchors_edm.yaml").write_text(
+        "overall_p25_full: 6.3\n"
+        "venues:\n"
+        "  JEDM: {p25: 5.15}\n"
+        "  AERA_OPEN: {p25: 6.6}\n"
+        "  JLA: {}\n",
+        encoding="utf-8")
+    fx.write_settings(lsar={"enabled": True, "auto_review": True, "home": str(fx.lsar.home)})
+    fx.ui.script = ["", "", "show", "venue", "AERA_OPEN", "done"]
+    assert run("advanced") == 0
+    labels = _venue_labels(fx)
+    assert "benchmark (6.6)" in labels["AERA_OPEN"] and "no benchmark" not in labels["AERA_OPEN"]
+    assert "benchmark (5.15)" in labels["JEDM"]
+    assert "benchmark (6.3)" in labels["EDM"]
+    assert "score only, no benchmark" in labels["JLA"]
+    assert fx.saved()["defaults"]["venue"] == "AERA_OPEN"
+
+
+def test_venue_labels_say_nothing_about_reviews_without_the_reviewer(fx: Fakes) -> None:
+    fx.ui.script = ["", "", "show", "venue", DEFAULT, "done"]
+    assert run("advanced") == 0
+    labels = _venue_labels(fx)
+    assert not any("benchmark" in label or "reviewer" in label for label in labels.values())
+
+
 # ---------------------------------------------------------------------------
 # Non-interactive mode
 # ---------------------------------------------------------------------------
