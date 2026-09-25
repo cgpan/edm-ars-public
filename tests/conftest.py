@@ -1,6 +1,7 @@
 """Pytest configuration: registers custom markers and handles integration test skipping."""
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -47,11 +48,13 @@ def _isolate_findings_memory(
     original_init = fm.FindingsMemory.__init__
     original_load = fm.FindingsMemory.load.__func__
 
-    def _init(self: "fm.FindingsMemory", path: str) -> None:
-        original_init(self, _redirect(path))
+    # Extra arguments pass through, so a later signature (for example a
+    # lock timeout) keeps working under the redirect.
+    def _init(self: "fm.FindingsMemory", path: str, *args: Any, **kwargs: Any) -> None:
+        original_init(self, _redirect(path), *args, **kwargs)
 
-    def _load(cls: type, path: str) -> "fm.FindingsMemory":
-        return original_load(cls, _redirect(path))
+    def _load(cls: type, path: str, *args: Any, **kwargs: Any) -> "fm.FindingsMemory":
+        return original_load(cls, _redirect(path), *args, **kwargs)
 
     monkeypatch.setattr(fm.FindingsMemory, "__init__", _init)
     monkeypatch.setattr(fm.FindingsMemory, "load", classmethod(_load))
