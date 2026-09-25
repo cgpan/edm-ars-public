@@ -16,6 +16,7 @@ PDF, this module:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -186,6 +187,61 @@ def _leading_title(text: str) -> Optional[str]:
         title, _ = _braced_arg(body, m.end() - 1)
         return title.strip()
     return None
+
+
+def _route_lsar_logging(log_file: Path) -> Optional[Path]:
+    """Keep LSAR's INFO chatter in ``log_file``, not on the run's console.
+
+    LSAR logs every stage at INFO from a couple of dozen loggers, several
+    hundred console lines per gate run that bury the pipeline's own
+    progress (G3). An LSAR that offers ``configure_logging`` (LSAR-public
+    fix/released-issues and later) gets a per-cycle ``lsar.log`` with the
+    full record, and its console handler is limited to warnings. An
+    operator who set LSAR_LOG_LEVEL or LSAR_QUIET keeps their choice for
+    the console. An older LSAR is left as it is. Returns the file that was
+    attached (for :func:`_detach_lsar_log_file`), or None. Never raises.
+    """
+    try:
+        from lsar.utils import logger as lsar_logger  # type: ignore[import-not-found]
+
+        configure = getattr(lsar_logger, "configure_logging", None)
+        if not callable(configure):
+            return None
+        root = configure(log_file=log_file)
+        operator_level = (
+            os.environ.get("LSAR_LOG_LEVEL", "").strip()
+            or os.environ.get("LSAR_QUIET", "").strip()
+        )
+        if not operator_level:
+            for handler in getattr(root, "handlers", []):
+                if (
+                    isinstance(handler, logging.StreamHandler)
+                    and not isinstance(handler, logging.FileHandler)
+                    and handler.level < logging.WARNING
+                ):
+                    handler.setLevel(logging.WARNING)
+        return log_file
+    except Exception:  # noqa: BLE001 - logging must never stop a review
+        return None
+
+
+def _detach_lsar_log_file(log_file: Optional[Path]) -> None:
+    """Remove the file handler :func:`_route_lsar_logging` attached, so a
+    later cycle's records do not also land in this cycle's lsar.log."""
+    if log_file is None:
+        return
+    target = os.path.abspath(str(log_file))
+    lsar_root_logger = logging.getLogger("lsar")
+    for handler in list(lsar_root_logger.handlers):
+        if (
+            isinstance(handler, logging.FileHandler)
+            and os.path.abspath(handler.baseFilename) == target
+        ):
+            lsar_root_logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class ReviewGate:
@@ -619,8 +675,11 @@ class ReviewGate:
             sys.path.insert(0, lsar_root)
             added_to_path = True
 
+        lsar_log_file: Optional[Path] = None
         try:
             from lsar.pipeline import LSARPipeline  # type: ignore[import-not-found]
+
+            lsar_log_file = _route_lsar_logging(cycle_dir / "lsar.log")
 
             config_path: Optional[Path] = None
             if self.lsar_config_path and self.lsar_config_path.exists():
@@ -652,13 +711,28 @@ class ReviewGate:
         except Exception as exc:
             self._log(f"LSAR pipeline failed (cycle {cycle}): {exc}")
             detail = " ".join(str(exc).split())[:200]
-            self._last_lsar_failure = (
-                f"lsar_import_failed: {detail}"
-                if isinstance(exc, ImportError)
-                else f"exception: {type(exc).__name__}: {detail}"
-            )
+            if isinstance(exc, ImportError):
+                self._last_lsar_failure = f"lsar_import_failed: {detail}"
+                # G2: usually one of LSAR's own dependencies is missing
+                # from this Python; say how to install them.
+                self._log(
+                    "LSAR could not be imported; install its requirements "
+                    "into the Python that runs EDM-ARS: "
+                    f"{Path(sys.executable).name} -m pip install -r "
+                    f"\"{Path(lsar_root) / 'requirements.txt'}\""
+                )
+            elif type(exc).__name__ == "ScoringFailedError":
+                # LSAR (fix/released-issues) raises this instead of
+                # returning default 5/10 scores when scoring fails or its
+                # J1 guard refuses a truncated review: no score exists.
+                self._last_lsar_failure = f"lsar_scoring_failed: {detail}"
+            else:
+                self._last_lsar_failure = (
+                    f"exception: {type(exc).__name__}: {detail}"
+                )
             return None
         finally:
+            _detach_lsar_log_file(lsar_log_file)
             if added_to_path and lsar_root in sys.path:
                 sys.path.remove(lsar_root)
 
@@ -1906,6 +1980,13 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             "advisory_mode": getattr(self, "advisory_mode", None),
             "venue": self.venue,
             "dimension_floor": self.dimension_floor,
+            # Why the paper was not revised between cycles, when it was
+            # not: a reviser that could not be configured, or calls that
+            # failed (with their ProviderError codes).
+            "revision_unavailable_reason": getattr(
+                self, "revision_unavailable_reason", None
+            ),
+            "revision_failures": list(getattr(self, "revision_failures", []) or []),
         }
 
         # Persist summary

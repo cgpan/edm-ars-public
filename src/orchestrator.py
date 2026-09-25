@@ -437,6 +437,37 @@ def _literature_warning(ctx: Any) -> Optional[str]:
     return None
 
 
+def _revision_problem(summary: Any) -> Optional[str]:
+    """A sentence when a gate that did not pass could not revise the paper.
+
+    Only a gate that ran and did not pass revises between cycles, so a
+    reviser that was unavailable (no model for the provider, malformed
+    settings) or whose calls failed matters only then.
+    """
+    if not isinstance(summary, dict) or not summary.get("ran") or summary.get("passed"):
+        return None
+    try:
+        if int(summary.get("max_cycles") or 0) < 2:
+            return None  # one cycle: there is never a revision to make
+    except (TypeError, ValueError):
+        return None
+    why = summary.get("revision_unavailable_reason")
+    raw = summary.get("revision_failures")
+    failures = [f for f in raw if isinstance(f, dict)] if isinstance(raw, list) else []
+    if why:
+        return (
+            "The review gate could not revise the paper between cycles: "
+            f"{_one_line(why, 300)}"
+        )
+    if failures:
+        codes = sorted({str(f.get("code") or "UNKNOWN") for f in failures})
+        return (
+            f"The review gate's revision failed {len(failures)} time(s) "
+            f"({', '.join(codes)}); later cycles reviewed an unrevised paper."
+        )
+    return None
+
+
 def _atomic_write_text(path: str, text: str) -> None:
     """Replace ``path`` with ``text`` so a reader never sees half a file.
 
@@ -2165,6 +2196,14 @@ class Orchestrator:
                     f"score={score_str}, "
                     f"rec={summary.get('final_recommendation')}",
                 )
+                note = _revision_problem(summary)
+                if note:
+                    # E2: a reviser that could not be configured or whose
+                    # calls all failed used to leave only a gate log line;
+                    # the paper was re-reviewed unrevised with no trace in
+                    # the run's errors.
+                    self._log("Orchestrator", f"WARNING: {note}")
+                    self.ctx.errors.append(note)
             else:
                 # Not a failed review: nobody reviewed the paper. The old
                 # line here printed "passed=False, score=0.00".
