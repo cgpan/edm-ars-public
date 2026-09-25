@@ -1023,6 +1023,20 @@ def _dry_run_context(plan: _Plan, prompt: str | None) -> str:
     return (question or prompt or "") + venue
 
 
+def _routing_rows(plan: _Plan) -> list[dict]:
+    """Provider, model and key status per LLM stage, without a client."""
+    try:
+        from src.agents.llm_client import describe_routing
+        from src.preflight import llm_stages
+
+        stages = list(llm_stages(plan.config))
+        if (plan.config.get("review_gate") or {}).get("enabled"):
+            stages.append("revision_writer")
+        return describe_routing(plan.config, tuple(stages))
+    except Exception:  # noqa: BLE001 - the pre-flight reports config errors
+        return []
+
+
 def _dry_run(plan: _Plan, args: argparse.Namespace) -> int:
     """Report what a real run would do, without constructing it.
 
@@ -1050,6 +1064,19 @@ def _dry_run(plan: _Plan, args: argparse.Namespace) -> int:
     print("DRY RUN - pre-flight summary (nothing is created, changed or sent):", file=out)
     print(f"  config:               {plan.config_path}", file=out)
     print(f"  llm_provider:         {plan.config.get('llm_provider')}", file=out)
+    routing = _routing_rows(plan)
+    for row in routing:
+        # E1: say which model each stage will call, and whether its key
+        # is set, instead of leaving a silent default to be discovered on
+        # the bill. Names the key variable only; never its value.
+        where = (
+            f"{row.get('provider')}/{row.get('model')}"
+            if row.get("model") else f"{row.get('provider') or '?'}/(no model)"
+        )
+        key = row.get("key_env")
+        key_note = f", {key} {'set' if row.get('key_set') else 'missing'}" if key else ""
+        error = f"  <- {row['error']}" if row.get("error") else ""
+        print(f"  model @ {row['stage'] + ':':<20}{where}{key_note}{error}", file=out)
     print(f"  task_type:            {plan.task_type}", file=out)
     print(f"  task_template:        {type(create_task_template(plan.task_type)).__name__}", file=out)
     print(f"  dataset:              {plan.dataset}", file=out)
@@ -1117,6 +1144,7 @@ def _dry_run(plan: _Plan, args: argparse.Namespace) -> int:
             "dataset": plan.dataset,
             "output_dir": plan.output_dir,
             "raw_data_path": plan.raw_data_path,
+            "routing": routing,
             "checks": [f._asdict() for f in findings],
         })
     return code

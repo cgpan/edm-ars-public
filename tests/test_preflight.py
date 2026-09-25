@@ -8,6 +8,12 @@ from pathlib import Path
 import pytest
 
 import src.preflight as preflight
+
+# Imported here, before any fixture runs: the bridge binds shutil.which at
+# import time, and the all_tools fixture below replaces shutil.which for
+# the whole process. Imported first inside such a test, the bridge kept
+# the fake for the rest of the session and "found" R at /bin/Rscript.
+import src.r_bridge  # noqa: F401,E402
 from src.config import load_config
 from src.preflight import (
     FAIL,
@@ -110,7 +116,8 @@ def test_missing_raw_data_names_the_exact_file(
     assert data.severity == FAIL
     assert str(expected) in data.message
     assert "hsls_17_student_pets_sr_v1_0.csv" in data.fix
-    assert "nces.ed.gov/surveys/hsls09" in data.fix
+    # The direct download the README gives, not the survey landing page.
+    assert "nces.ed.gov/EDAT/Data/Zip/HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip" in data.fix
     # A file saved under the provider's own name is pointed out.
     assert "HSLS_2017_PETS_SR.csv" in data.fix
 
@@ -283,8 +290,9 @@ def test_r_is_not_probed_for_other_task_types(
 
 
 def test_r_probe_against_a_real_r_when_present(
-    config: dict, data_file: str, all_tools: None
+    config: dict, data_file: str
 ) -> None:
+    # No all_tools fixture: this test is about the real R on this machine.
     import src.r_bridge as rb
 
     if not hasattr(rb, "missing_r_packages"):
@@ -297,7 +305,7 @@ def test_r_probe_against_a_real_r_when_present(
         config, "psychometrics", "hsls09_public", data_file, False,
     )
     codes = {f.code for f in findings}
-    assert "R_PROBE_FAILED" not in codes and "R_MISSING" not in codes
+    assert "R_PROBE_FAILED" not in codes and "R_MISSING" not in codes, findings
 
 
 # ---------------------------------------------------------------------------

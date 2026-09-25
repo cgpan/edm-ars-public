@@ -78,7 +78,9 @@ _ALL_R_PACKAGES = ("jsonlite", "lavaan", "mirt", "CDM", "MASS")
 _DATA_SOURCES: dict[str, str] = {
     "hsls09_public": (
         "Download the HSLS:09 public-use student file (CSV, labelled "
-        "values) from https://nces.ed.gov/surveys/hsls09/"
+        "values; about 297 MB) from https://nces.ed.gov/EDAT/Data/Zip/"
+        "HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip, take "
+        "hsls_17_student_pets_sr_v1_0.csv out of the zip"
     ),
     "els_2002": (
         "Download the ELS:2002 public-use BY-F3 student file as CSV from "
@@ -152,6 +154,7 @@ def _set_key_fix(env_var: str) -> str:
 
 
 def _check_provider_keys(config: dict) -> list[Finding]:
+    from src.agents.llm_client import describe_routing
     from src.agents.provider_resolver import (
         ProviderConfigError,
         resolve_provider_for_stage,
@@ -159,16 +162,26 @@ def _check_provider_keys(config: dict) -> list[Finding]:
 
     findings: list[Finding] = []
     needed: dict[str, list[str]] = {}
-    for stage in llm_stages(config):
-        try:
-            provider = resolve_provider_for_stage(stage, config).name
-        except ProviderConfigError as exc:
+    # describe_routing resolves each stage's provider AND model the way
+    # the agents will at start-up, so a configuration the agents would
+    # refuse (e.g. llm_provider: openai with no openai.models.<stage>,
+    # which has no abort code and would otherwise surface as a crash
+    # after the pre-flight passed) is reported here, before any spend.
+    for row in describe_routing(config, tuple(llm_stages(config))):
+        stage = row["stage"]
+        if row.get("error"):
             findings.append(Finding(
                 "PROVIDER_CONFIG_INVALID", FAIL,
-                f"The AI provider setting for {stage} is not valid: {exc}",
-                "Fix llm_provider / per_stage_providers in the config file.",
+                f"The AI provider setting for {stage} is not valid: {row['error']}",
+                "Fix llm_provider / per_stage_providers / <provider>.models "
+                "in the config file.",
             ))
-            continue
+        provider = row.get("provider")
+        if provider is None:
+            try:
+                provider = resolve_provider_for_stage(stage, config).name
+            except ProviderConfigError:
+                continue
         needed.setdefault(provider, []).append(stage)
 
     for provider, stages in needed.items():
@@ -340,7 +353,13 @@ def _check_r(
             "Set sandbox.enabled: false for psychometrics runs.",
         ))
 
-    explicit = (config.get("r_bridge") or {}).get("rscript_path") or None
+    # Probe the R the run will use: the executor exports config
+    # r_bridge.rscript_path as EDM_ARS_RSCRIPT only when the operator has
+    # not set that variable, so an operator's EDM_ARS_RSCRIPT wins.
+    explicit = (
+        None if os.environ.get("EDM_ARS_RSCRIPT", "").strip()
+        else (config.get("r_bridge") or {}).get("rscript_path") or None
+    )
     try:
         rscript = r_bridge.find_rscript(explicit)
     except r_bridge.RBridgeError as exc:
