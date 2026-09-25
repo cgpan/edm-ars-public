@@ -20,7 +20,7 @@ from tests.cli import _study_stubs
 _study_stubs.install()
 
 from edmars import study  # noqa: E402
-from edmars.model import StudyPlan  # noqa: E402
+from edmars.model import Check, StudyPlan  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_FILES = {
@@ -85,6 +85,92 @@ def stage0(spec: dict, dataset: str, tmp_path: Path) -> Any:
         cache_dir=tmp_path / "cache",
         run_probes=False,
     )
+
+
+DEFAULT = object()
+
+
+class FakeUI:
+    """Scripted stand-in for edmars.ui. Each prompt pops the next answer."""
+
+    def __init__(self, answers: list[Any]) -> None:
+        self.answers = list(answers)
+        self.log: list[tuple[str, ...]] = []
+        self.console = None
+
+    def is_plain(self) -> bool:
+        return True
+
+    def _next(self, kind: str, message: str) -> Any:
+        if not self.answers:
+            raise AssertionError(f"unexpected {kind} prompt: {message!r}")
+        return self.answers.pop(0)
+
+    def select(
+        self, message: str, choices: list[tuple[str, str]], default: str | None = None
+    ) -> str:
+        answer = self._next("select", message)
+        if answer is DEFAULT:
+            answer = default
+        values = [value for value, _ in choices]
+        assert answer in values, f"{answer!r} not offered for {message!r}: {values}"
+        self.log.append(("select", message, str(answer)))
+        return str(answer)
+
+    def text(self, message: str, default: str | None = None, validate: Any = None) -> str:
+        answer = self._next("text", message)
+        if answer is DEFAULT:
+            answer = default or ""
+        self.log.append(("text", message, str(answer)))
+        return str(answer)
+
+    def confirm(self, message: str, default: bool = True) -> bool:
+        answer = self._next("confirm", message)
+        if answer is DEFAULT:
+            answer = default
+        self.log.append(("confirm", message, str(answer)))
+        return bool(answer)
+
+    def secret(self, message: str) -> str:  # pragma: no cover - never asked here
+        raise AssertionError("the study flow never asks for a secret")
+
+    def ok(self, msg: str) -> None:
+        self.log.append(("ok", msg))
+
+    def info(self, msg: str) -> None:
+        self.log.append(("info", msg))
+
+    def warn(self, msg: str) -> None:
+        self.log.append(("warn", msg))
+
+    def fail(self, msg: str) -> None:
+        self.log.append(("fail", msg))
+
+    def panel(self, title: str, body: str) -> None:
+        self.log.append(("panel", title, body))
+
+    def said(self, kind: str) -> str:
+        return "\n".join(" ".join(entry[1:]) for entry in self.log if entry[0] == kind)
+
+
+def run_flow(monkeypatch: pytest.MonkeyPatch, answers: list[Any],
+             settings: dict | None = None) -> tuple[StudyPlan | None, FakeUI]:
+    ui = FakeUI(answers)
+    monkeypatch.setattr(study, "_ui", lambda: ui)
+    plan = study.new_study_interactive(settings or {})
+    assert not ui.answers, f"unused scripted answers: {ui.answers}"
+    return plan, ui
+
+
+def ok_preflight(monkeypatch: pytest.MonkeyPatch) -> list[StudyPlan]:
+    seen: list[StudyPlan] = []
+
+    def fake(plan: StudyPlan, settings: Any, **_: Any) -> list[Check]:
+        seen.append(plan)
+        return [Check("stub", "ok", "stubbed preflight")]
+
+    monkeypatch.setattr(study, "preflight", fake)
+    return seen
 
 
 # --------------------------------------------------------------------------
@@ -479,6 +565,13 @@ def test_cohort_comparison_only_with_the_panel(raw_dir: Path) -> None:
     assert kinds["causal_did"].disabled is None
 
 
+def test_parse_selection() -> None:
+    assert study.parse_selection("1,3 5-7", 8) == [1, 3, 5, 6, 7]
+    assert study.parse_selection("2,2,1", 3) == [2, 1]
+    for bad in ("0", "9", "3-1", "a", "1;2", ""):
+        assert study.parse_selection(bad, 8) is None
+
+
 # --------------------------------------------------------------------------
 # plan_from_flags
 # --------------------------------------------------------------------------
@@ -616,6 +709,153 @@ def test_venue_benchmark_reads_the_installed_calibration(tmp_path: Path) -> None
     settings = {"lsar": {"home": str(home)}}
     assert study.venue_benchmarked("JEDM", settings) is True
     assert study.venue_benchmarked("JLA", settings) is False
+
+
+# --------------------------------------------------------------------------
+# Interactive flow (scripted UI)
+# --------------------------------------------------------------------------
+
+
+def test_interactive_prediction_with_edit(
+    monkeypatch: pytest.MonkeyPatch, raw_dir: Path
+) -> None:
+    install_data(raw_dir, "hsls09_public")
+    plan, ui = run_flow(monkeypatch, [
+        "prediction",
+        "hsls09_public",
+        "Which ninth-grade factors best predict college attendance by 2016?",
+        DEFAULT, DEFAULT,           # venue, paper format
+        "edit", "question",
+        "Which ninth-grade attitudes best predict college attendance by 2016?",
+        "start",
+    ])
+    assert plan is not None
+    assert plan.task_type == "prediction" and plan.spec is None
+    assert plan.research_question.startswith("Which ninth-grade attitudes")
+    assert plan.prompt == plan.research_question
+    assert (plan.venue, plan.paper_format, plan.review) == ("EDM", "conference", False)
+    assert "automated peer review is not set up" in ui.said("info")
+    assert any(entry[:2] == ("panel", "Check your study") for entry in ui.log)
+    # Greyed datasets are explained, not hidden.
+    assert "Not available:" in ui.said("info")
+
+
+def test_interactive_out_of_scope_then_cancel(
+    monkeypatch: pytest.MonkeyPatch, raw_dir: Path
+) -> None:
+    install_data(raw_dir, "hsls09_public")
+    plan, ui = run_flow(monkeypatch, [
+        "prediction", "hsls09_public",
+        "I want to interview teachers about why students leave school",
+        "",                          # empty question -> back to the start
+        "cancel",
+    ])
+    assert plan is None
+    assert any(e[0] == "panel" and "outside" in e[1] for e in ui.log)
+
+
+def test_interactive_not_sure_to_example(
+    monkeypatch: pytest.MonkeyPatch, raw_dir: Path
+) -> None:
+    install_data(raw_dir, "hsls09_public")
+    seen = ok_preflight(monkeypatch)
+    plan, ui = run_flow(monkeypatch, [
+        "unsure",
+        "What is the effect of ninth-grade math self-efficacy on college attendance?",
+        True,                        # accept the suggested type
+        "hsls09_public",
+        "example:x1mtheff_x4college",
+        DEFAULT, DEFAULT,
+        "start",
+    ])
+    assert plan is not None and plan.example_id == "x1mtheff_x4college"
+    assert plan.task_type == "causal_soo" and plan.experimental is False
+    assert seen and seen[0].example_id == "x1mtheff_x4college"
+    assert "Cause and effect: the average effect" in ui.said("info")
+
+
+def test_interactive_not_sure_non_english_chooses_manually(
+    monkeypatch: pytest.MonkeyPatch, raw_dir: Path
+) -> None:
+    install_data(raw_dir, "hsls09_public")
+    plan, ui = run_flow(monkeypatch, [
+        "unsure",
+        "¿Qué factores predicen el abandono escolar de los estudiantes?",
+        "cancel",                    # the manual family menu
+    ])
+    assert plan is None
+    assert study.LANGUAGE_NOTE_UNSURE in ui.said("info")
+
+
+def test_interactive_build_my_own_psychometrics(
+    monkeypatch: pytest.MonkeyPatch, raw_dir: Path
+) -> None:
+    install_data(raw_dir, "hsls09_public")
+    ok_preflight(monkeypatch)
+    plan, ui = run_flow(monkeypatch, [
+        "measurement",
+        "hsls09_public",
+        "build",
+        DEFAULT,                     # item banks: the recommended one
+        "X1SEX",                     # grouping
+        False,                       # no IRT model
+        DEFAULT,                     # keep the generated question
+        DEFAULT, DEFAULT,
+        "start",
+    ])
+    assert plan is not None and plan.experimental is True
+    assert plan.spec is not None and plan.spec["task_type"] == "psychometrics"
+    assert plan.spec["item_columns"] == ["S1MTESTS", "S1MTEXTBOOK", "S1MSKILLS",
+                                         "S1MASSEXCL"]
+    assert plan.spec["method_battery"] == ["P1", "P2", "P3", "P5", "P6"]
+    assert plan.research_question == plan.spec["research_question"]
+    assert "Not available: math identity (2 items" in ui.said("info")  # greyed, with why
+
+
+def test_interactive_build_my_own_causal_soo(
+    monkeypatch: pytest.MonkeyPatch, raw_dir: Path
+) -> None:
+    install_data(raw_dir, "hsls09_public")
+    ok_preflight(monkeypatch)
+    plan, _ = run_flow(monkeypatch, [
+        "causal", "causal_soo", "hsls09_public", "build",
+        "X1MTHEFF", "X4EVRATNDCLG",
+        "",                          # recommended covariates
+        "Does math self-efficacy change whether students attend college?",
+        DEFAULT, DEFAULT,
+        "start",
+    ])
+    assert plan is not None and plan.experimental
+    assert plan.research_question == (
+        "Does math self-efficacy change whether students attend college?"
+    )
+    assert plan.spec is not None
+    assert plan.spec["research_question"] == plan.research_question
+    assert plan.spec["adjustment_set"] == study.default_covariates(
+        "hsls09_public", "X1MTHEFF", "X4EVRATNDCLG")
+
+
+def test_interactive_blocking_preflight_offers_start_over(
+    monkeypatch: pytest.MonkeyPatch, raw_dir: Path
+) -> None:
+    install_data(raw_dir, "hsls09_public")
+    monkeypatch.setattr(
+        study, "preflight",
+        lambda plan, settings, **_: [Check("Data", "fail", "missing", "edmars data")],
+    )
+    plan, ui = run_flow(monkeypatch, [
+        "prediction", "hsls09_public",
+        "Which ninth-grade factors best predict college attendance?",
+        "cancel",
+    ])
+    assert plan is None
+    assert "What to do: edmars data" in ui.said("info")
+
+
+def test_interactive_nothing_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    plan, ui = run_flow(monkeypatch, ["prediction", "cancel"])
+    assert plan is None
+    assert "No dataset on this computer" in ui.said("warn")
 
 
 # --------------------------------------------------------------------------

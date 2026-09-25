@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import hashlib
 import importlib
 import io
@@ -38,7 +39,7 @@ import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 from edmars import paths
 from edmars.model import Check, StudyPlan
@@ -2135,3 +2136,571 @@ def confirmation_card(
             f"{EXPERIMENTAL_BADGE} {EXPERIMENTAL_TEXT}", width=78
         )
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# Interactive flow (R1-R6). R7 (launch + live view) belongs to the caller.
+# --------------------------------------------------------------------------
+
+
+class _StartOver:
+    """Sentinel: the user asked to start the flow again."""
+
+
+_START_OVER = _StartOver()
+
+_FAMILY_CHOICES: list[tuple[str, str]] = [
+    ("prediction", "Prediction - which students are likely to reach an "
+     "outcome, and what predicts it"),
+    ("causal", "Cause and effect - does one thing change another?"),
+    ("measurement", "Measurement - do survey items measure well, and the same "
+     "way for different groups?"),
+    ("unsure", "Not sure - describe your question and get a suggestion"),
+    ("cancel", "Cancel"),
+]
+
+_PREDICTION_EXAMPLES: dict[str, tuple[str, ...]] = {
+    "hsls09_public": (
+        "Which ninth-grade experiences, attitudes and family circumstances best "
+        "predict whether a student attends college by 2016?",
+        "How well can ninth-grade math scores and math attitudes predict "
+        "eleventh-grade math achievement, and does accuracy differ between "
+        "groups of students?",
+        "Can early indicators identify students at risk of not completing high "
+        "school, and which indicators matter most?",
+    ),
+    "els_2002": (
+        "Which tenth-grade factors best predict whether a student enrolls in "
+        "postsecondary education within a few years of high school?",
+        "How well can tenth-grade test scores and expectations predict "
+        "twelfth-grade math achievement?",
+        "Which students are most likely to reach a bachelor's degree, and does "
+        "prediction accuracy differ by family background?",
+    ),
+}
+_GENERIC_PREDICTION_EXAMPLES: tuple[str, ...] = (
+    "Which early factors best predict the outcome I care about, and how "
+    "accurately?",
+    "Does prediction accuracy differ between groups of students?",
+    "Which factors matter most for predicting later success?",
+)
+
+
+@contextlib.contextmanager
+def _busy(ui: Any, message: str) -> Iterator[None]:
+    console = getattr(ui, "console", None)
+    if console is not None and not ui.is_plain() and hasattr(console, "status"):
+        with console.status(message):
+            yield
+        return
+    ui.info(message)
+    yield
+
+
+def _show_checks(ui: Any, checks: Sequence[Check]) -> None:
+    for check in checks:
+        if check.status == "fail":
+            ui.fail(f"{check.name}: {check.detail}")
+            if check.fix:
+                ui.info(f"   What to do: {check.fix}")
+        elif check.status == "warn":
+            ui.warn(f"{check.name}: {check.detail}")
+        elif check.status == "info":
+            ui.info(f"{check.name}: {check.detail}")
+        else:
+            ui.ok(check.name)
+
+
+def parse_selection(text: str, count: int) -> list[int] | None:
+    """Parse "1,3 5-7" into [1, 3, 5, 6, 7]; None when invalid."""
+    picked: list[int] = []
+    for token in re.split(r"[,\s]+", str(text or "").strip()):
+        if not token:
+            continue
+        match = re.fullmatch(r"(\d+)(?:-(\d+))?", token)
+        if not match:
+            return None
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if start < 1 or end > count or end < start:
+            return None
+        for i in range(start, end + 1):
+            if i not in picked:
+                picked.append(i)
+    return picked or None
+
+
+def _format_numbers(numbers: Sequence[int]) -> str:
+    return ",".join(str(n) for n in numbers) or "none"
+
+
+def _ask_multi(
+    ui: Any, title: str, options: Sequence[MenuOption], defaults: Sequence[str]
+) -> list[str]:
+    usable = [o for o in options if o.disabled is None]
+    body = "\n".join(f"{i}. {o.label}" for i, o in enumerate(usable, 1))
+    ui.panel(title, body)
+    default_numbers = [i for i, o in enumerate(usable, 1) if o.value in defaults]
+    prompt = (
+        "Type numbers such as 1,3,5-7, or press Enter for the recommended set "
+        f"({_format_numbers(default_numbers)}):"
+    )
+    while True:
+        answer = ui.text(prompt, default="")
+        if not str(answer or "").strip():
+            offered = {o.value for o in usable}
+            return [v for v in defaults if v in offered]
+        picked = parse_selection(answer, len(usable))
+        if picked is None:
+            ui.warn(f"Please use numbers between 1 and {len(usable)}, e.g. 1,3,5-7.")
+            continue
+        return [usable[i - 1].value for i in picked]
+
+
+def _select_or_back(
+    ui: Any, message: str, options: Sequence[MenuOption], *, back: str = "Go back"
+) -> str | None:
+    for option in options:
+        if option.disabled:
+            ui.info(f"Not available: {option.label} - {option.disabled}")
+    enabled = [o for o in options if o.disabled is None]
+    if not enabled:
+        return None
+    choices = [(o.value, o.label) for o in enabled] + [("__back__", back)]
+    answer = ui.select(message, choices, default=enabled[0].value)
+    return None if answer == "__back__" else str(answer)
+
+
+def _ask_question_text(ui: Any, generated: str) -> str:
+    ui.info("Suggested research question (press Enter to keep it, or type your own):")
+    ui.info(f"   {generated}")
+    answer = str(ui.text("Research question:", default=generated) or "").strip()
+    return answer or generated
+
+
+def _ask_prediction_question(ui: Any, dataset: str, draft: str | None) -> str | None:
+    examples = _PREDICTION_EXAMPLES.get(dataset, _GENERIC_PREDICTION_EXAMPLES)
+    ui.panel(
+        "Your prediction question",
+        "Write the question in your own words. For example:\n"
+        + "\n".join(f" - {e}" for e in examples)
+        + "\n\nPress Enter on an empty line to go back.",
+    )
+    current = draft or ""
+    while True:
+        question = str(ui.text("Your question:", default=current) or "").strip()
+        if not question:
+            return None
+        current = question
+        if len(question.split()) < 4:
+            ui.warn("Please write a full question (at least a few words).")
+            continue
+        scope = out_of_scope(question)
+        if scope:
+            ui.panel("This is outside what EDM-ARS can do", scope)
+            continue
+        note = language_note(question)
+        if note:
+            ui.info(note)
+            if not ui.confirm("Keep this wording?", default=True):
+                continue
+        return question
+
+
+def _guess_family(ui: Any) -> tuple[str | None, str | None, str | None] | None:
+    """The "Not sure" path. Returns (family, task_type, text) or None to cancel.
+
+    ``family`` None means: let the user choose the type manually.
+    """
+    while True:
+        text = str(
+            ui.text("Describe your question in a sentence or two:", default="") or ""
+        ).strip()
+        if not text:
+            return None, None, None
+        scope = out_of_scope(text)
+        if scope:
+            ui.panel("This is outside what EDM-ARS can do", scope)
+            nxt = ui.select(
+                "What next?",
+                [
+                    ("retry", "Describe a different question"),
+                    ("manual", "Choose a study type myself"),
+                    ("cancel", "Cancel"),
+                ],
+                default="retry",
+            )
+            if nxt == "retry":
+                continue
+            if nxt == "cancel":
+                return None
+            return None, None, None
+        if looks_non_english(text):
+            ui.info(LANGUAGE_NOTE_UNSURE)
+            return None, None, text
+        suggestion = suggest_study_type(text)
+        label = TASK_LABELS[suggestion.task_type]
+        ui.info(
+            f"This sounds like: {label}. {suggestion.why} (The suggestion comes "
+            f"from English keywords, so treat it as a starting point.)"
+        )
+        if ui.confirm(f"Continue with a '{label}' study?", default=True):
+            return _family_of(suggestion.task_type), suggestion.task_type, text
+        return None, None, text
+
+
+def _ask_family(ui: Any, *, allow_unsure: bool = True) -> str:
+    choices = [c for c in _FAMILY_CHOICES if allow_unsure or c[0] != "unsure"]
+    return str(ui.select("What kind of question do you have?", choices,
+                         default="prediction"))
+
+
+def _ask_causal_kind(ui: Any, settings: dict | None) -> str | None:
+    return _select_or_back(
+        ui, "Which kind of cause-and-effect question?", causal_kind_options(settings)
+    )
+
+
+def _ask_dataset(ui: Any, settings: dict | None, task_type: str) -> str | None:
+    options = dataset_options(settings, task_type)
+    if not any(o.disabled is None for o in options):
+        for option in options:
+            ui.info(f"Not available: {option.label} - {option.disabled}")
+        ui.warn(
+            "No dataset on this computer can run this kind of study yet. "
+            "Install one with `edmars data install NAME`."
+        )
+        return None
+    return _select_or_back(ui, "Which dataset?", options)
+
+
+def _ask_source(
+    ui: Any, task_type: str, dataset: str
+) -> tuple[str, ExampleStudy | None] | None:
+    examples = examples_for(task_type, dataset)
+    if examples:
+        ui.panel(
+            "Example studies",
+            "\n\n".join(f"{ex.title}\n  {ex.research_question}" for ex in examples),
+        )
+    choices = [(f"example:{ex.id}", f"Example: {ex.title}") for ex in examples]
+    menu_reason = menu_unavailable_reason(task_type, dataset)
+    if menu_reason is None:
+        choices.append(("build", f"Build my own {EXPERIMENTAL_BADGE}"))
+    else:
+        ui.info(f"'Build my own' is not available here: {menu_reason}")
+    if not choices:
+        ui.warn("There is no example or menu for this kind of study on this dataset.")
+        return None
+    choices.append(("back", "Go back"))
+    answer = str(ui.select("How would you like to start?", choices,
+                           default=choices[0][0]))
+    if answer == "back":
+        return None
+    if answer == "build":
+        return "build", None
+    return "example", EXAMPLES[answer.split(":", 1)[1]]
+
+
+def _ask_menu_choices(
+    ui: Any, task_type: str, dataset: str
+) -> dict | None:
+    ui.panel(
+        f"Build my own {EXPERIMENTAL_BADGE}",
+        "These menus only offer variables from the dataset's catalogue. Plans "
+        "built this way pass the automatic checks but have not been tested end "
+        "to end, so they are labelled EXPERIMENTAL.",
+    )
+    choices: dict[str, Any] = {}
+    if task_type in ("causal_soo", "causal_itr"):
+        treatment = _select_or_back(
+            ui,
+            "Which variable is the possible cause (the 'treatment')? Students "
+            "above its median will count as 'treated'.",
+            treatment_options(dataset),
+        )
+        if treatment is None:
+            return None
+        outcome = _select_or_back(
+            ui, "Which later outcome might it change?",
+            outcome_options(dataset, treatment),
+        )
+        if outcome is None:
+            return None
+        cov_menu = covariate_options(dataset, treatment, outcome)
+        covariates = _ask_multi(
+            ui,
+            "Background differences to adjust for (measured no later than the "
+            "cause)",
+            cov_menu,
+            default_covariates(dataset, treatment, outcome),
+        )
+        choices.update(treatment=treatment, outcome=outcome, covariates=covariates)
+        if task_type == "causal_itr":
+            rule_menu = [o for o in cov_menu if o.value in covariates]
+            choices["rule_covariates"] = _ask_multi(
+                ui,
+                "Which of these may the 'for whom' rule use? (2-4 is plenty)",
+                rule_menu,
+                default_rule_covariates(dataset, covariates),
+            )
+    elif task_type == "causal_did":
+        group = _select_or_back(
+            ui, "Which two groups should be compared (the gap)?",
+            did_group_options(dataset),
+        )
+        if group is None:
+            return None
+        outcome = _select_or_back(
+            ui, "Which outcome's gap?", did_outcome_options(dataset)
+        )
+        if outcome is None:
+            return None
+        choices.update(group=group, outcome=outcome)
+    else:
+        bank_menu = item_bank_options(dataset)
+        usable = [o for o in bank_menu if o.disabled is None]
+        registry_banks = _registry(dataset).get("item_banks") or {}
+        largest = max(
+            usable,
+            key=lambda o: len((registry_banks.get(o.value) or {}).get("items") or []),
+        )
+        for option in bank_menu:
+            if option.disabled:
+                ui.info(f"Not available: {option.label} - {option.disabled}")
+        choices["item_banks"] = _ask_multi(
+            ui, "Which item banks (scales)? Each becomes one factor.",
+            usable, [largest.value],
+        )
+        group_menu = grouping_options(dataset)
+        for option in group_menu:
+            if option.disabled:
+                ui.info(f"Not available: {option.label} - {option.disabled}")
+        group_choices = [("__none__", "No group comparison")] + [
+            (o.value, f"Compare groups of {o.label}")
+            for o in group_menu
+            if o.disabled is None
+        ]
+        group = str(ui.select("Compare how the items work for two groups?",
+                              group_choices, default="__none__"))
+        choices["grouping_vars"] = [] if group == "__none__" else [group]
+        choices["irt"] = bool(
+            ui.confirm("Also fit an item response (graded response) model?",
+                       default=False)
+        )
+    generated = menu_question(task_type, dataset, choices)
+    choices["research_question"] = _ask_question_text(ui, generated)
+    return choices
+
+
+def _ask_options(ui: Any, settings: dict | None, plan: StudyPlan) -> StudyPlan:
+    review_ok = _review_available(settings)
+    venue_choices: list[tuple[str, str]] = []
+    for key, name in VENUES.items():
+        label = name + (" (default)" if key == "EDM" else "")
+        if review_ok:
+            label += (
+                " - review benchmarked"
+                if venue_benchmarked(key, settings)
+                else " - review score only, no benchmark"
+            )
+        venue_choices.append((key, label))
+    venue = str(ui.select("Which venue should the paper be written for?",
+                          venue_choices, default=plan.venue))
+    default_format = "journal" if venue in JOURNAL_VENUES else plan.paper_format
+    paper_format = str(
+        ui.select(
+            "Paper format",
+            [
+                ("conference", "Conference paper (shorter)"),
+                ("journal", "Journal article (longer)"),
+            ],
+            default=default_format,
+        )
+    )
+    if review_ok:
+        review = bool(
+            ui.confirm(
+                "Run the automated peer review (LSAR) after the paper is written? "
+                "It adds about 20-40 minutes, and scores vary by about 2 points "
+                "between runs.",
+                default=plan.review,
+            )
+        )
+    else:
+        review = False
+        ui.info(
+            "The automated peer review is not set up (turn it on with "
+            "`edmars setup lsar`)."
+        )
+    return dataclasses.replace(
+        plan, venue=venue, paper_format=paper_format, review=review
+    )
+
+
+def _choose_plan(ui: Any, settings: dict | None) -> StudyPlan | _StartOver | None:
+    family = _ask_family(ui)
+    if family == "cancel":
+        return None
+    task_type: str | None = None
+    draft: str | None = None
+    if family == "unsure":
+        guessed = _guess_family(ui)
+        if guessed is None:
+            return None
+        guessed_family, task_type, draft = guessed
+        family = guessed_family or _ask_family(ui, allow_unsure=False)
+        if family == "cancel":
+            return None
+    if family == "prediction":
+        task_type = "prediction"
+    elif family == "measurement":
+        task_type = "psychometrics"
+    else:
+        available = {
+            o.value for o in causal_kind_options(settings) if o.disabled is None
+        }
+        if task_type not in available:
+            task_type = _ask_causal_kind(ui, settings)
+            if task_type is None:
+                return _START_OVER
+
+    dataset = _ask_dataset(ui, settings, task_type)
+    if dataset is None:
+        return _START_OVER
+    options = _default_options(settings)
+
+    if task_type == "prediction":
+        question = _ask_prediction_question(ui, dataset, draft)
+        if question is None:
+            return _START_OVER
+        return StudyPlan(
+            task_type="prediction",
+            dataset=dataset,
+            research_question=question,
+            prompt=question,
+            **options,
+        )
+
+    source = _ask_source(ui, task_type, dataset)
+    if source is None:
+        return _START_OVER
+    kind, example = source
+    if kind == "example" and example is not None:
+        return _plan_from_example(example, options)
+    choices = _ask_menu_choices(ui, task_type, dataset)
+    if choices is None:
+        return _START_OVER
+    try:
+        spec = build_menu_spec(settings, task_type, dataset, choices)
+    except StudyError as exc:
+        ui.fail(str(exc))
+        return _START_OVER
+    question = str(spec.get("research_question") or choices["research_question"])
+    return StudyPlan(
+        task_type=task_type,
+        dataset=dataset,
+        research_question=question,
+        prompt=question,
+        spec=spec,
+        experimental=True,
+        **options,
+    )
+
+
+def _edit_question(ui: Any, plan: StudyPlan) -> StudyPlan:
+    if plan.spec is None:
+        question = _ask_prediction_question(ui, plan.dataset, plan.research_question)
+        if question is None:
+            return plan
+        return dataclasses.replace(plan, research_question=question, prompt=question)
+    answer = str(
+        ui.text("Research question:", default=plan.research_question) or ""
+    ).strip()
+    if not answer or answer == plan.research_question:
+        return plan
+    spec = copy.deepcopy(plan.spec)
+    spec["research_question"] = answer
+    return dataclasses.replace(plan, research_question=answer, prompt=answer, spec=spec)
+
+
+def _review_and_confirm(
+    ui: Any, settings: dict | None, plan: StudyPlan
+) -> StudyPlan | _StartOver | None:
+    need_check = True
+    options_done = False
+    while True:
+        if need_check:
+            with _busy(ui, PREFLIGHT_MESSAGE):
+                checks = preflight(plan, settings)
+            _show_checks(ui, checks)
+            need_check = False
+            if blocking(checks):
+                nxt = ui.select(
+                    "The study cannot start until the problems above are fixed.",
+                    [
+                        ("start_over", "Change the study"),
+                        ("cancel", "Cancel (fix it, then run `edmars new` again)"),
+                    ],
+                    default="start_over",
+                )
+                return _START_OVER if nxt == "start_over" else None
+        if not options_done:
+            plan = _ask_options(ui, settings, plan)
+            options_done = True
+        ui.panel("Check your study", confirmation_card(plan, settings))
+        action = ui.select(
+            "Ready?",
+            [("start", "Start the study"), ("edit", "Edit"), ("cancel", "Cancel")],
+            default="start",
+        )
+        if action == "start":
+            return plan
+        if action == "cancel":
+            return None
+        edit_choices: list[tuple[str, str]] = []
+        if plan.example_id is None:
+            edit_choices.append(("question", "The question wording"))
+        edit_choices += [
+            ("options", "Venue, paper format and review"),
+            ("start_over", "Start over"),
+            ("back", "Nothing - go back"),
+        ]
+        what = ui.select("What would you like to change?", edit_choices,
+                         default="back")
+        if what == "question":
+            edited = _edit_question(ui, plan)
+            if edited != plan:
+                plan = edited
+                need_check = True
+        elif what == "options":
+            options_done = False
+        elif what == "start_over":
+            return _START_OVER
+
+
+def new_study_interactive(settings: dict | None) -> StudyPlan | None:
+    """Guide the user from intent to a checked, confirmed :class:`StudyPlan`.
+
+    Returns None when the user cancels. Never launches anything: the
+    caller starts the run (R7) with the returned plan.
+    """
+    ui = _ui()
+    ui.panel(
+        "New study",
+        "A few questions about your study, then a free check that it can run, "
+        "then a summary to confirm. Nothing is sent anywhere until you press "
+        "Start.",
+    )
+    while True:
+        chosen = _choose_plan(ui, settings)
+        if chosen is None:
+            return None
+        if isinstance(chosen, _StartOver):
+            continue
+        confirmed = _review_and_confirm(ui, settings, chosen)
+        if confirmed is None:
+            return None
+        if isinstance(confirmed, _StartOver):
+            continue
+        return confirmed
