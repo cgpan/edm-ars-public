@@ -122,3 +122,23 @@ class TestPredictionValidateResearchSpec:
         }
         warnings = self.template.validate_research_spec(spec, registry, adapter)
         assert warnings == []
+
+
+def test_psychometrics_unknown_method_message_lists_p7() -> None:
+    """C6: P7 (CDM) is accepted, so the rejection text must name it."""
+    from src.task_template import PsychometricsTemplate
+
+    base = {
+        "task_type": "psychometrics",
+        "scale_name": "s",
+        "item_columns": ["a", "b", "c"],
+    }
+    warnings = PsychometricsTemplate().validate_research_spec(
+        {**base, "method_battery": ["P1", "P8"]}
+    )
+    msg = next(w for w in warnings if "unknown method IDs" in w)
+    assert "P7" in msg and "P8" in msg
+    ok = PsychometricsTemplate().validate_research_spec(
+        {**base, "method_battery": ["P7"]}
+    )
+    assert not [w for w in ok if "unknown method IDs" in w]
