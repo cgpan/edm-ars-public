@@ -560,7 +560,7 @@ class _Wizard:
             ("r", "R for measurement studies"),
             ("reviewer", "Automated peer review (LSAR)"),
             ("folders", "Where studies are kept"),
-            ("advanced", "Your name on papers, spending warning, paper format, venue"),
+            ("advanced", "Your name on journal-format papers, spending warning, paper format, venue"),
             ("disclosure", "Read the notice about what leaves your computer again"),
             ("check", "Check everything again"),
             ("start-over", "Start over (keeps your studies, datasets and saved keys)"),
