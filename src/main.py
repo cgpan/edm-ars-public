@@ -1002,7 +1002,6 @@ def _parse_utc(text: Any) -> datetime | None:
 
 def _current_status(
     output_dir: str,
-    run_start_time: str,
     invocation_start: float,
     trust_existing: bool = False,
 ) -> tuple[str, dict | None]:
@@ -1011,9 +1010,11 @@ def _current_status(
     A reused folder used to print the previous run's "Release: YES
     (clean)" under a new run that had aborted, because the file was read
     whenever it existed. It now counts only if it was written during this
-    invocation, or stamped at or after this run's start (a resumed run
-    keeps its original start time), or ``trust_existing`` says the run
-    was already finished when resumed.
+    invocation -- by its modification time, or by its own ``written_at``
+    stamp for file systems whose times are not this machine's (network
+    and cloud-synced folders) -- or ``trust_existing`` says the run was
+    already finished when resumed. A status left by an earlier session of
+    the same resumed run describes that session, not this one.
     """
     path = os.path.join(output_dir, "run_status.json")
     try:
@@ -1026,9 +1027,9 @@ def _current_status(
         return path, None
     if trust_existing or mtime >= invocation_start - _MTIME_SLACK_S:
         return path, status
-    started = _parse_utc(run_start_time)
-    written = _parse_utc(status.get("written_at") or status.get("timestamp"))
-    if started is not None and written is not None and written >= started:
+    written = _parse_utc(status.get("written_at"))
+    started = datetime.fromtimestamp(invocation_start - _MTIME_SLACK_S, tz=timezone.utc)
+    if written is not None and written >= started:
         return path, status
     return path, None
 
@@ -1249,7 +1250,7 @@ def _run(plan: _Plan, args: argparse.Namespace) -> int:
             "nothing to resume.",
             file=_human_stream(args),
         )
-        path, status = _current_status(plan.output_dir, "", 0.0, trust_existing=True)
+        path, status = _current_status(plan.output_dir, 0.0, trust_existing=True)
         return _report(plan, args, plan.start_state or "", path, status)
 
     findings = _preflight(plan)
@@ -1304,11 +1305,7 @@ def _run(plan: _Plan, args: argparse.Namespace) -> int:
         return _crashed(plan, args, orchestrator, exc, invocation_start)
 
     state = _state_name(result_ctx.current_state)
-    path, status = _current_status(
-        plan.output_dir,
-        str(getattr(result_ctx, "run_start_time", "") or ""),
-        invocation_start,
-    )
+    path, status = _current_status(plan.output_dir, invocation_start)
     return _report(
         plan, args, state, path, status,
         errors=list(result_ctx.errors or []),
@@ -1438,10 +1435,7 @@ def _interrupted(
 ) -> int:
     message = f"Stopped by {_stop_reason(exc)}"
     _finalize(orchestrator, "INTERRUPTED", message)
-    path, status = _current_status(
-        plan.output_dir, str(getattr(orchestrator.ctx, "run_start_time", "") or ""),
-        invocation_start,
-    )
+    path, status = _current_status(plan.output_dir, invocation_start)
     return _report(
         plan, args, "INTERRUPTED", path, status,
         abort_info=_stop_abort_info(orchestrator, "INTERRUPTED", message),
@@ -1483,10 +1477,7 @@ def _crashed(
         + (f" (full traceback in {log_path})" if log_path else ""),
         file=sys.stderr,
     )
-    path, status = _current_status(
-        plan.output_dir, str(getattr(orchestrator.ctx, "run_start_time", "") or ""),
-        invocation_start,
-    )
+    path, status = _current_status(plan.output_dir, invocation_start)
     return _report(
         plan, args, "CRASHED", path, status,
         abort_info=_stop_abort_info(orchestrator, "CRASHED", detail),

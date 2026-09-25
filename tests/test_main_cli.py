@@ -759,19 +759,33 @@ def test_state_names_are_plain() -> None:
 
 
 def test_status_from_this_run_is_recognised(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
     path = tmp_path / "run_status.json"
-    path.write_text(json.dumps({"released": True,
-                                "written_at": "2026-09-25T10:00:00Z"}), encoding="utf-8")
-    old = time.time() - 3600
-    os.utime(path, (old, old))
     now = time.time()
-    # Old file, stamped before this run started: not ours.
-    assert main_mod._current_status(str(tmp_path), "2026-09-25T11:00:00+00:00", now)[1] is None
-    # Stamped after the (resumed) run's original start: ours.
-    assert main_mod._current_status(str(tmp_path), "2026-09-25T09:00:00", now)[1] is not None
-    # Written during this invocation: ours.
-    os.utime(path, None)
-    assert main_mod._current_status(str(tmp_path), "", now - 1)[1] is not None
+    earlier = datetime.fromtimestamp(now - 3600, tz=timezone.utc)
+    old = now - 3600
+
+    # Old file, stamped by an earlier session (even of the same resumed
+    # run, which keeps its original start time): not this run's verdict.
+    path.write_text(json.dumps({"released": True,
+                                "written_at": earlier.isoformat()}), encoding="utf-8")
+    os.utime(path, (old, old))
+    assert main_mod._current_status(str(tmp_path), now)[1] is None
+    # Stamped during this invocation although the file system reports an
+    # old time (network or cloud-synced folder): ours.
+    later = datetime.fromtimestamp(now, tz=timezone.utc) + timedelta(seconds=5)
+    path.write_text(json.dumps({"released": True,
+                                "written_at": later.strftime("%Y-%m-%dT%H:%M:%SZ")}),
+                    encoding="utf-8")
+    os.utime(path, (old, old))
+    assert main_mod._current_status(str(tmp_path), now)[1] is not None
+    # Written during this invocation, no stamp: ours.
+    path.write_text(json.dumps({"released": True}), encoding="utf-8")
+    assert main_mod._current_status(str(tmp_path), now - 1)[1] is not None
+    # A finished run being "resumed" reports its own last status.
+    os.utime(path, (old, old))
+    assert main_mod._current_status(str(tmp_path), now, trust_existing=True)[1] is not None
 
 
 def test_a_real_orchestrator_run_is_summarised_from_its_own_status(
