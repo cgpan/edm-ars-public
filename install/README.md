@@ -110,7 +110,7 @@ and `curl -LsSf <url>/install.sh | sh -s -- --no-onboard` elsewhere.
 | Its Python packages | `<dir>\venv-<version>` | `<dir>/venv-<version>` | same |
 | Private Python 3.11 | `<dir>\python` | `<dir>/python` | same |
 | uv (only if you had none) | `<dir>\uv` | `<dir>/uv` | same |
-| The `edmars` command | `%USERPROFILE%\.local\bin\edmars.cmd` | `~/.local/bin/edmars` | same |
+| The `edmars` command | `%USERPROFILE%\.local\bin\edmars.cmd` (and `edmars` beside it, for Git Bash) | `~/.local/bin/edmars` | same |
 | Install record | `<dir>\install.json` | `<dir>/install.json` | same |
 
 When you install a new version, the previous one is kept (a study started
@@ -164,7 +164,9 @@ Nothing is sent except ordinary download requests. EDM-ARS has no telemetry.
   `edmars` — this is Windows asking about the `edmars.cmd` wrapper. Either
   answer is fine; a running study keeps running.
 - **`edmars` is not found after installing** — open a new terminal window.
-  Windows and your shell read PATH when a window opens.
+  Windows and your shell read PATH when a window opens. In Git Bash, if the
+  folder has only `edmars.cmd` and no `edmars`, type `edmars.cmd` or run the
+  installer again.
 
 Run `edmars doctor` for a full check of your setup.
 

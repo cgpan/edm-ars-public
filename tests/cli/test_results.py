@@ -150,7 +150,7 @@ def test_summary_html_is_self_contained_and_escaped(run_home: Path) -> None:
 
 @pytest.mark.parametrize("width", [60, 80, 120])
 def test_result_text_wraps(run_home: Path, width: int) -> None:
-    from edmars.endstates import classify
+    from edmars.endstates import classify, quote_path
     from edmars.runstate import load_state
 
     run = _ready(run_home)
@@ -159,7 +159,7 @@ def test_result_text_wraps(run_home: Path, width: int) -> None:
                   and not ln.lstrip().startswith("edmars ")]
     assert not long_lines
     # commands are whole lines, so they can be copied as they are
-    assert f"    edmars results {run} --open pdf" in text.splitlines()
+    assert f"    edmars results {quote_path(run)} --open pdf" in text.splitlines()
 
 
 def test_causal_and_psychometric_result_sentences(run_home: Path) -> None:

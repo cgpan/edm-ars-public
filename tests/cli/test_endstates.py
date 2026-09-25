@@ -61,6 +61,18 @@ def test_stage_titles_and_reminder_present() -> None:
     assert "edmars disclaimer" in msgs["reminder"]
 
 
+def test_printed_paths_keep_their_backslashes_in_git_bash(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unquoted, Git Bash turns C:\Users\x\studies\run into C:Usersxstudiesrun,
+    # so a pasted `edmars resume ...` found no study.
+    monkeypatch.setattr(endstates.os, "name", "nt")
+    study = r"C:\Users\someone\EDM-ARS\studies\2026-09-25_1200_gpa_ab12"
+    assert endstates.quote_path(study) == f'"{study}"'
+    assert endstates.quote_path("C:/Users/someone/run") == "C:/Users/someone/run"
+    monkeypatch.setattr(endstates.os, "name", "posix")
+    assert endstates.quote_path("/home/someone/run") == "/home/someone/run"
+    assert endstates.quote_path("/home/some one/a\\b") == "'/home/some one/a\\b'"
+
+
 def test_fill_leaves_unknown_placeholders() -> None:
     assert endstates.fill("a {x} b {y}", x=1) == "a 1 b {y}"
 

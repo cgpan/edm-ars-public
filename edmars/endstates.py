@@ -118,9 +118,14 @@ def invariant_title(code: str) -> str:
 
 
 def quote_path(path: Path | str) -> str:
-    """A path as it should be typed in a terminal command."""
+    """A path as it should be typed in a terminal command.
+
+    A backslash is never left bare: Git Bash drops it (C:\\Users\\x arrives
+    as C:Usersx), and cmd, PowerShell and Git Bash all keep a double-quoted
+    Windows path intact.
+    """
     text = str(path)
-    if re.fullmatch(r"[A-Za-z0-9_./:\\-]+", text):
+    if re.fullmatch(r"[A-Za-z0-9_./:-]+", text):
         return text
     if os.name == "nt":
         return f'"{text}"'
