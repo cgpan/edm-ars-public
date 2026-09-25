@@ -1016,3 +1016,184 @@ def test_prediction_wording_gets_no_measurement_notice(prompt: str) -> None:
 def test_is_this_scale_valid_is_a_measurement_question() -> None:
     assert main_mod._prompt_intent(
         "Is the school engagement scale valid for English learners?") == "measurement"
+
+
+# ---------------------------------------------------------------------------
+# Resuming what cannot be resumed, and errors nobody anticipated
+# ---------------------------------------------------------------------------
+
+
+def test_resuming_an_abort_resume_cannot_fix_starts_nothing(
+    env: dict[str, Path], no_orchestrator: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The orchestrator would load the checkpoint and stop at once; main
+    says so without building agents, which would need a key."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    run_dir = env["root"] / "run"
+    _checkpoint(run_dir, current_state="ABORTED", abort_info={
+        "stage": "CRITIQUING", "code": "CRITIC_ABORT",
+        "message": "confirmed leakage", "resumable": False})
+    assert _run(env, "--resume") == 3
+    out = capsys.readouterr().out
+    assert "CRITIC_ABORT, which --resume cannot fix" in out
+    assert "Run stopped: ABORTED during CRITIQUING" in out
+    assert "continue the run with" not in out
+
+
+def test_an_abort_without_a_record_is_not_resumable(
+    env: dict[str, Path], no_orchestrator: None, capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = env["root"] / "run"
+    _checkpoint(run_dir, current_state="ABORTED")  # an older run: no abort_info
+    assert _run(env, "--resume", "--dry-run") == 1
+    out = capsys.readouterr().out
+    assert "NOT_RESUMABLE" in out and "without a record" in out
+
+
+def test_resumable_runs_follow_the_abort_code_not_a_stored_flag(
+    env: dict[str, Path],
+) -> None:
+    base = env["root"] / "runs"
+    _checkpoint(base / "net", current_state="ABORTED", abort_info={
+        "stage": "FORMULATING", "code": "NETWORK", "resumable": True})
+    _checkpoint(base / "leak", current_state="ABORTED", abort_info={
+        "stage": "CRITIQUING", "code": "CRITIC_ABORT", "resumable": True})
+    assert [os.path.basename(p) for p, _ in main_mod._resumable_runs(str(base))] == ["net"]
+
+
+def test_resume_of_an_old_checkpoint_takes_the_type_from_its_spec(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+) -> None:
+    spec = json.loads((FIXTURES / "spec_did_ses_gap.json").read_text(encoding="utf-8"))
+    run_dir = env["root"] / "old"
+    _checkpoint(run_dir, task_type=None, dataset_name=None,
+                locked_research_spec=spec, current_state="ANALYZING")
+    assert _run_in(env, run_dir, "--resume") == 0
+    ctx = stub.instances[0].ctx
+    assert (ctx.task_type, ctx.dataset_name) == ("causal_did", "did_els_hsls_panel")
+
+
+def test_resume_of_an_unknown_study_type_is_a_usage_error(
+    env: dict[str, Path], no_orchestrator: None, capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = env["root"] / "odd"
+    _checkpoint(run_dir, task_type="causal_inference")
+    assert _run_in(env, run_dir, "--resume") == 1
+    assert "causal_inference" in capsys.readouterr().err
+
+
+def _run_in(env: dict[str, Path], run_dir: Path, *extra: str) -> int:
+    return main(["--config", str(env["config"]), "--output-dir", str(run_dir), *extra])
+
+
+def test_an_unexpected_error_while_preparing_is_one_line_and_exit_1(
+    env: dict[str, Path], no_orchestrator: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _broken(*a: Any, **k: Any) -> list:
+        raise KeyError("output_base")
+
+    monkeypatch.setattr(main_mod, "check_run_prerequisites", _broken)
+    assert main(["--dry-run", "--config", str(env["config"])]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: unexpected KeyError") and "--debug" in err
+    assert "Traceback" not in err
+
+
+def test_an_error_after_the_run_is_a_crash_with_a_log(
+    env: dict[str, Path], stub: type[_StubOrchestrator], monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _broken_report(*a: Any, **k: Any) -> int:
+        raise RuntimeError("report failed")
+
+    monkeypatch.setattr(main_mod, "_report", _broken_report)
+    assert _run(env) == 5
+    err = capsys.readouterr().err
+    assert "report failed" in err and "crash.log" in err and "Traceback" not in err
+    assert "report failed" in (env["root"] / "run" / "crash.log").read_text(encoding="utf-8")
+
+
+def test_a_shipped_example_spec_is_found_from_another_folder(
+    env: dict[str, Path], no_orchestrator: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The refusal message names runs/fixtures/<name>.json; typing that from
+    outside the repository must find it (C5)."""
+    monkeypatch.setattr(main_mod, "check_run_prerequisites", lambda *a, **k: [])
+    assert Path.cwd() == env["cwd"]
+    assert main(["--dry-run", "--config", str(env["config"]), "--research-spec",
+                 "runs/fixtures/spec_x1mtheff_x4college.json"]) == 0
+    out = capsys.readouterr().out
+    assert "task_type:            causal_soo" in out
+    assert str(FIXTURES / "spec_x1mtheff_x4college.json") in out
+
+
+def test_a_missing_spec_names_both_places_looked(
+    env: dict[str, Path], no_orchestrator: None, capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["--dry-run", "--config", str(env["config"]),
+                 "--research-spec", "my_spec.json"]) == 1
+    err = capsys.readouterr().err
+    assert "research spec file not found: my_spec.json" in err
+    assert str(env["cwd"] / "my_spec.json") in err and "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
+# --retry-stage: the edmars front end resumes an ABORTED run with it
+# ---------------------------------------------------------------------------
+
+
+def _aborted_at(env: dict[str, Path], stage: str, code: str = "NETWORK") -> Path:
+    run_dir = env["root"] / "run"
+    _checkpoint(run_dir, current_state="ABORTED", abort_info={
+        "stage": stage, "code": code, "message": "x", "resumable": True})
+    return run_dir
+
+
+def test_retry_stage_resumes_the_failed_step(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _aborted_at(env, "WRITING")
+    assert _run(env, "--resume", "--retry-stage", "WRITING") == 0
+    assert len(stub.instances) == 1
+    assert "ignored" not in capsys.readouterr().err
+
+
+def test_retry_stage_without_a_value_or_with_another_stage(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _aborted_at(env, "WRITING")
+    assert _run(env, "--resume", "--retry-stage") == 0
+    assert _run(env, "--resume", "--retry-stage", "analyzing") == 0
+    err = capsys.readouterr().err
+    assert "--retry-stage ANALYZING is ignored: the run retries WRITING" in err
+
+
+def test_retry_stage_needs_resume_and_a_real_step(
+    env: dict[str, Path], no_orchestrator: None, capsys: pytest.CaptureFixture[str],
+) -> None:
+    _aborted_at(env, "WRITING")
+    assert _run(env, "--retry-stage", "WRITING") == 1
+    assert "add --resume" in capsys.readouterr().err
+    assert _run(env, "--resume", "--retry-stage", "PUBLISHING") == 1
+    assert "not a pipeline step" in capsys.readouterr().err
+
+
+def test_help_shows_retry_stage_taking_a_value(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """edmars.runner detects the flag, and whether it takes a value, from
+    this source or from --help; a flag that took no value would make it
+    drop the stage name."""
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    assert "--retry-stage [STAGE]" in capsys.readouterr().out
+    source = Path(main_mod.__file__).read_text(encoding="utf-8")
+    start = source.index('"--retry-stage"')
+    window = source[start:start + 600]
+    window = window[: window.find("add_argument(", 1)] if "add_argument(" in window[1:] else window
+    assert "store_true" not in window

@@ -29,14 +29,28 @@ from typing import Any, Iterator, NoReturn
 import yaml
 from dotenv import load_dotenv
 
+# Before the pipeline modules: a value set in .env (an API key, LSAR_HOME)
+# must be in the environment before any module reads it, some at import.
 load_dotenv()
 
-from src.config import PROJECT_ROOT, load_config, resolve_config_path
-from src.context import PipelineContext
-from src.dataset_adapter import _DATASET_REGISTRY, create_dataset_adapter
-from src.orchestrator import Orchestrator
-from src.preflight import FAIL, WARN, Finding, check_run_prerequisites, has_failures
-from src.task_template import _TASK_REGISTRY, create_task_template
+from src.config import (  # noqa: E402
+    PROJECT_ROOT,
+    load_config,
+    resolve_config_path,
+    resolve_repo_path,
+)
+from src.context import PipelineContext, PipelineState  # noqa: E402
+from src.dataset_adapter import _DATASET_REGISTRY, create_dataset_adapter  # noqa: E402
+from src.errors import is_resumable  # noqa: E402
+from src.orchestrator import Orchestrator  # noqa: E402
+from src.preflight import (  # noqa: E402
+    FAIL,
+    WARN,
+    Finding,
+    check_run_prerequisites,
+    has_failures,
+)
+from src.task_template import _TASK_REGISTRY, create_task_template  # noqa: E402
 
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -303,6 +317,21 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--retry-stage",
+        dest="retry_stage",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="STAGE",
+        help=(
+            "With --resume, for a run that stopped with an error (ABORTED): "
+            "retry the step that failed, keeping every step finished before "
+            "it. The step comes from the run's checkpoint; STAGE, if given, "
+            "is checked against it. Plain --resume does the same; the flag "
+            "exists so a front end can ask for it explicitly."
+        ),
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help=(
@@ -374,8 +403,14 @@ class _Plan:
     spec_source: str | None = None
     resume: bool = False
     start_state: str | None = None
-    #: For a resumed ABORTED run: the stage the orchestrator will retry.
+    #: For a resumed ABORTED run: the stage the orchestrator will retry,
+    #: None when the abort is one --resume cannot fix.
     retry_stage: str | None = None
+    #: For a resumed ABORTED run: the checkpoint's abort record.
+    abort_info: dict | None = None
+    #: Set once the Orchestrator exists: from then on a stop or an error
+    #: belongs to a run, not to its set-up.
+    started: bool = False
     #: Files an earlier run left in output_dir (names relative to it).
     earlier_run_files: list[str] = field(default_factory=list)
     earlier_run_state: str | None = None
@@ -641,6 +676,70 @@ def _occupied_message(plan: "_Plan") -> str:
     )
 
 
+def _not_resumable_record(plan: "_Plan") -> dict:
+    info = dict(plan.abort_info or {})
+    info["resumable"] = False
+    return info
+
+
+def _not_resumable_message(plan: "_Plan") -> str:
+    info = plan.abort_info or {}
+    if not info.get("stage"):
+        return (
+            f"The run in {plan.output_dir} stopped (ABORTED) without a record "
+            "of the step that failed, so --resume cannot continue it. Start a "
+            "new run (a new --output-dir, or --overwrite to reuse this one)."
+        )
+    return (
+        f"The run in {plan.output_dir} stopped during {info.get('stage')} with "
+        f"{info.get('code') or 'an error'}, which --resume cannot fix: it needs "
+        "a different question, data or configuration. Start a new run (a new "
+        "--output-dir, or --overwrite to reuse this one)."
+    )
+
+
+def _retry_stage(abort_info: Any) -> str | None:
+    """The stage a resumed ABORTED run retries, or None when it cannot.
+
+    Mirrors the orchestrator's rule (D3): the abort record must name a
+    non-terminal stage, and its code must be one ``src.errors`` marks as
+    resumable. A record-less ABORTED checkpoint (an older run) has nothing
+    to retry.
+    """
+    if not isinstance(abort_info, dict):
+        return None
+    stage = str(abort_info.get("stage") or "")
+    terminal = {"COMPLETED", "INCOMPLETE", "ABORTED"}
+    if stage not in PipelineState.__members__ or stage in terminal:
+        return None
+    if not is_resumable(str(abort_info.get("code") or "UNKNOWN")):
+        return None
+    return stage
+
+
+def _check_retry_stage_flag(value: str, plan: "_Plan") -> None:
+    """Validate ``--retry-stage [STAGE]`` against the resumed checkpoint.
+
+    The orchestrator retries the stage its abort record names (D3), so
+    the flag cannot choose another one; a different STAGE gets a NOTE
+    rather than a refusal, because the edmars front end derives STAGE
+    from the run folder and a refusal would strand a resumable run.
+    """
+    wanted = value.strip().upper()
+    if wanted and wanted not in PipelineState.__members__:
+        raise UsageError(
+            f"--retry-stage {value!r} is not a pipeline step. Steps: "
+            f"{', '.join(PipelineState.__members__)}."
+        )
+    if plan.start_state != "ABORTED":
+        _note(f"--retry-stage is ignored: this run did not stop with an error; "
+              f"it continues from {plan.start_state}.")
+    elif plan.retry_stage and wanted and wanted != plan.retry_stage:
+        _note(f"--retry-stage {wanted} is ignored: the run retries "
+              f"{plan.retry_stage}, the step that failed, and keeps every "
+              "step finished before it.")
+
+
 def _resumable_runs(output_base: str) -> list[tuple[str, str]]:
     """(folder, state) of runs under ``output_base`` that --resume can continue."""
     runs: list[tuple[float, str, str]] = []
@@ -658,10 +757,9 @@ def _resumable_runs(output_base: str) -> list[tuple[str, str]]:
         except (OSError, ValueError):
             continue
         state = _state_name(data.get("current_state"))
-        abort = data.get("abort_info") or {}
         if state in _TERMINAL_FINISHED:
             continue
-        if state == "ABORTED" and not abort.get("resumable"):
+        if state == "ABORTED" and _retry_stage(data.get("abort_info")) is None:
             continue
         runs.append((os.path.getmtime(path), entry.path, state))
     return [(p, s) for _, p, s in sorted(runs, reverse=True)]
@@ -707,9 +805,18 @@ def _plan_run(args: argparse.Namespace) -> _Plan:
             "--resume continues a run and --overwrite discards one; use one "
             "or the other."
         )
+    if args.retry_stage is not None and not args.resume:
+        raise UsageError(
+            "--retry-stage retries a failed step of an earlier run: add "
+            "--resume and that run's --output-dir."
+        )
     config_path, config = _load_config_for_run(args.config)
     config_task_type = config["pipeline"].get("task_type", "prediction")
     locked_spec: dict | None = None
+    # A relative spec path that does not exist from here names a file in
+    # the repository (C5): the shipped examples are given as
+    # runs/fixtures/<name>.json.
+    spec_path = resolve_repo_path(args.research_spec) if args.research_spec else None
 
     if args.resume:
         if not args.output_dir:
@@ -725,16 +832,33 @@ def _plan_run(args: argparse.Namespace) -> _Plan:
         # The run keeps what it started with. Rebuilding it from today's
         # flags re-typed a resumed causal run as a prediction run on HSLS,
         # which is what the README's own resume example did.
-        dataset = checkpoint.get("dataset_name") or _DEFAULT_DATASET
-        task_type = checkpoint.get("task_type") or "prediction"
         locked_spec = checkpoint.get("locked_research_spec")
+        if not isinstance(locked_spec, dict):
+            locked_spec = None
+        dataset = (
+            checkpoint.get("dataset_name")
+            or (locked_spec or {}).get("dataset")
+            or _DEFAULT_DATASET
+        )
+        task_type = (
+            checkpoint.get("task_type")
+            or (locked_spec or {}).get("task_type")
+            or config_task_type
+        )
         _check_dataset(dataset)
+        if task_type not in _TASK_REGISTRY:
+            raise UsageError(
+                f"the checkpoint in {output_dir} names study type "
+                f"{task_type!r}, which this version does not know "
+                f"({', '.join(sorted(_TASK_REGISTRY))}); it cannot be resumed "
+                "with this version."
+            )
         if args.dataset and args.dataset != dataset:
             _note(f"--dataset {args.dataset} is ignored: this run was started "
                   f"on {dataset} and continues on it.")
         if args.research_spec:
             try:
-                given = _read_spec_json(args.research_spec)
+                given = _read_spec_json(spec_path or args.research_spec)
             except UsageError:
                 given = None
             if given != locked_spec:
@@ -752,11 +876,20 @@ def _plan_run(args: argparse.Namespace) -> _Plan:
             start_state=_state_name(checkpoint.get("current_state")) or None,
         )
         abort = checkpoint.get("abort_info")
-        if plan.start_state == "ABORTED" and isinstance(abort, dict):
-            plan.retry_stage = str(abort.get("stage") or "") or None
+        if plan.start_state == "ABORTED":
+            plan.abort_info = abort if isinstance(abort, dict) else None
+            plan.retry_stage = _retry_stage(plan.abort_info)
+        if args.retry_stage is not None:
+            _check_retry_stage_flag(args.retry_stage, plan)
     else:
-        if args.research_spec:
-            raw_spec = _read_spec_json(args.research_spec)
+        if spec_path:
+            if not os.path.exists(spec_path):
+                where = spec_path
+                if not os.path.isabs(os.path.expanduser(args.research_spec)):
+                    where = (f"{args.research_spec} (looked in "
+                             f"{os.path.abspath(args.research_spec)} and {spec_path})")
+                raise UsageError(f"research spec file not found: {where}")
+            raw_spec = _read_spec_json(spec_path)
             spec_dataset = raw_spec.get("dataset")
             if args.dataset and spec_dataset and args.dataset != spec_dataset:
                 raise UsageError(
@@ -769,7 +902,7 @@ def _plan_run(args: argparse.Namespace) -> _Plan:
             _check_dataset(dataset)
             try:
                 locked_spec = load_locked_research_spec(
-                    args.research_spec, dataset=dataset
+                    spec_path, dataset=dataset
                 )
             except (ValueError, OSError) as exc:
                 raise UsageError(str(exc)) from None
@@ -799,14 +932,14 @@ def _plan_run(args: argparse.Namespace) -> _Plan:
             config_path=config_path, config=config, task_type=task_type,
             dataset=dataset, raw_data_path="", output_dir=output_dir,
             locked_spec=locked_spec,
-            spec_source=args.research_spec if locked_spec else None,
+            spec_source=spec_path if locked_spec else None,
         )
         # The run's own inputs are never an earlier run's output: a spec
         # saved as <folder>/research_spec.json, or --config pointed at a
         # config_snapshot.yaml, must not be refused or deleted.
         inputs = {
             os.path.normcase(os.path.abspath(p))
-            for p in (args.research_spec, config_path) if p
+            for p in (spec_path, config_path) if p
         }
         plan.earlier_run_files = [
             name for name in _existing_run_files(output_dir)
@@ -907,6 +1040,11 @@ def _dry_run(plan: _Plan, args: argparse.Namespace) -> int:
             "OUTPUT_DIR_IN_USE", FAIL, plan.occupied,
             "Add --resume or --overwrite, or choose a new --output-dir.",
         ))
+    if plan.resume and plan.start_state == "ABORTED" and plan.retry_stage is None:
+        findings.insert(0, Finding(
+            "NOT_RESUMABLE", FAIL, _not_resumable_message(plan),
+            "Start a new run instead of resuming this one.",
+        ))
 
     out = _human_stream(args)
     print("DRY RUN - pre-flight summary (nothing is created, changed or sent):", file=out)
@@ -919,7 +1057,16 @@ def _dry_run(plan: _Plan, args: argparse.Namespace) -> int:
     print(f"  raw_data exists:      {os.path.isfile(plan.raw_data_path)}", file=out)
     print(f"  output_dir:           {plan.output_dir}", file=out)
     if plan.resume:
-        print(f"  resume:               yes, from {plan.start_state}", file=out)
+        if plan.start_state in _TERMINAL_FINISHED:
+            resume_note = f"nothing to do: the run already finished ({plan.start_state})"
+        elif plan.start_state == "ABORTED":
+            resume_note = (
+                f"yes, retrying {plan.retry_stage} (the run stopped there)"
+                if plan.retry_stage else "no (see the check below)"
+            )
+        else:
+            resume_note = f"yes, from {plan.start_state}"
+        print(f"  resume:               {resume_note}", file=out)
     elif plan.earlier_run_files:
         what = (
             f"a run stopped at {plan.earlier_run_state}"
@@ -1277,6 +1424,14 @@ def _run(plan: _Plan, args: argparse.Namespace) -> int:
         path, status = _current_status(plan.output_dir, 0.0, trust_existing=True)
         return _report(plan, args, plan.start_state or "", path, status)
 
+    if plan.resume and plan.start_state == "ABORTED" and plan.retry_stage is None:
+        # The orchestrator would load the checkpoint, find nothing it may
+        # retry and stop; saying so here needs no key and builds nothing.
+        print(_not_resumable_message(plan), file=_human_stream(args))
+        path, status = _current_status(plan.output_dir, 0.0, trust_existing=True)
+        return _report(plan, args, "ABORTED", path, status,
+                       abort_info=_not_resumable_record(plan))
+
     findings = _preflight(plan)
     if findings:
         print("Pre-flight checks:", file=sys.stderr)
@@ -1319,9 +1474,10 @@ def _run(plan: _Plan, args: argparse.Namespace) -> int:
             f"the run could not be set up: {type(exc).__name__}: {_one_line(exc)}"
         ) from None
 
-    print(f"Run folder: {plan.output_dir}", file=_human_stream(args))
+    plan.started = True
     invocation_start = datetime.now().timestamp()
     try:
+        print(f"Run folder: {plan.output_dir}", file=_human_stream(args))
         result_ctx = orchestrator.run(user_prompt=args.prompt)
     except KeyboardInterrupt as exc:
         return _interrupted(plan, args, orchestrator, exc, invocation_start)
@@ -1521,6 +1677,7 @@ def main(argv: list[str] | None = None) -> int:
     return value exists to provide.
     """
     args = _build_parser().parse_args(argv)
+    plan: _Plan | None = None
     try:
         with _stop_signals_interrupt():
             plan = _plan_run(args)
@@ -1528,12 +1685,18 @@ def main(argv: list[str] | None = None) -> int:
                 return _dry_run(plan, args)
             return _run(plan, args)
     except KeyboardInterrupt as exc:
-        # Stopped before a run existed (during the checks or set-up).
-        print(f"Stopped by {_stop_reason(exc)} before the run started; "
-              "nothing was run.", file=sys.stderr)
+        started = plan is not None and plan.started
+        if plan is not None and plan.started:
+            # The run had already returned; only its report was cut short.
+            print(f"Stopped by {_stop_reason(exc)} while reporting the "
+                  f"result; see {plan.output_dir}.", file=sys.stderr)
+        else:
+            # Stopped before a run existed (during the checks or set-up).
+            print(f"Stopped by {_stop_reason(exc)} before the run started; "
+                  "nothing was run.", file=sys.stderr)
         if args.json_summary:
             _print_json({"state": "INTERRUPTED", "exit_code": EXIT_INTERRUPTED,
-                         "started": False})
+                         "started": started})
         return EXIT_INTERRUPTED
     except UsageError as exc:
         # One readable line (or a short list) instead of a traceback: an
@@ -1545,6 +1708,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.json_summary:
             _print_json({"error": str(exc), "exit_code": EXIT_USAGE})
         return EXIT_USAGE
+    except Exception as exc:  # noqa: BLE001 - never a bare traceback
+        # Anything else is a defect in this program, not in the request.
+        # Before a run exists it is still exit 1 (nothing was started);
+        # once one does, it is a crash (5) with the traceback in crash.log.
+        text = traceback.format_exc()
+        if _debug(args):
+            print(text, file=sys.stderr)
+        started = plan is not None and plan.started
+        detail = f"{type(exc).__name__}: {_one_line(exc)}"
+        log_path = (
+            _write_crash_log(plan.output_dir, "REPORTING", text)
+            if plan is not None and plan.started else None
+        )
+        where = "after the run" if started else "while preparing the run"
+        hint = (
+            f" (full traceback in {log_path})" if log_path
+            else "" if _debug(args) else " (add --debug to see the traceback)"
+        )
+        print(f"error: unexpected {detail} {where}{hint}", file=sys.stderr)
+        code = EXIT_CRASHED if started else EXIT_USAGE
+        if args.json_summary:
+            _print_json({"error": detail, "exit_code": code})
+        return code
 
 
 def _exit_code_for(ctx: Any, status: dict | None = None) -> int:
