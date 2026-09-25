@@ -200,7 +200,7 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     "r": {"rscript": None, "packages_ok": False},
     "lsar": {"enabled": False, "auto_review": False, "home": None, "ref": None},
     "defaults": {"venue": "EDM", "paper_format": "conference", "budget_usd": None, "keep_awake": True},
-    "author": {"name": None, "affiliation": None},
+    "author": {"name": None},
     "setup_progress": {"last_completed_screen": None},
 }
 

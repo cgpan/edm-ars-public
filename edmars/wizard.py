@@ -121,8 +121,7 @@ NONINTERACTIVE_OPTIONS: dict[str, tuple[str, str]] = {
     "r_action": ("EDMARS_R_ACTION", "skip | find | install (install = find R, then add packages)"),
     "rscript": ("EDMARS_RSCRIPT", "path to Rscript for r_action find/install"),
     "lsar_action": ("EDMARS_LSAR_ACTION", "auto | manual | skip (default skip)"),
-    "author_name": ("EDMARS_AUTHOR_NAME", "your name for the paper's author line"),
-    "affiliation": ("EDMARS_AFFILIATION", "your university or organization"),
+    "author_name": ("EDMARS_AUTHOR_NAME", "your name for the author line of journal-format papers"),
     "venue": ("EDMARS_VENUE", "EDM | JEDM | JLA | AERA_OPEN"),
     "paper_format": ("EDMARS_PAPER_FORMAT", "conference | journal"),
     "budget_usd": ("EDMARS_BUDGET_USD", "spending warning per study in US$ (empty = none)"),
@@ -2013,13 +2012,12 @@ class _Wizard:
         if self.ni:
             self._s10_noninteractive()
             return
-        self.header("S10", "Your name can appear in the author line of your papers. Both questions are optional.")
-        name = self.ask_text("Your name for the paper's author line (press Enter to skip)",
+        self.header("S10", "Your name can appear in the author line of journal-format papers. Conference papers "
+                           "(the default format) list EDM-ARS as the only author; you can add your name to the "
+                           "paper's .tex file yourself. This question is optional.")
+        name = self.ask_text("Your name for the author line of journal-format papers (press Enter to skip)",
                              default=str(self.get("author.name", "") or ""))
-        affiliation = self.ask_text("Your university or organization (press Enter to skip)",
-                                    default=str(self.get("author.affiliation", "") or ""))
         self.set("author.name", name or None)
-        self.set("author.affiliation", affiliation or None)
         self.save()
         answer = self.choose("Change advanced options? Most people skip this.",
                              [("skip", "Skip: keep the recommended defaults"),
@@ -2160,10 +2158,9 @@ class _Wizard:
         self.set("models", {k: v for k, v in chosen.items() if v != defaults.get(k)} if provider_id != "local" else chosen)
 
     def _s10_noninteractive(self) -> None:
-        for option, dotted in (("author_name", "author.name"), ("affiliation", "author.affiliation")):
-            value = self.opt(option)
-            if value is not None:
-                self.set(dotted, str(value) or None)
+        value = self.opt("author_name")
+        if value is not None:
+            self.set("author.name", str(value) or None)
         venue = self.opt("venue")
         if venue is not None:
             venue_id = str(venue).upper().replace(" ", "_")

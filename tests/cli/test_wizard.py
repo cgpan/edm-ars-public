@@ -59,7 +59,6 @@ FULL_FLOW = [
     "later",           # S8 R
     "skip",            # S9 reviewer
     "Ada Lovelace",    # S10 name
-    "",                # S10 affiliation
     "skip",            # S10 advanced
 ]
 
@@ -73,7 +72,9 @@ def test_full_flow_saves_every_answer_and_never_shows_the_key(fx: Fakes) -> None
     assert saved["acknowledged"]["version"] == ACK
     assert saved["provider"] == "deepseek"
     assert saved["author"]["name"] == "Ada Lovelace"
-    assert saved["author"]["affiliation"] is None
+    # Nothing reads an affiliation, so setup no longer asks for one.
+    assert "affiliation" not in saved["author"]
+    assert not any("university" in m.lower() for m in prompt_messages(fx))
     assert saved["latex"]["mode"] == "none"
     assert saved["setup_progress"]["last_completed_screen"] == "S11"
     assert saved["setup_progress"]["completed_at"]
@@ -451,11 +452,12 @@ def test_reviewer_back_from_the_key_returns_to_the_question(fx: Fakes) -> None:
 
 
 def test_advanced_options(fx: Fakes) -> None:
-    fx.ui.script = ["Grace Hopper", "Example University", "show", "budget", "US$2.50", "venue", "JEDM",
+    fx.ui.script = ["Grace Hopper", "show", "budget", "US$2.50", "venue", "JEDM",
                     "format", "journal", "done"]
     assert run("advanced") == 0
     saved = fx.saved()
-    assert saved["author"] == {"name": "Grace Hopper", "affiliation": "Example University"}
+    assert saved["author"] == {"name": "Grace Hopper"}
+    assert "journal-format papers" in fx.ui.output
     assert saved["defaults"]["budget_usd"] == 2.5
     assert saved["defaults"]["venue"] == "JEDM"
     assert saved["defaults"]["paper_format"] == "journal"
@@ -466,14 +468,14 @@ def test_advanced_options(fx: Fakes) -> None:
 
 
 def test_spending_warning_says_where_it_appears_and_when_it_cannot(fx: Fakes) -> None:
-    fx.ui.script = ["", "", "show", "budget", "3", "done"]
+    fx.ui.script = ["", "show", "budget", "3", "done"]
     assert run("advanced") == 0
     assert "a warning appears in the study's progress messages" in fx.ui.output
     assert "prices only for DeepSeek" not in fx.ui.output
 
     fx.write_settings(provider="openai")
     fx.ui.lines.clear()
-    fx.ui.script = ["", "", "show", "budget", "3", "done"]
+    fx.ui.script = ["", "show", "budget", "3", "done"]
     assert run("advanced") == 0
     # Only DeepSeek's models have prices, so the warning can never fire here.
     assert "prices only for DeepSeek's models" in fx.ui.output and "will not appear" in fx.ui.output
@@ -498,7 +500,7 @@ def test_venue_labels_come_from_the_installed_reviewers_calibration(fx: Fakes) -
         "  JLA: {}\n",
         encoding="utf-8")
     fx.write_settings(lsar={"enabled": True, "auto_review": True, "home": str(fx.lsar.home)})
-    fx.ui.script = ["", "", "show", "venue", "AERA_OPEN", "done"]
+    fx.ui.script = ["", "show", "venue", "AERA_OPEN", "done"]
     assert run("advanced") == 0
     labels = _venue_labels(fx)
     assert "benchmark (6.6)" in labels["AERA_OPEN"] and "no benchmark" not in labels["AERA_OPEN"]
@@ -509,7 +511,7 @@ def test_venue_labels_come_from_the_installed_reviewers_calibration(fx: Fakes) -
 
 
 def test_venue_labels_say_nothing_about_reviews_without_the_reviewer(fx: Fakes) -> None:
-    fx.ui.script = ["", "", "show", "venue", DEFAULT, "done"]
+    fx.ui.script = ["", "show", "venue", DEFAULT, "done"]
     assert run("advanced") == 0
     labels = _venue_labels(fx)
     assert not any("benchmark" in label or "reviewer" in label for label in labels.values())

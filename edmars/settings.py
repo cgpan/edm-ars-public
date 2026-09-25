@@ -57,7 +57,9 @@ DEFAULTS: dict[str, Any] = {
         "budget_usd": None,
         "keep_awake": True,
     },
-    "author": {"name": None, "affiliation": None},
+    # Only journal-format papers carry it; the conference template's
+    # byline is fixed to EDM-ARS.
+    "author": {"name": None},
     "setup_progress": {"last_completed_screen": None},
 }
 
