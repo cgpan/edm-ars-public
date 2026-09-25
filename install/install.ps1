@@ -3,6 +3,11 @@
     Installs EDM-ARS and the `edmars` command for your Windows user account.
 
 .DESCRIPTION
+    The release download addresses below work only after the first release
+    (v0.1.0) is published on GitHub Releases. Until then, clone the
+    repository and run this script with -FromLocal .\edm-ars-public (see
+    install/README.md).
+
     Quick route (in PowerShell):
         irm https://github.com/cgpan/edm-ars-public/releases/latest/download/install.ps1 | iex
 

@@ -17,6 +17,22 @@ outputs) and an internet connection. 16 GB of memory is recommended.
 
 ## Quick install
 
+> **Not yet available.** The download links on this page (quick, careful and
+> fully manual install) work only after the first release, v0.1.0, is
+> published on [GitHub Releases](https://github.com/cgpan/edm-ars-public/releases).
+> Until then they give "404 Not Found". Install from a copy of the
+> repository instead (once the `feat/edmars-cli` branch is merged, leave out
+> `-b feat/edmars-cli`):
+>
+> ```powershell
+> git clone -b feat/edmars-cli https://github.com/cgpan/edm-ars-public.git
+> powershell -ExecutionPolicy Bypass -File .\edm-ars-public\install\install.ps1 -FromLocal .\edm-ars-public
+> ```
+> ```sh
+> git clone -b feat/edmars-cli https://github.com/cgpan/edm-ars-public.git
+> sh edm-ars-public/install/install.sh --from-local ./edm-ars-public
+> ```
+
 **Windows** (PowerShell):
 
 ```powershell
