@@ -11,7 +11,7 @@ next — **no model decides control flow** — and a layer of checks verifies th
 output before anything is called finished.
 
 > **Version 5.** Five study types, ten certified estimators, four curated
-> datasets, 70 composable skill units, ~3,000 automated tests. A complete gated
+> datasets, 70 composable skill units, ~3,800 automated tests. A complete gated
 > paper usually takes 20–60 minutes (occasionally about 2 hours; 10–35 minutes
 > without the automated review) and costs about **$0.15** in API spend at DeepSeek
 > rates (token counts measured on one instrumented run, priced at the rates in
@@ -231,7 +231,7 @@ section says `edmars`.
 | `edmars status [STUDY]` | Watch a running study (or the latest one); Ctrl+C leaves it running or stops it. |
 | `edmars runs` | List your studies and how each ended. |
 | `edmars results [STUDY]` | The result in plain words, what to check, and the files; `--open pdf\|folder\|summary`. |
-| `edmars stop` / `edmars resume [STUDY]` | Stop the running study; continue a stopped one from its last finished step. |
+| `edmars stop` / `edmars resume [STUDY]` | Stop the running study; continue a stopped one from its last finished step, with your current settings (AI service, models, reviewer). |
 | `edmars review [STUDY]` | Run the automated reviewer (LSAR) on a finished paper. |
 | `edmars data list\|install\|import\|verify` | Datasets: download (after you accept the terms), use a file you already have, check a file. |
 | `edmars explain TERM` | A plain definition of a term in the results (AUC, SHAP, ATE, DIF, ...). |
@@ -608,7 +608,9 @@ templates/              LaTeX templates (ACM sigconf, APA 7 journal)
 r_helpers/              certified R scripts for psychometrics
 runs/                   example research specs (fixtures/) and run configs (configs/)
 scripts/                onboarding, synthetic-DGP gates, diagnostics
-tests/                  ~3,000 tests
+edmars/                 the `edmars` command: setup wizard, new-study flow, live view, results
+install/                one-command installers (install.ps1, install.sh) and their README
+tests/                  ~3,800 tests (tests/cli/ covers the `edmars` command)
 ```
 
 `SPEC.md` is the original design specification; where it and `config.yaml`
@@ -620,9 +622,10 @@ are current. `CLAUDE.md` records the working rules the project holds itself to.
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements-dev.txt              # also installs requirements-cli.txt
 python -m pytest tests/ -q                       # full suite, offline, about 15 minutes
 python -m pytest tests/ -q -k "not integration"  # skip integration-marked tests
+python -m pytest tests/cli -q                    # the edmars command only, under a minute
 ruff check src/ tests/                           # lint (reports known findings; not yet a gate)
 mypy src/                                        # type check (not yet clean)
 ```

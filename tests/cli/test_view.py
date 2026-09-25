@@ -133,10 +133,27 @@ def test_plain_printer_prints_only_new_things() -> None:
     s3.now_text = "The study stopped before finishing."
     end = printer.lines(s3, now=NOW, clock=210)
     assert any(line.startswith("[x] Step 2 of 7 did not finish") for line in end)
-    assert any(line.startswith("Finished.") for line in end)
+    assert any(line.startswith("Stopped.") for line in end)
+    assert not any(line.startswith("Finished.") for line in end)
     for line in first + new + beat + end:
         assert len(line) <= 80
         assert "✓" not in line and "·" not in line
+
+
+@pytest.mark.parametrize("final", ["ABORTED", "INTERRUPTED"])
+def test_a_study_that_stopped_early_is_not_shown_as_done(final: str) -> None:
+    state = fold([
+        event(1, "run.start", 0, task_type="prediction", dataset="hsls09_public", provider="deepseek"),
+        event(2, "stage.start", 0, stage="FORMULATING"),
+        event(3, "stage.end", 1, stage="FORMULATING", outcome="ok"),
+        event(4, "stage.start", 1, stage="ENGINEERING"),
+        event(5, "run.end", 3, state=final),
+    ])
+    text = view.screen_text(state, width=80, plain=True, now=NOW)
+    overall = next(line for line in text.splitlines() if line.startswith("Overall"))
+    assert "Stopped at step 2 of 7" in overall and "Stopped " in overall
+    assert "Finished" not in text and "Step 7 of 7" not in text
+    assert "#" * 20 not in overall  # the bar shows the one finished step, not all seven
 
 
 def test_watch_returns_zero_for_a_finished_run(run_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -208,7 +225,7 @@ def test_full_log_state_renders(run_home: Path) -> None:
 def test_an_experimental_plan_is_labelled_on_the_live_view(run_home: Path) -> None:
     run = make_run(run_home, log=FULL_LOG, study={"experimental": True})
     text = view.screen_text(load_state(run), width=80, plain=True, now=NOW)
-    assert "[EXPERIMENTAL] plan - not a tested example study" in text
+    assert "[EXPERIMENTAL] not a tested example study" in text
     tested = make_run(run_home, name="2026-09-25_1400_tested_ef01", log=FULL_LOG)
     assert "EXPERIMENTAL" not in view.screen_text(load_state(tested), width=80,
                                                   plain=True, now=NOW)

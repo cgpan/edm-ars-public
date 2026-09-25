@@ -20,6 +20,7 @@ import re
 import shutil
 import signal
 import sys
+import threading
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1637,31 +1638,57 @@ class _StopRequested(KeyboardInterrupt):
 
     A KeyboardInterrupt subclass on purpose: every stage runner catches
     ``Exception``, which lets both pass through to the same handling.
+    ``by_stop_file`` is True when the request came from the run folder's
+    STOP file rather than from a real signal.
     """
 
-    def __init__(self, signum: int) -> None:
+    def __init__(self, signum: int, by_stop_file: bool = False) -> None:
         super().__init__(f"signal {signum}")
         self.signum = signum
+        self.by_stop_file = by_stop_file
 
 
 #: Signals treated like Ctrl-C when present on this platform. SIGBREAK is
-#: what Windows delivers to a process group on Ctrl-Break, the graceful
-#: stop available to a parent that started the run detached.
+#: what Windows delivers to a process group on Ctrl-Break.
 _STOP_SIGNALS = ("SIGTERM", "SIGBREAK", "SIGHUP")
+
+#: Written into the run folder by ``edmars stop``. A run started detached
+#: on Windows has no console, so no signal can reach it gracefully; this
+#: file is how it is asked to stop there (and on macOS/Linux alongside
+#: SIGTERM).
+STOP_FILE = "STOP"
+_STOP_FILE_POLL_S = 0.5
+
+
+def _mtime_ns(path: str) -> int | None:
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
 
 
 @contextlib.contextmanager
-def _stop_signals_interrupt() -> Iterator[None]:
+def _stop_signals_interrupt(output_dir: str | None = None) -> Iterator[None]:
     """Turn the first termination signal into a _StopRequested; ignore
     repeats while the run is being wound down. Restores the previous
-    handlers on exit (main() is also called in-process by tests)."""
+    handlers on exit (main() is also called in-process by tests).
+
+    With ``output_dir``, a STOP file written there while the run is going
+    counts as the same request: a watcher thread interrupts the main
+    thread with SIGTERM, so the run saves its checkpoint and status the
+    same way. It takes effect the next time the main thread runs Python
+    code, not in the middle of one long call to the AI service or of the
+    generated analysis code. A STOP file already there at start (left by
+    an earlier stop) is ignored unless it is written again.
+    """
     fired: list[int] = []
+    from_file: list[bool] = []
 
     def _handler(signum: int, frame: Any) -> None:
         if fired:
             return
         fired.append(signum)
-        raise _StopRequested(signum)
+        raise _StopRequested(signum, by_stop_file=bool(from_file))
 
     previous: dict[int, Any] = {}
     for name in _STOP_SIGNALS:
@@ -1672,9 +1699,31 @@ def _stop_signals_interrupt() -> Iterator[None]:
             previous[sig] = signal.signal(sig, _handler)
         except (ValueError, OSError):  # not the main thread, or unsupported
             continue
+
+    done = threading.Event()
+    watcher: threading.Thread | None = None
+    if output_dir and signal.SIGTERM in previous:
+        stop_path = os.path.join(output_dir, STOP_FILE)
+        baseline = _mtime_ns(stop_path)
+
+        def _watch() -> None:
+            import _thread
+
+            while not done.wait(_STOP_FILE_POLL_S):
+                current = _mtime_ns(stop_path)
+                if current is not None and current != baseline:
+                    from_file.append(True)
+                    _thread.interrupt_main(signal.SIGTERM)
+                    return
+
+        watcher = threading.Thread(target=_watch, name="edm-ars-stop-file", daemon=True)
+        watcher.start()
     try:
         yield
     finally:
+        done.set()
+        if watcher is not None:
+            watcher.join(timeout=2)
         for sig, handler in previous.items():
             try:
                 signal.signal(sig, handler)
@@ -1684,6 +1733,8 @@ def _stop_signals_interrupt() -> Iterator[None]:
 
 def _stop_reason(exc: BaseException) -> str:
     if isinstance(exc, _StopRequested):
+        if exc.by_stop_file:
+            return "a stop request (the STOP file in the run folder)"
         try:
             name = signal.Signals(exc.signum).name
         except ValueError:
@@ -1804,7 +1855,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     plan: _Plan | None = None
     try:
-        with _stop_signals_interrupt():
+        with _stop_signals_interrupt(args.output_dir):
             plan = _plan_run(args)
             if args.dry_run:
                 return _dry_run(plan, args)

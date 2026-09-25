@@ -1,6 +1,7 @@
 """Install and check LSAR, the automated reviewer (github.com/cgpan/LSAR-public).
 
-Install = download the GitHub source archive for ``LSAR_REF``, unpack it
+Install = download the GitHub source archive for ``LSAR_REF`` (a pinned
+commit id), check that the archive records that same commit, unpack it
 safely into ``<user data dir>/lsar/LSAR-public-<ref>``, and install LSAR's
 Python requirements into the SAME interpreter that runs EDM-ARS, because
 the pipeline's review gate imports ``lsar.pipeline`` in-process (defects
@@ -43,9 +44,15 @@ from edmars import estimates, fetch
 from edmars.model import Check
 
 LSAR_REPO = "https://github.com/cgpan/LSAR-public"
-# TODO(release): pin a tagged LSAR release (or a commit id) once the LSAR
-# fix branch is merged and tagged; "master" follows whatever is published.
-LSAR_REF = "master"
+#: The exact LSAR commit EDM-ARS installs: LSAR 0.4.1, the head of LSAR's
+#: ``fix/released-issues`` branch (the scoring-failure fix and the current
+#: ``deepseek-flash`` model id). A full commit id, never a branch name, so
+#: the reviewer that produces the gate scores does not change with whatever
+#: is pushed next. :func:`install` refuses an archive whose recorded commit
+#: is not this one. When that branch is merged, keep this id if the merge
+#: keeps the commit (merge or fast-forward); after a squash merge, set it to
+#: the new commit on master.
+LSAR_REF = "e974bb2226fa39f7989c7dd0c7dbc46989f8ea42"
 
 #: Files the review gate reads under LSAR_HOME (EDM config.yaml review_gate).
 REQUIRED_FILES: tuple[str, ...] = (
@@ -115,6 +122,11 @@ class RequirementPlan:
 
 def archive_url(ref: str = LSAR_REF) -> str:
     return f"{LSAR_REPO}/archive/{ref}.tar.gz"
+
+
+def is_commit_id(ref: str) -> bool:
+    """True for a full 40-character git commit id."""
+    return re.fullmatch(r"[0-9a-fA-F]{40}", ref or "") is not None
 
 
 def _safe_ref(ref: str) -> str:
@@ -604,6 +616,13 @@ def install(
             unpacked, commit = _safe_extract(archive, staging)
         except (tarfile.TarError, EOFError, OSError) as exc:
             raise LsarInstallError(f"The LSAR archive could not be unpacked: {exc}") from exc
+        if is_commit_id(ref) and (commit or "").lower() != ref.lower():
+            # Checked before any of the archive's requirements reach pip.
+            raise LsarInstallError(
+                "The downloaded LSAR is not the version EDM-ARS was tested with "
+                f"(expected commit {ref[:12]}, the download says "
+                f"{(commit or 'nothing')[:12]}). Nothing was installed."
+            )
         problems = _file_problems(unpacked)
         if problems:
             raise LsarInstallError("The downloaded LSAR is incomplete: " + " ".join(problems))

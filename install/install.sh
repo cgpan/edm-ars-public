@@ -1,6 +1,11 @@
 #!/bin/sh
 # EDM-ARS installer for macOS and Linux.
 #
+# The release download addresses below work only after the first release
+# (v0.1.0) is published on GitHub Releases. Until then, clone the
+# repository and run this script with --from-local ./edm-ars-public (see
+# install/README.md).
+#
 # Quick route (downloads and runs this script):
 #   curl -LsSf https://github.com/cgpan/edm-ars-public/releases/latest/download/install.sh | sh
 #
@@ -146,6 +151,8 @@ EDM-ARS installer for macOS and Linux.
 
 Usage: sh install.sh [options]
    or: curl -LsSf https://github.com/cgpan/edm-ars-public/releases/latest/download/install.sh | sh -s -- [options]
+       (that address works only after the first release, v0.1.0, is
+       published; until then use --from-local with a clone of the repository)
 
 Options:
   --yes              do not pause to confirm the plan

@@ -61,6 +61,18 @@ def test_stage_titles_and_reminder_present() -> None:
     assert "edmars disclaimer" in msgs["reminder"]
 
 
+def test_printed_paths_keep_their_backslashes_in_git_bash(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unquoted, Git Bash turns D:\EDM-ARS\studies\run into D:EDM-ARSstudiesrun,
+    # so a pasted `edmars resume ...` found no study.
+    monkeypatch.setattr(endstates.os, "name", "nt")
+    study = r"D:\EDM-ARS\studies\2026-09-25_1200_gpa_ab12"
+    assert endstates.quote_path(study) == f'"{study}"'
+    assert endstates.quote_path("D:/EDM-ARS/studies/run") == "D:/EDM-ARS/studies/run"
+    monkeypatch.setattr(endstates.os, "name", "posix")
+    assert endstates.quote_path("/srv/studies/run") == "/srv/studies/run"
+    assert endstates.quote_path("/srv/my studies/a\\b") == "'/srv/my studies/a\\b'"
+
+
 def test_fill_leaves_unknown_placeholders() -> None:
     assert endstates.fill("a {x} b {y}", x=1) == "a 1 b {y}"
 
@@ -173,6 +185,26 @@ def test_ready_gate_not_run_is_never_a_zero_score(run_home: Path) -> None:
     assert "0.0" not in out.headline + out.why
 
 
+def test_a_review_that_could_not_be_scored_is_explained_in_plain_words(run_home: Path) -> None:
+    # review_gate.py records "lsar_scoring_failed: <up to 200 characters>";
+    # the headline used to be that raw text, cut off mid-sentence, and the
+    # explanation blamed the DeepSeek key or the network.
+    detail = "Stage 5 scoring failed (the scoring model's answer could not be used: No valid JSON" + "x" * 150
+    gate = {"enabled": True, "ran": False, "skip_reason": f"lsar_scoring_failed: {detail}", "passed": None,
+            "score": None, "threshold": None, "advisory": None, "venue": "EDM"}
+    run = _ready_run(run_home, status=v2_status(reason_code="GATE_NOT_RUN", gate=gate))
+    out = classify(run)
+    assert out.label == "Ready, not reviewed" and out.code == "LSAR_SCORING_FAILED"
+    assert out.headline == ("Your paper is written, but the automated peer review gave no score: "
+                            "LSAR wrote a review but could not score it, so there is no score.")
+    assert "lsar_scoring_failed" not in out.headline + out.why + out.fix
+    assert "key" not in out.why and "network" not in out.why
+    assert "edmars review" in (out.command or "")
+    no_result = dict(gate, skip_reason="lsar_no_result")
+    run2 = _ready_run(run_home / "b", status=v2_status(reason_code="GATE_NOT_RUN", gate=no_result))
+    assert classify(run2).headline.endswith("LSAR finished without producing a review.")
+
+
 def test_released_pipeline_gate_that_could_not_run_is_not_reviewed(run_home: Path) -> None:
     # Released code records a gate that never ran as passed=false, score 0.0.
     run = _ready_run(run_home, review_gate_enabled=True,
@@ -271,6 +303,8 @@ def test_aborted_with_code_from_run_status(run_home: Path, code: str) -> None:
     assert out.code == code
     entry = messages()["failures"][code]
     assert out.title == entry["title"]
+    # The step's title from the step list, not the pipeline's state name.
+    assert out.headline == f"{entry['title']} (during: preparing the data)"
     assert out.why and out.fix and out.commands
     assert "{run}" not in (out.command or "") and str(run.name) in (out.command or "") \
         or code in ("CRITIC_ABORT",)

@@ -1955,7 +1955,7 @@ class _Wizard:
             repo = "https://github.com/" + repo.strip("/")
         ref = str(getattr(lsar, "LSAR_REF", "") or "")
         if consent is None:
-            consent = self.yes(f"This downloads LSAR from {repo}" + (f" (version {ref})" if ref else "")
+            consent = self.yes(f"This downloads LSAR from {repo}" + (f" (version {ref[:12]})" if ref else "")
                                + " and installs the Python packages it needs into EDM-ARS's own Python. It takes "
                                  "a few minutes. Go ahead?", default=True)
         if not consent:
@@ -1973,8 +1973,8 @@ class _Wizard:
             return False
         self.set("lsar.home", str(home))
         if ref and not self.get("lsar.ref", None):
-            # install() saves the exact commit it unpacked; the constant is
-            # only a branch name ("master"), so it must not replace that.
+            # install() saves the exact commit it unpacked; the constant
+            # is only a fallback, so it must not replace that.
             self.set("lsar.ref", ref)
         self.save()
         self.ok(f"LSAR is installed in {home}.")

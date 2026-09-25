@@ -118,9 +118,14 @@ def invariant_title(code: str) -> str:
 
 
 def quote_path(path: Path | str) -> str:
-    """A path as it should be typed in a terminal command."""
+    """A path as it should be typed in a terminal command.
+
+    A backslash is never left bare: Git Bash drops it (D:\\studies\\x arrives
+    as D:studiesx), and cmd, PowerShell and Git Bash all keep a double-quoted
+    Windows path intact.
+    """
     text = str(path)
-    if re.fullmatch(r"[A-Za-z0-9_./:\\-]+", text):
+    if re.fullmatch(r"[A-Za-z0-9_./:-]+", text):
         return text
     if os.name == "nt":
         return f'"{text}"'
@@ -409,7 +414,8 @@ def _gate_facts(run_dir: Path, state: RunState, status: dict[str, Any] | None) -
     return gate
 
 
-def _gate_skip_text(reason: Any) -> str:
+def gate_skip_text(reason: Any) -> str:
+    """Why the automated peer review did not run, in plain words."""
     text = str(reason or "")
     table = messages().get("gate_skip_reasons") or {}
     key = text.split(":", 1)[0].strip()
@@ -421,6 +427,8 @@ def _gate_code(reason: Any) -> str:
     text = str(reason or "")
     if text.startswith(("lsar_not_found", "lsar_import_failed", "not_available")):
         return "LSAR_MISSING"
+    if text.startswith("lsar_scoring_failed"):
+        return "LSAR_SCORING_FAILED"
     return "LSAR_FAILED"
 
 
@@ -471,17 +479,32 @@ def _resumable(code: str, status: dict[str, Any] | None) -> bool:
     return code not in _NOT_RESUMABLE
 
 
+def step_words(stage: str | None) -> str | None:
+    """A pipeline state name as the step's title in the step list, for use
+    mid-sentence: ENGINEERING -> "preparing the data"."""
+    if not stage:
+        return None
+    stages = messages().get("stages") or {}
+    entry = stages.get(str(stage).upper()) if isinstance(stages, dict) else None
+    title = entry.get("title") if isinstance(entry, dict) else None
+    if not title:
+        return str(stage).replace("_", " ").lower()
+    title = str(title)
+    return title[:1].lower() + title[1:]
+
+
 def _stopped(run_dir: Path, state: RunState, code: str, message: str,
              stage: str | None, final: str | None,
              status: dict[str, Any] | None = None) -> Outcome:
     entry = failure_entry(code)
-    ctx = _ctx(run_dir, state, reason=message or "no details recorded", stage=stage)
+    step = step_words(stage)
+    ctx = _ctx(run_dir, state, reason=message or "no details recorded", stage=step)
     title = fill(entry.get("title"), **ctx) or code
     labels = messages().get("outcomes") or {}
     resumable = _resumable(code, status)
     headline = title
-    if stage:
-        headline = f"{title} (during: {stage.lower()})"
+    if step:
+        headline = f"{title} (during: {step})"
     return Outcome(
         label=str(labels.get("stopped", "Stopped")),
         headline=headline,
@@ -620,7 +643,7 @@ def _concerns(run_dir: Path, state: RunState, status: dict[str, Any] | None,
     if not skip_gate:
         gate = _gate_facts(run_dir, state, status)
         if gate.get("enabled") and gate.get("ran") is False:
-            out.append(f"Automated peer review did not run: {_gate_skip_text(gate.get('skip_reason'))}")
+            out.append(f"Automated peer review did not run: {gate_skip_text(gate.get('skip_reason'))}")
         elif gate.get("ran") and gate.get("passed") is False and not gate.get("advisory"):
             out.append(_gate_sentence(gate))
     lit = status.get("literature") if isinstance(status, dict) else None
@@ -731,9 +754,10 @@ def _ready(run_dir: Path, state: RunState, status: dict[str, Any] | None,
         fix = "Read review_report.json and check the paper against each concern."
     elif code == "GATE_NOT_RUN":
         label = str(labels.get("not_reviewed", "Ready, not reviewed"))
-        reason = _gate_skip_text(gate.get("skip_reason"))
-        headline = f"Your paper is written, but the automated peer review did not run: {reason}"
+        reason = gate_skip_text(gate.get("skip_reason"))
         out_code = _gate_code(gate.get("skip_reason"))
+        verb = "gave no score" if out_code == "LSAR_SCORING_FAILED" else "did not run"
+        headline = f"Your paper is written, but the automated peer review {verb}: {reason}"
         entry = failure_entry(out_code)
         why = fill(entry.get("why"), **ctx)
         fix = fill(entry.get("fix"), **ctx)
@@ -778,9 +802,11 @@ __all__ = [
     "code_from_text",
     "failure_entry",
     "fill",
+    "gate_skip_text",
     "invariant_title",
     "load_findings",
     "messages",
     "quote_path",
+    "step_words",
     "redact",
 ]

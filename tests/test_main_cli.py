@@ -917,6 +917,50 @@ def test_sigterm_is_handled_like_ctrl_c_and_handlers_are_restored(
     assert signal.getsignal(signal.SIGTERM) == before
 
 
+def _wait_for_stop(seconds: float) -> None:
+    """Keep the main thread in Python code so an interrupt can land."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
+def test_a_stop_file_written_during_the_run_stops_it_like_sigterm(
+    env: dict[str, Path], stopping: type[_StoppingOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # `edmars stop` on Windows cannot signal a detached run; it writes
+    # <run>/STOP and the run has to notice it and save its state.
+    run_dir = env["root"] / "run"
+
+    def write_stop_then_wait() -> None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "STOP").write_text("now", encoding="utf-8")
+        _wait_for_stop(10)
+        raise AssertionError("the STOP file was never noticed")
+
+    stopping.raise_in_run = write_stop_then_wait  # type: ignore[assignment]
+    assert _run(env) == 4
+    assert stopping.finalized[0][0] == "INTERRUPTED"
+    assert "STOP file" in stopping.finalized[0][1]
+
+
+def test_a_stop_file_left_from_an_earlier_stop_is_ignored(
+    env: dict[str, Path], stopping: type[_StoppingOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = env["root"] / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "STOP").write_text("old", encoding="utf-8")
+
+    def wait_then_ctrl_c() -> None:
+        _wait_for_stop(1.5)  # three polls of the watcher
+        raise KeyboardInterrupt
+
+    stopping.raise_in_run = wait_then_ctrl_c  # type: ignore[assignment]
+    assert _run(env) == 4
+    assert stopping.finalized == [("INTERRUPTED", "Stopped by Ctrl-C")]
+
+
 def test_an_orchestrator_without_finalize_still_exits_4(
     env: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

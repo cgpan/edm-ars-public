@@ -14,7 +14,8 @@ What this module writes into a run folder:
 * ``research_spec.locked.json`` -- the study plan, when there is one.
 * ``runner.json`` -- how the run was launched (argv, pid, times), so
   ``edmars stop`` / ``edmars resume`` / the live view can find it again.
-* ``STOP`` -- a flag file written by ``stop()``.
+* ``STOP`` -- a flag file written by ``stop()``. The pipeline watches for
+  it and stops the way it does on SIGTERM (checkpoint and status saved).
 
 One study runs at a time: ``<data dir>/active_run.json`` holds the
 running study's pid and folder, and is treated as stale once that pid is
@@ -825,7 +826,10 @@ def launch(settings: dict[str, Any], plan: "StudyPlan") -> Path:
 def stop(run_dir: Path | str) -> None:
     """Ask the study to stop, then end its process tree after a grace period.
 
-    Finished steps stay on disk; ``resume`` continues from the last one.
+    The STOP file asks the pipeline to wind down and save its state (on
+    macOS/Linux it also gets SIGTERM). Whatever is still running 30 s
+    later is ended. Finished steps stay on disk; ``resume`` continues from
+    the last one.
     """
     run_dir = Path(run_dir)
     if not run_dir.is_dir():
@@ -845,38 +849,123 @@ def stop(run_dir: Path | str) -> None:
     _release_lock(run_dir)
 
 
-def _strip_resume_flags(argv: list[str]) -> list[str]:
-    out: list[str] = []
-    skip_next = False
-    for i, token in enumerate(argv):
-        if skip_next:
-            skip_next = False
-            continue
-        if token in ("--resume", "--dry-run"):
-            continue
-        if token == "--retry-stage":
-            nxt = argv[i + 1] if i + 1 < len(argv) else ""
-            skip_next = bool(nxt) and not nxt.startswith("--")
-            continue
-        if token.startswith("--retry-stage="):
-            continue
-        out.append(token)
-    return out
+#: What a study folder may say about its dataset, venue and failed step.
+#: Anything else is ignored: the folder is data, not instructions.
+_SAFE_DATASET = re.compile(r"[a-z0-9][a-z0-9_]{0,63}")
+_SAFE_VENUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,39}")
+_PIPELINE_STEPS = ("FORMULATING", "ENGINEERING", "ANALYZING", "CRITIQUING", "REVISING",
+                   "WRITING", "REVIEWING", "VERIFYING")
 
 
-def _reconstruct_argv(run_dir: Path) -> list[str]:
-    """argv for a run that was not started by edmars (no runner.json)."""
+def _read_yaml(path: Path) -> dict[str, Any]:
+    try:
+        return as_dict(yaml.safe_load(path.read_text(encoding="utf-8")))
+    except (OSError, yaml.YAMLError):
+        return {}
+
+
+def _argv_value(argv: Any, flag: str) -> str | None:
+    """The value given for ``flag`` in a saved argv (``--flag V`` or ``--flag=V``)."""
+    if not isinstance(argv, list):
+        return None
+    tokens = [str(t) for t in argv]
+    for i, token in enumerate(tokens):
+        if token == flag and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if token.startswith(flag + "="):
+            return token[len(flag) + 1:]
+    return None
+
+
+def _resume_study(run_dir: Path, runner: dict[str, Any]) -> dict[str, Any]:
+    """The study's own choices, read from the folder and checked.
+
+    A study folder can come from anywhere (a shared drive, a colleague),
+    so only plain values are taken from it, each checked against what
+    edmars itself writes; anything else falls back to a safe default.
+    The pipeline takes the dataset, study type and spec of a resumed run
+    from its checkpoint anyway.
+    """
+    from edmars.model import TASK_TYPES
+
+    study = as_dict(runner.get("study"))
+    old_cfg = _read_yaml(run_dir / "run_config.yaml")
     checkpoint = _read_json(run_dir / "checkpoint.json")
-    dataset = checkpoint.get("dataset_name") or "hsls09_public"
-    config = run_dir / "run_config.yaml"
-    if not config.exists():
-        config = Path(paths.app_root()) / "config.yaml"
-    argv = [sys.executable, "-m", "src.main", "--config", str(config),
-            "--output-dir", str(run_dir), "--dataset", str(dataset)]
+    gate = as_dict(old_cfg.get("review_gate"))
+
+    task_type = str(study.get("task_type") or checkpoint.get("task_type")
+                    or as_dict(old_cfg.get("pipeline")).get("task_type") or "")
+    if task_type not in TASK_TYPES:
+        task_type = "prediction"
+    dataset = str(study.get("dataset") or checkpoint.get("dataset_name")
+                  or _argv_value(runner.get("argv"), "--dataset") or "")
+    venue = str(study.get("venue") or gate.get("venue") or "EDM")
+    if not _SAFE_VENUE.fullmatch(venue):
+        venue = "EDM"
+    paper_format = study.get("paper_format") or as_dict(old_cfg.get("writer")).get("venue_format")
+    if "review_requested" in study:
+        review = study.get("review_requested") is True
+    elif "review" in study:
+        review = study.get("review") is True
+    else:
+        review = gate.get("enabled") is True
+    prompt = _argv_value(runner.get("argv"), "--prompt")
+    return {
+        "task_type": task_type,
+        "dataset": dataset if _SAFE_DATASET.fullmatch(dataset) else None,
+        "venue": venue,
+        "paper_format": "journal" if paper_format == "journal" else "conference",
+        "review": review,
+        "prompt": prompt if prompt and prompt.strip() else None,
+    }
+
+
+def _resume_argv(run_dir: Path, study: dict[str, Any]) -> list[str]:
+    """The pipeline command for a resumed study, built here, never read
+    from the folder: runner.json's saved argv could name any program."""
+    argv = [sys.executable, "-m", "src.main",
+            "--config", str(run_dir / "run_config.yaml"),
+            "--output-dir", str(run_dir)]
+    if study.get("dataset"):
+        argv += ["--dataset", str(study["dataset"])]
     locked = run_dir / "research_spec.locked.json"
-    if locked.exists():
+    if locked.is_file():
         argv += ["--research-spec", str(locked)]
+    if study.get("prompt"):
+        # One token, so a question that starts with "-" is not read as a flag.
+        argv.append("--prompt=" + str(study["prompt"]))
     return argv
+
+
+def _refresh_run_config(run_dir: Path, settings: dict[str, Any], study: dict[str, Any]) -> dict[str, Any]:
+    """Write run_config.yaml again from this computer's settings.
+
+    The folder's copy could point the pipeline at another Python, another
+    Rscript, another LSAR (imported into the process that holds the keys)
+    or another server to send the keys to. The replaced copy is kept as
+    run_config.previous.yaml when it differs.
+    """
+    from edmars.model import StudyPlan
+
+    plan = StudyPlan(
+        task_type=str(study["task_type"]),
+        dataset=str(study.get("dataset") or ""),
+        research_question=str(study.get("prompt") or ""),
+        venue=str(study["venue"]),
+        paper_format=str(study["paper_format"]),
+        review=bool(study["review"]),
+    )
+    cfg = build_effective_config(settings, plan)
+    path = run_dir / "run_config.yaml"
+    text = yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)
+    try:
+        old = path.read_text(encoding="utf-8")
+    except OSError:
+        old = None
+    if old is not None and old != text:
+        _write_text_atomic(run_dir / "run_config.previous.yaml", old)
+    _write_text_atomic(path, text)
+    return cfg
 
 
 def retry_stage_support(app_root: Path | None = None) -> tuple[bool, bool]:
@@ -932,7 +1021,13 @@ def _failed_stage(run_dir: Path) -> str | None:
 
 
 def resume(run_dir: Path | str) -> None:
-    """Start a stopped study again from its last finished step."""
+    """Start a stopped study again from its last finished step.
+
+    The command and run_config.yaml are rebuilt from this computer's
+    settings; the folder only supplies plain, checked values (study type,
+    dataset name, venue, the research question), because a study folder
+    can come from someone else.
+    """
     run_dir = Path(run_dir)
     if not run_dir.is_dir():
         raise RunnerError(f"There is no study folder at {run_dir}.")
@@ -947,10 +1042,8 @@ def resume(run_dir: Path | str) -> None:
             "This study already finished, so there is nothing to resume. "
             "See it with: edmars results   Start another with: edmars new"
         )
-    argv = runner.get("argv") if isinstance(runner.get("argv"), list) else None
-    argv = _strip_resume_flags([str(a) for a in argv]) if argv else _reconstruct_argv(run_dir)
-    if not argv or not Path(argv[0]).exists():
-        argv = [sys.executable] + argv[1:]
+    study = _resume_study(run_dir, runner)
+    argv = _resume_argv(run_dir, study)
     argv.append("--resume")
 
     if state.final_state == "ABORTED":
@@ -961,7 +1054,9 @@ def resume(run_dir: Path | str) -> None:
             raise RunnerError(
                 f"This study cannot be resumed: {outcome.title}. {outcome.fix}".strip()
             )
-        supported, takes_value = retry_stage_support(Path(runner.get("app_root") or paths.app_root()))
+        # This install's pipeline is the one that runs, whatever
+        # runner.json says the study was started with.
+        supported, takes_value = retry_stage_support(Path(paths.app_root()))
         if not supported:
             raise RunnerError(
                 "This study stopped with an error, and this version of the pipeline "
@@ -971,7 +1066,7 @@ def resume(run_dir: Path | str) -> None:
         argv.append("--retry-stage")
         if takes_value:
             stage = _failed_stage(run_dir)
-            if stage:
+            if stage in _PIPELINE_STEPS:
                 argv.append(stage)
 
     settings = _load_settings()
@@ -982,14 +1077,13 @@ def resume(run_dir: Path | str) -> None:
             "finish, or stop it with: edmars stop"
         )
     _acquire_lock(run_dir)
-    study = as_dict(runner.get("study"))
-    config: dict[str, Any] = {}
     try:
-        config = as_dict(yaml.safe_load((run_dir / "run_config.yaml").read_text(encoding="utf-8")))
-    except (OSError, yaml.YAMLError):
-        config = {}
+        config = _refresh_run_config(run_dir, settings, study)
+    except (OSError, yaml.YAMLError, ValueError) as exc:
+        _release_lock(run_dir)
+        raise RunnerError(f"Could not write the study's settings file: {exc}") from exc
     review = bool(as_dict(config.get("review_gate")).get("enabled"))
-    provider = str(study.get("provider") or _sget(settings, "provider", "deepseek"))
+    provider = str(_sget(settings, "provider", "deepseek"))
     env = child_env(settings, provider=provider, review=review, run_id=run_dir.name)
 
     # Keep the earlier console output instead of letting the new process
@@ -1009,7 +1103,13 @@ def resume(run_dir: Path | str) -> None:
         pass
 
     new_pid, create_time = _spawn(run_dir, argv, env, settings)
-    runner = runner or {"schema": 1, "study": study, "created_at": _utc_now()}
+    runner = runner or {"schema": 1, "created_at": _utc_now(), "study": {
+        "task_type": study["task_type"], "dataset": study.get("dataset"),
+        "venue": study["venue"], "paper_format": study["paper_format"]}}
+    runner_study = as_dict(runner.get("study"))
+    runner_study["provider"] = provider  # the service the resumed part uses
+    runner_study["review"] = review
+    runner["study"] = runner_study
     now = _utc_now()
     runner.update({
         "argv": argv,

@@ -444,6 +444,24 @@ def test_resume_confirms_spending(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resumed == [folder]
 
 
+def test_resume_warns_about_a_folder_from_outside_the_studies_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    accept_disclosure()
+    resumed: list[Path] = []
+    fake_module(monkeypatch, "runner", resume=resumed.append)
+    own = make_study()
+    result = invoke("resume", str(own), "--yes", "--no-watch")
+    assert result.exit_code == 0, result.output
+    assert "not in your studies folder" not in result.output
+    shared = tmp_path / "shared" / "2026-09-25_1402_gpa_ab12"
+    shared.mkdir(parents=True)
+    result = invoke("resume", str(shared), "--yes", "--no-watch")
+    assert result.exit_code == 0, result.output
+    assert "not in your studies folder" in " ".join(result.output.split())
+    assert resumed == [own.resolve(), shared.resolve()]
+
+
 def test_review_adapts_to_the_lsar_function_signature(monkeypatch: pytest.MonkeyPatch) -> None:
     accept_disclosure()
     folder = make_study()
@@ -491,6 +509,21 @@ def test_runs_lists_and_prints_json(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert parsed[0]["label"] == "Ready"
     fake_module(monkeypatch, "runner", list_runs=lambda s: [])
     assert "No studies yet" in invoke("runs").output
+
+
+def test_runs_shows_start_times_in_local_time(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The live view shows local times; `edmars runs` used to print the raw
+    # UTC value (2026-09-25T21:02:01Z) for the same study.
+    from datetime import datetime, timezone
+
+    utc = "2026-09-25T21:02:01Z"
+    local = datetime(2026, 9, 25, 21, 2, 1, tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    items = [{"name": "2026-09-25_1702_gpa_ab12", "started_at": utc, "label": "Ready", "question": "Q?"}]
+    fake_module(monkeypatch, "runner", list_runs=lambda s: items)
+    result = invoke("runs")
+    assert result.exit_code == 0
+    assert local in result.output and utc not in result.output
+    assert json.loads(invoke("runs", "--json").stdout)[0]["started_at"] == utc
 
 
 # --- data ----------------------------------------------------------------------------------

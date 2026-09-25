@@ -26,9 +26,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from edmars.endstates import READY_KINDS, Outcome, classify, messages, quote_path
+from edmars.endstates import READY_KINDS, Outcome, classify, gate_skip_text, messages, quote_path
 from edmars.runstate import (
     EXPERIMENTAL_LINE,
+    EXPERIMENTAL_NOTE,
     EXPERIMENTAL_WHY,
     RunState,
     fmt_ci,
@@ -117,7 +118,9 @@ def _gate_line(state: RunState, outcome: Outcome) -> str | None:
     m = state.metrics
     if m.get("gate_ran") is False:
         reason = m.get("gate_skip_reason")
-        return f"Automated peer review (LSAR): did not run{f' ({reason})' if reason else ''}"
+        verb = "no score" if outcome.code == "LSAR_SCORING_FAILED" else "did not run"
+        text = f"Automated peer review (LSAR): {verb}."
+        return f"{text} {gate_skip_text(reason)}" if reason else text
     if m.get("gate_score") is None:
         if state.lsar_enabled:
             return "Automated peer review (LSAR): no score"
@@ -189,10 +192,13 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
     def add(text: str = "", st: str = "") -> None:
         out.append((text, st))
 
+    def experimental() -> None:
+        if state.experimental:
+            add(f"{EXPERIMENTAL_LINE}. {EXPERIMENTAL_NOTE}", "bold yellow")
+
     if outcome.kind in READY_KINDS:
         add(f"{g} {outcome.label}", style)
-        if state.experimental:
-            add(EXPERIMENTAL_LINE, "bold")
+        experimental()
         if state.question:
             add(f'"{state.question}"', "italic")
         add(outcome.headline)
@@ -228,16 +234,20 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
         ]
         if state.metrics.get("gate_score") is None:
             actions.append(("Automated peer review", f"edmars review {run}"))
-        elif outcome.code in ("LSAR_MISSING", "LSAR_FAILED"):
+        elif outcome.code in ("LSAR_MISSING", "LSAR_FAILED", "LSAR_SCORING_FAILED"):
             actions.append(("Automated peer review", f"edmars review {run}"))
-        actions.append(("Start a new study", "edmars new"))
         if outcome.code in ("LSAR_MISSING",):
-            actions.insert(-1, ("First set up LSAR", "edmars setup lsar"))
+            # Setting up the reviewer comes before asking it for a review.
+            review_at = next((i for i, (label, _) in enumerate(actions)
+                              if label == "Automated peer review"), len(actions))
+            actions.insert(review_at, ("First set up LSAR", "edmars setup lsar"))
+        actions.append(("Start a new study", "edmars new"))
         for label, cmd in actions:
             add(f"  {label}:")
             add(f"    {cmd}", "bold")
     elif outcome.kind == "running":
         add(f"{g} {outcome.label}", style)
+        experimental()
         add(outcome.headline)
         if outcome.fix:
             add(outcome.fix)
@@ -246,8 +256,7 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
         return out
     else:
         add(f"{g} {outcome.label}: {outcome.title or outcome.headline}", style)
-        if state.experimental:
-            add(EXPERIMENTAL_LINE, "bold")
+        experimental()
         if state.question:
             add(f'"{state.question}"', "italic")
         add()

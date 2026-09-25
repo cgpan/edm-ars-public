@@ -3,6 +3,11 @@
     Installs EDM-ARS and the `edmars` command for your Windows user account.
 
 .DESCRIPTION
+    The release download addresses below work only after the first release
+    (v0.1.0) is published on GitHub Releases. Until then, clone the
+    repository and run this script with -FromLocal .\edm-ars-public (see
+    install/README.md).
+
     Quick route (in PowerShell):
         irm https://github.com/cgpan/edm-ars-public/releases/latest/download/install.ps1 | iex
 
@@ -21,10 +26,12 @@
         <Dir>\python            a private Python 3.11 (your own Python is untouched)
         <Dir>\uv                the uv tool, only if you do not have it already
         %USERPROFILE%\.local\bin\edmars.cmd   the command you type
+        %USERPROFILE%\.local\bin\edmars       the same command for Git Bash
     Default <Dir>: %LOCALAPPDATA%\edm-ars. To remove it: run `edmars
     uninstall` (settings and keys; it asks about datasets and studies), then
-    delete the program files it lists (app, venv-*, python, uv in <Dir>) and
-    edmars.cmd. Not all of <Dir>: your data folder is the same folder.
+    delete the program files it lists (app, venv-*, python, uv in <Dir>),
+    edmars.cmd and edmars. Not all of <Dir>: your data folder is the same
+    folder.
     <Dir>\install.json lists everything this installer created.
 
     This script never closes your PowerShell window: it has no `exit`.
@@ -42,7 +49,8 @@
     Install from a local checkout folder or an edm-ars-X.Y.Z.tar.gz file
     (for testing). Also read from the EDMARS_INSTALL_SOURCE variable.
 .PARAMETER BinDir
-    Put edmars.cmd in this folder instead of %USERPROFILE%\.local\bin.
+    Put edmars.cmd (and edmars, for Git Bash) in this folder instead of
+    %USERPROFILE%\.local\bin.
 .PARAMETER NoModifyPath
     Do not add the command's folder to your user PATH.
 .PARAMETER DryRun
@@ -158,11 +166,15 @@
 
     # Download URL to DEST. A file:// URL or a plain path is copied, which
     # lets EDMARS_RELEASE_BASE_URL point at a local dist\ folder for testing.
+    # Only https:// is downloaded, as in install.sh: over plain http:// the
+    # archive and its SHA256SUMS could both be swapped on the way.
     function Get-Download([string]$Url, [string]$Dest) {
         if ($Url -match '^file:') {
             Copy-Item -LiteralPath ([uri]$Url).LocalPath -Destination $Dest -Force
-        } elseif ($Url -match '^https?://') {
+        } elseif ($Url -match '^https://') {
             Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+        } elseif ($Url -match '^[A-Za-z][A-Za-z0-9+.-]*://') {
+            throw "only https:// addresses are downloaded, not $Url"
         } else {
             Copy-Item -LiteralPath $Url -Destination $Dest -Force
         }
@@ -247,6 +259,31 @@
             }
         }
         return $Path.Replace('%', '%%')
+    }
+
+    # The same command for Git Bash and other POSIX shells on Windows. bash
+    # does not use PATHEXT, so typing `edmars` there never finds edmars.cmd.
+    # cmd.exe and PowerShell keep running edmars.cmd (they look for the
+    # .cmd first). Paths are single-quoted for sh; the program path uses
+    # forward slashes, which Git Bash runs as they are.
+    function Get-ShLauncherText([string]$Mark, [string]$Ver, [string]$AppDir, [string]$Uv, [string]$VenvPy) {
+        $q = { param([string]$t) "'" + $t.Replace("'", "'\''") + "'" }
+        $lines = @(
+            '#!/bin/sh',
+            "# $Mark (EDM-ARS $Ver).",
+            '# For Git Bash, which does not run edmars.cmd when you type edmars. Re-run the installer to update it.',
+            ('EDMARS_APP_ROOT=' + (& $q $AppDir)),
+            'export EDMARS_APP_ROOT',
+            'PYTHONUTF8=1',
+            'export PYTHONUTF8',
+            'unset PYTHONHOME PYTHONPATH',
+            ('if [ -e ' + (& $q ($Uv -replace '\\', '/')) + ' ]; then'),
+            ('    EDMARS_UV=' + (& $q $Uv)),
+            '    export EDMARS_UV',
+            'fi',
+            ('exec ' + (& $q ($VenvPy -replace '\\', '/')) + ' -P -m edmars "$@"')
+        )
+        return ($lines -join "`n") + "`n"
     }
 
     # Copy a checkout without git history, caches, raw data, run outputs or
@@ -431,6 +468,9 @@
             $ver = $requested
             if ($env:EDMARS_RELEASE_BASE_URL) {
                 $releaseBase = $env:EDMARS_RELEASE_BASE_URL.TrimEnd('/')
+                if (($releaseBase -match '^[A-Za-z][A-Za-z0-9+.-]*://') -and ($releaseBase -notmatch '^(https://|file:)')) {
+                    Stop-Install "EDMARS_RELEASE_BASE_URL must start with https:// (or be a local folder or a file:// address). A download over plain http:// could be altered on the way, so nothing was downloaded."
+                }
             } elseif ($requested) {
                 $releaseBase = "https://github.com/$EdmarsRepo/releases/download/v$requested"
             } else {
@@ -492,7 +532,7 @@
         Say "Computer:      $facts"
         if ($platformNote) { Warn $platformNote }
         Say "Install into:  $base"
-        Say "Command in:    $(Join-Path $bin 'edmars.cmd')"
+        Say "Command in:    $(Join-Path $bin 'edmars.cmd') (and edmars, for Git Bash)"
         if ($FromLocal) {
             Say "EDM-ARS from:  $sourceText (local copy, version label '$ver')"
         } else {
@@ -516,7 +556,7 @@
             Say '  4. Download EDM-ARS from GitHub and check its SHA-256 fingerprint.'
         }
         Say '  5. Install EDM-ARS and the packages it needs (about 1.5 GB).'
-        Say "  6. Create the command $(Join-Path $bin 'edmars.cmd')."
+        Say "  6. Create the command $(Join-Path $bin 'edmars.cmd') (and $(Join-Path $bin 'edmars') for Git Bash)."
         if ($NoModifyPath) {
             Say '  7. Leave your PATH alone (-NoModifyPath).'
         } else {
@@ -782,6 +822,16 @@
         [System.IO.File]::WriteAllText($launcherTmp, $cmdText, $oem)
         Move-Item -LiteralPath $launcherTmp -Destination $launcher -Force
         Say "Created $launcher"
+        $shLauncher = Join-Path $bin 'edmars'
+        if ((Test-Path -LiteralPath $shLauncher) -and -not (Select-String -LiteralPath $shLauncher -SimpleMatch $LauncherMark -Quiet)) {
+            Warn "$shLauncher already exists and was not made by this installer, so it was left alone. In Git Bash, type edmars.cmd instead of edmars."
+            $shLauncher = $null
+        } else {
+            $shTmp = Join-Path $bin ('.edmars-sh-' + $PID + '.tmp')
+            [System.IO.File]::WriteAllText($shTmp, (Get-ShLauncherText $LauncherMark $ver $appDir $uv $venvPy), (New-Object System.Text.UTF8Encoding $false))
+            Move-Item -LiteralPath $shTmp -Destination $shLauncher -Force
+            Say "Created $shLauncher (the same command, for Git Bash)"
+        }
 
         # ---- 7. PATH --------------------------------------------------------------------
         Step '7/8' 'PATH'
@@ -867,6 +917,7 @@
             uv_private       = $uvPrivate
             bin_dir          = $bin
             launcher         = $launcher
+            sh_launcher      = $shLauncher
             path_modified    = $pathModified
             path_entry       = $pathEntry
         }

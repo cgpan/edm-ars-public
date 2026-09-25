@@ -6,16 +6,34 @@ leaves any Python you already have alone. After it finishes, the setup
 wizard (`edmars setup`) walks you through the rest: AI service key, datasets,
 PDF tools and the optional reviewer.
 
-**Supported:** Windows 10 (version 1809 or newer) and Windows 11, 64-bit;
-macOS on Apple Silicon (M1 or newer); Linux on x86_64 or arm64 with glibc
-(Ubuntu, Debian, Fedora and similar), best effort. **Not supported:** Intel
-Macs (numba, llvmlite and scs no longer publish Intel Mac builds of the
-tested versions), 32-bit Windows, and musl-based Linux such as Alpine.
+**Supported:** Windows 10 (version 1809 or newer) and Windows 11, 64-bit
+(tested on Windows 11). **Untested preview:** macOS on Apple Silicon (M1 or
+newer), and Linux on x86_64 or arm64 with glibc (Ubuntu, Debian, Fedora and
+similar, best effort). The installer is written for them, but it has not yet
+been run on a Mac or a Linux computer. **Not supported:** Intel Macs (numba,
+llvmlite and scs no longer publish Intel Mac builds of the tested versions),
+32-bit Windows, and musl-based Linux such as Alpine.
 
 You need about 6 GB of free disk space (packages, datasets and study
 outputs) and an internet connection. 16 GB of memory is recommended.
 
 ## Quick install
+
+> **Not yet available.** The download links on this page (quick, careful and
+> fully manual install) work only after the first release, v0.1.0, is
+> published on [GitHub Releases](https://github.com/cgpan/edm-ars-public/releases).
+> Until then they give "404 Not Found". Install from a copy of the
+> repository instead (once the `feat/edmars-cli` branch is merged, leave out
+> `-b feat/edmars-cli`):
+>
+> ```powershell
+> git clone -b feat/edmars-cli https://github.com/cgpan/edm-ars-public.git
+> powershell -ExecutionPolicy Bypass -File .\edm-ars-public\install\install.ps1 -FromLocal .\edm-ars-public
+> ```
+> ```sh
+> git clone -b feat/edmars-cli https://github.com/cgpan/edm-ars-public.git
+> sh edm-ars-public/install/install.sh --from-local ./edm-ars-public
+> ```
 
 **Windows** (PowerShell):
 
@@ -110,7 +128,7 @@ and `curl -LsSf <url>/install.sh | sh -s -- --no-onboard` elsewhere.
 | Its Python packages | `<dir>\venv-<version>` | `<dir>/venv-<version>` | same |
 | Private Python 3.11 | `<dir>\python` | `<dir>/python` | same |
 | uv (only if you had none) | `<dir>\uv` | `<dir>/uv` | same |
-| The `edmars` command | `%USERPROFILE%\.local\bin\edmars.cmd` | `~/.local/bin/edmars` | same |
+| The `edmars` command | `%USERPROFILE%\.local\bin\edmars.cmd` (and `edmars` beside it, for Git Bash) | `~/.local/bin/edmars` | same |
 | Install record | `<dir>\install.json` | `<dir>/install.json` | same |
 
 When you install a new version, the previous one is kept (a study started
@@ -164,7 +182,9 @@ Nothing is sent except ordinary download requests. EDM-ARS has no telemetry.
   `edmars` — this is Windows asking about the `edmars.cmd` wrapper. Either
   answer is fine; a running study keeps running.
 - **`edmars` is not found after installing** — open a new terminal window.
-  Windows and your shell read PATH when a window opens.
+  Windows and your shell read PATH when a window opens. In Git Bash, if the
+  folder has only `edmars.cmd` and no `edmars`, type `edmars.cmd` or run the
+  installer again.
 
 Run `edmars doctor` for a full check of your setup.
 

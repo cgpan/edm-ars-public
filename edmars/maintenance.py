@@ -402,6 +402,8 @@ def _explain_program_removal() -> None:
     launcher = record.get("launcher")
     items.append(Path(str(launcher)) if launcher else
                  Path.home() / ".local" / "bin" / ("edmars.cmd" if os.name == "nt" else "edmars"))
+    if record.get("sh_launcher"):  # Windows: the same command for Git Bash
+        items.append(Path(str(record["sh_launcher"])))
     seen: set[str] = set()
     shown: list[Path] = []
     for item in items:

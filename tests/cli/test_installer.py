@@ -204,7 +204,8 @@ def _function_probe(calls: str) -> str:
     wanted = ", ".join(
         f"'{name}'"
         for name in ("Test-UnderPath", "Merge-UserPath", "ConvertTo-CmdPath",
-                     "Get-SyncProvider", "Test-Excluded")
+                     "Get-SyncProvider", "Test-Excluded", "Get-Download",
+                     "Get-ShLauncherText")
     )
     return f"""
 $tokens = $null; $errors = $null
@@ -289,6 +290,45 @@ $out.ex_tmp = Test-Excluded 'tmp_orch_test2' 'tmp_orch_test2'
     assert not out["ex_registry"] and not out["ex_fixtures"] and not out["ex_nested_output"]
 
 
+@pytest.mark.skipif(not (ON_WINDOWS and POWERSHELL and SH), reason="Windows PowerShell and sh")
+def test_ps1_writes_an_edmars_command_git_bash_can_run(tmp_path: Path) -> None:
+    # bash does not use PATHEXT, so in Git Bash `edmars` never found
+    # edmars.cmd. The installer now also writes an sh launcher named edmars.
+    fake_python = tmp_path / "venv" / "fake python"
+    fake_python.parent.mkdir()
+    fake_python.write_bytes(
+        b'#!/bin/sh\n'
+        b'printf "ROOT=%s\\n" "$EDMARS_APP_ROOT"\n'
+        b'printf "UTF8=%s PP=%s\\n" "$PYTHONUTF8" "${PYTHONPATH-unset}"\n'
+        b'for a in "$@"; do printf "ARG=%s\\n" "$a"; done\n'
+    )
+    app_dir = r"C:\Program Files\O'Neil\app\0.1.0"
+    launcher = tmp_path / "edmars"
+    ps_app = app_dir.replace("'", "''")
+    ps_python = str(fake_python).replace("'", "''")
+    ps_launcher = str(launcher).replace("'", "''")
+    calls = (
+        f"$text = Get-ShLauncherText 'MARK' '0.1.0' '{ps_app}' 'C:\\no\\uv.exe' '{ps_python}'\n"
+        f"[System.IO.File]::WriteAllText('{ps_launcher}', $text, "
+        "(New-Object System.Text.UTF8Encoding $false))\n"
+        "$out.ok = $true\n"
+    )
+    result = _powershell(_function_probe(calls), tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert b"\r" not in launcher.read_bytes()
+
+    study = r"D:\EDM-ARS\studies\2026-09-25_1200_gpa_ab12"
+    run = subprocess.run([str(SH), str(launcher), "resume", study, "--yes"],
+                         capture_output=True, text=True, timeout=60,
+                         env={**_clean_env(tmp_path), "PYTHONPATH": "x"})
+    assert run.returncode == 0, run.stderr
+    lines = run.stdout.splitlines()
+    assert f"ROOT={app_dir}" in lines
+    assert "UTF8=1 PP=unset" in lines
+    assert [line[4:] for line in lines if line.startswith("ARG=")] == [
+        "-P", "-m", "edmars", "resume", study, "--yes"]
+
+
 def _run_ps1(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     assert POWERSHELL is not None
     return subprocess.run(
@@ -337,6 +377,34 @@ def test_ps1_refuses_bad_input_before_changing_anything(tmp_path: Path) -> None:
         assert result.returncode != 0
         assert "too long for Windows" in result.stdout
         assert not too_long.exists()
+
+
+@pytest.mark.skipif(not (ON_WINDOWS and POWERSHELL), reason="Windows PowerShell only")
+def test_ps1_downloads_only_over_https(tmp_path: Path) -> None:
+    # install.sh refuses plain http (curl --proto '=https'); install.ps1
+    # used to fetch SHA256SUMS and the archive over it, so the fingerprint
+    # check proved nothing.
+    dest = str(tmp_path / "sums").replace("'", "''")
+    calls = f"""
+try {{ Get-Download 'http://127.0.0.1:9/SHA256SUMS' '{dest}'; $out.http = 'downloaded' }}
+catch {{ $out.http = $_.Exception.Message }}
+"""
+    result = _powershell(_function_probe(calls), tmp_path)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert "only https://" in out["http"]
+    assert not (tmp_path / "sums").exists()
+
+    base = tmp_path / "base"
+    result = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(INSTALL_PS1), "-DryRun", "-Dir", str(base), "-BinDir", str(tmp_path / "bin")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
+        env=_clean_env(tmp_path, EDMARS_RELEASE_BASE_URL="http://127.0.0.1:9/dist"),
+    )
+    assert result.returncode != 0
+    assert "must start with https://" in result.stdout
+    assert not base.exists()
 
 
 def _long_paths_enabled() -> bool:

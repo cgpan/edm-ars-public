@@ -79,6 +79,47 @@ def test_gate_scores_on_success_screen(run_home: Path, capsys: pytest.CaptureFix
     assert "Automated peer review (LSAR): 5.1 out of 10, below the benchmark of 6.3" in " ".join(out.split())
 
 
+def test_an_experimental_plan_is_labelled_on_every_result(run_home: Path,
+                                                         capsys: pytest.CaptureFixture[str]) -> None:
+    # runner.json recorded study.experimental, but only the confirmation
+    # card ever showed it: a finished menu-built study read as a plain "Ready".
+    from edmars import view
+    from edmars.endstates import classify
+    from edmars.runstate import load_state
+
+    run = _ready(run_home, study={"experimental": True})
+    _, out = _show(run, capsys)
+    lines = out.splitlines()
+    assert lines[0] == "[ok] Ready"
+    assert lines[1].startswith("[EXPERIMENTAL] not a tested example study.")
+    state = load_state(run)
+    html_text = results.render_summary_html(classify(run), state, run)
+    assert "[EXPERIMENTAL] not a tested example study" in html_text
+    assert "[EXPERIMENTAL]" in view.screen_text(state, width=80, plain=True)
+
+    plain = _ready(run_home / "b")
+    _, out = _show(plain, capsys)
+    assert "EXPERIMENTAL" not in out
+    assert "EXPERIMENTAL" not in results.render_summary_html(classify(plain), load_state(plain), plain)
+
+
+def test_a_review_that_did_not_run_is_explained_and_setup_comes_first(
+    run_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gate = {"enabled": True, "ran": False, "skip_reason": "lsar_not_found: /x/y", "passed": None,
+            "score": None, "threshold": None, "advisory": None, "venue": "EDM"}
+    run = _ready(run_home, review_gate_enabled=True,
+                 gate_summary={"ran": False, "skip_reason": "lsar_not_found: /x/y", "venue": "EDM"},
+                 status=v2_status(reason_code="GATE_NOT_RUN", gate=gate))
+    _, out = _show(run, capsys)
+    flat = " ".join(out.split())
+    assert ("Automated peer review (LSAR): did not run. LSAR is not installed where "
+            "EDM-ARS expects it.") in flat
+    assert "lsar_not_found" not in out and "/x/y" not in out
+    lines = [line.strip() for line in out.splitlines()]
+    assert lines.index("First set up LSAR:") < lines.index("Automated peer review:")
+
+
 @pytest.mark.parametrize("code, expected_rc", [("NO_CREDIT", 3), ("DATA_MISSING", 3)])
 def test_failure_screen(run_home: Path, capsys: pytest.CaptureFixture[str], code: str, expected_rc: int) -> None:
     run = make_run(run_home, pdf=False,
@@ -150,7 +191,7 @@ def test_summary_html_is_self_contained_and_escaped(run_home: Path) -> None:
 
 @pytest.mark.parametrize("width", [60, 80, 120])
 def test_result_text_wraps(run_home: Path, width: int) -> None:
-    from edmars.endstates import classify
+    from edmars.endstates import classify, quote_path
     from edmars.runstate import load_state
 
     run = _ready(run_home)
@@ -159,7 +200,7 @@ def test_result_text_wraps(run_home: Path, width: int) -> None:
                   and not ln.lstrip().startswith("edmars ")]
     assert not long_lines
     # commands are whole lines, so they can be copied as they are
-    assert f"    edmars results {run} --open pdf" in text.splitlines()
+    assert f"    edmars results {quote_path(run)} --open pdf" in text.splitlines()
 
 
 def test_causal_and_psychometric_result_sentences(run_home: Path) -> None:
@@ -184,9 +225,9 @@ def test_an_experimental_plan_is_labelled_on_the_result_and_summary(
     assert code == 0
     lines = out.splitlines()
     assert lines[0].startswith("[ok] Ready")
-    assert lines[1] == "[EXPERIMENTAL] plan - not a tested example study"
+    assert lines[1].startswith("[EXPERIMENTAL] not a tested example study")
     html_text = (run / "summary.html").read_text(encoding="utf-8")
-    assert "[EXPERIMENTAL] plan - not a tested example study" in html_text
+    assert "[EXPERIMENTAL] not a tested example study" in html_text
     assert "not been run end to end" in html_text
     failed = make_run(run_home, name="2026-09-25_1400_failed_ef01", pdf=False,
                       study={"experimental": True},
@@ -194,7 +235,7 @@ def test_an_experimental_plan_is_labelled_on_the_result_and_summary(
                                        abort={"stage": "FORMULATING", "code": "NO_CREDIT",
                                               "message": "x", "resumable": True}))
     _, out = _show(failed, capsys)
-    assert out.splitlines()[1] == "[EXPERIMENTAL] plan - not a tested example study"
+    assert out.splitlines()[1].startswith("[EXPERIMENTAL] not a tested example study")
 
 
 def test_a_tested_plan_carries_no_experimental_label(

@@ -34,6 +34,7 @@ from edmars.runstate import (
     progress,
     stage_title,
     step_position,
+    stopped_early,
 )
 
 EXIT_ENDED = 0
@@ -167,21 +168,22 @@ def render_screen(
 
     question = state.question or "(the study plan is being written)"
     add(f'EDM-ARS · "{question}"', "bold")
+    if state.experimental:
+        add(EXPERIMENTAL_LINE, "bold yellow")
     left = " · ".join(p for p in (_type_label(state.task_type), state.dataset, _provider_label(state.provider)) if p)
     right = f"Started {_local(state.started)} · now {_local(ref)}"
     for text in _two_col(left, right, width, plain):
         add(text, "dim")
-    if state.experimental:
-        add(EXPERIMENTAL_LINE, "bold yellow")
 
     fraction, low, high = progress(state, ref)
     step, total = step_position(state)
     bar_w = 20 if width >= 80 else 10
     filled = int(round(fraction * bar_w))
     bar = ("#" * filled + "-" * (bar_w - filled)) if plain else ("█" * filled + "░" * (bar_w - filled))
-    left = f"Overall {bar}  Step {step} of {total}"
+    early = stopped_early(state)
+    left = f"Overall {bar}  {'Stopped at step' if early else 'Step'} {step} of {total}"
     if state.finished:
-        right = f"Finished {_local(state.updated)}"
+        right = f"{'Stopped' if early else 'Finished'} {_local(state.updated)}"
     elif low is not None and high is not None:
         right = f"Usually done between {_local(_round5(low, up=False))} and {_local(_round5(high, up=True))}"
     else:
@@ -303,7 +305,8 @@ class PlainPrinter:
         self._printed_recent = (self._printed_recent + fresh)[-200:]
         if state.finished and not self._finished_said:
             self._finished_said = True
-            out += self._emit(f"Finished. {state.now_text} {cost_line(state)}.")
+            ended = "Stopped" if stopped_early(state) else "Finished"
+            out += self._emit(f"{ended}. {state.now_text} {cost_line(state)}.")
         if out:
             self._last_output = tick
         elif not state.finished and self._last_output is not None and \

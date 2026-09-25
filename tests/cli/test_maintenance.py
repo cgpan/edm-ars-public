@@ -223,15 +223,18 @@ def test_uninstall_lists_what_the_installer_recorded(edmars_home: Path, tmp_path
     bin_dir.mkdir()
     launcher = bin_dir / "edmars.cmd"
     launcher.write_text("@echo off\n", encoding="utf-8")
+    sh_launcher = bin_dir / "edmars"  # install.ps1's launcher for Git Bash
+    sh_launcher.write_text("#!/bin/sh\n", encoding="utf-8")
     (base / "install.json").write_text(json.dumps({
         "schema": 1, "install_dir": str(base), "app_root": str(app), "uv": str(base / "uv" / "uv.exe"),
         "uv_private": True, "bin_dir": str(bin_dir), "launcher": str(launcher),
+        "sh_launcher": str(sh_launcher),
         "path_modified": True, "path_files": [str(tmp_path / ".profile")],
     }), encoding="utf-8")
     monkeypatch.setattr(paths, "app_root", lambda: app)
     assert maintenance.uninstall(assume_yes=True) == 0
     out = capsys.readouterr().out
-    for item in (base / "app", base / "venv-0.1.0", base / "python", base / "uv", launcher):
+    for item in (base / "app", base / "venv-0.1.0", base / "python", base / "uv", launcher, sh_launcher):
         assert f"  - {item}" in out, item
     assert str(tmp_path / ".profile") in out  # the PATH lines the installer added
     # The folder as a whole is never named: datasets may live in it.

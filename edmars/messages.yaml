@@ -112,6 +112,8 @@ gate_skip_reasons:
   disabled: "Automated peer review was switched off."
   exception: "LSAR stopped with an error."
   not_available: "Automated peer review was requested, but LSAR is not set up on this computer."
+  lsar_scoring_failed: "LSAR wrote a review but could not score it, so there is no score."
+  lsar_no_result: "LSAR finished without producing a review."
 
 # Failure catalog: one entry per code. `command` may hold several lines;
 # each line is one command to type.
@@ -358,6 +360,14 @@ failures:
       LSAR started but stopped with an error (often the DeepSeek key or
       balance, or the network).
     fix: "Your paper is complete. You can run the review again later."
+    command: "edmars review {run}"
+  LSAR_SCORING_FAILED:
+    title: "The automated review could not be scored"
+    why: >-
+      LSAR reviewed the paper, but the answer from its scoring step could
+      not be used, so no score was produced. A review without a score
+      cannot be compared with the benchmark.
+    fix: "Your paper is complete. Run the review again; each review is scored from scratch."
     command: "edmars review {run}"
   INSTALL_BROKEN:
     title: "EDM-ARS is not fully installed"

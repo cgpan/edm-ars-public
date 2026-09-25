@@ -30,7 +30,7 @@ def _load_settings() -> dict[str, Any]:
 
     return settings.load()
 
-COMMIT = "0123456789abcdef0123456789abcdef01234567"
+COMMIT = lsar.LSAR_REF
 FAKE_DIST = "edmars-test-dist-that-does-not-exist"
 
 REQUIREMENTS = f"""# LSAR Dependencies
@@ -137,8 +137,9 @@ def test_install_unpacks_installs_only_what_is_missing_and_verifies(
 
     home = lsar.install(settings_dict, session=session, on_step=steps.append)
 
-    assert home == lsar.home_for_ref("master")
-    assert session.calls[0]["url"] == "https://github.com/cgpan/LSAR-public/archive/master.tar.gz"
+    assert home == lsar.home_for_ref()
+    assert session.calls[0]["url"] == (
+        f"https://github.com/cgpan/LSAR-public/archive/{lsar.LSAR_REF}.tar.gz")
     for rel in lsar.REQUIRED_FILES:
         assert (home / rel).is_file()
     # dev tools and already-installed packages are never passed to pip
@@ -175,7 +176,7 @@ def test_install_refuses_to_change_existing_packages(
     assert "PyYAML" in str(err.value) and "Nothing was installed" in str(err.value)
     assert err.value.plan is not None and err.value.plan.changes
     assert pip.installed == []
-    assert not lsar.home_for_ref("master").exists()
+    assert not lsar.home_for_ref().exists()
     assert settings_dict["lsar"].get("home") in (None, "")
 
 
@@ -238,6 +239,25 @@ def test_links_are_skipped_and_one_top_folder_is_required(tmp_path: Path) -> Non
     two.write_bytes(_targz(_tree(extra={"second/x.txt": b"x"})))
     with pytest.raises(lsar.LsarInstallError, match="one folder"):
         lsar._safe_extract(two, tmp_path / "out2")
+
+
+def test_the_pinned_ref_is_a_commit_id_not_a_branch() -> None:
+    assert lsar.is_commit_id(lsar.LSAR_REF)
+    assert not lsar.is_commit_id("master")
+
+
+@pytest.mark.parametrize("recorded", ["f" * 40, None])
+def test_an_archive_of_another_commit_is_refused_before_pip_runs(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any, recorded: str | None
+) -> None:
+    settings_dict = _load_settings()
+    pip = FakePip(real_run)
+    monkeypatch.setattr(proc, "run", pip)
+    with pytest.raises(lsar.LsarInstallError, match="not the version EDM-ARS was tested with"):
+        lsar.install(settings_dict, session=serve_bytes(_targz(_tree(), commit=recorded)))
+    assert pip.dry_runs == [] and pip.installed == []
+    assert not lsar.home_for_ref().exists()
+    assert settings_dict["lsar"].get("home") in (None, "")
 
 
 def test_download_failure_is_an_install_error() -> None:

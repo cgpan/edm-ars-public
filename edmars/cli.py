@@ -331,6 +331,17 @@ def _find_run(settings: dict[str, Any], text: str) -> Path:
     raise typer.Exit(1)
 
 
+def _outside_studies(settings: dict[str, Any], run_dir: Path) -> bool:
+    """True when ``run_dir`` is not inside this user's studies folder."""
+    from edmars import settings as settings_mod
+
+    try:
+        run_dir.resolve().relative_to(settings_mod.studies_dir(settings).resolve())
+    except (ValueError, OSError):
+        return True
+    return False
+
+
 def _resolve_run(
     settings: dict[str, Any],
     run: str | None,
@@ -850,8 +861,18 @@ def runs_cmd(
         question = pick(item, "question", "research_question")
         if len(question) > 60:
             question = question[:57] + "..."
-        rows.append([folder, pick(item, "started", "started_at"), pick(item, "label", "state", "status"), question])
+        started = _local_time(pick(item, "started", "started_at"))
+        rows.append([folder, started, pick(item, "label", "state", "status"), question])
     ui.table(["Study", "Started", "State", "Question"], rows)
+
+
+def _local_time(value: str) -> str:
+    """A UTC ISO time as local "YYYY-MM-DD HH:MM", the clock the live view
+    uses. ``--json`` keeps the UTC value."""
+    from edmars.runstate import parse_ts
+
+    ts = parse_ts(value) if value else None
+    return ts.astimezone().strftime("%Y-%m-%d %H:%M") if ts is not None else value
 
 
 @app.command("results")
@@ -910,6 +931,13 @@ def resume_cmd(
     settings = _settings()
     _require_ack(settings, accept_disclosure)
     run_dir = _resolve_run(settings, run, prefer_active=False)
+    if _outside_studies(settings, run_dir):
+        ui.warn(
+            f"{run_dir} is not in your studies folder, so it may have come from someone "
+            "else. Continuing a study runs AI-written analysis code on this computer and "
+            "uses your AI key. Only continue a study you started yourself or got from "
+            "someone you trust."
+        )
     _confirm_spend(
         f"Continue the study in {run_dir.name}? It will use your AI service again.",
         non_interactive,
