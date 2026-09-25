@@ -56,6 +56,13 @@ def install_data(raw: Path, dataset: str, content: str = "") -> Path:
     return path
 
 
+def hsls_rows(n: int) -> str:
+    """A tiny HSLS extract with ``n`` students who all have the outcome."""
+    rows = [f"0.{i % 9},{'Yes' if i % 2 else 'No'},{'Male' if i % 3 else 'Female'}"
+            for i in range(n)]
+    return "\n".join(["X1MTHEFF,X4EVRATNDCLG,X1SEX", *rows]) + "\n"
+
+
 def load_with_pipeline_loader(spec: dict, tmp_path: Path, dataset: str) -> dict:
     """Round-trip through the pipeline's own src.main loader."""
     # Via the study module's accessor: importing src.main directly would run
@@ -237,10 +244,8 @@ def test_example_preflight_without_data_fails_only_on_the_data_file(
 
 
 def test_example_preflight_with_data_present_is_clear(raw_dir: Path) -> None:
-    install_data(
-        raw_dir, "hsls09_public",
-        "X1MTHEFF,X4EVRATNDCLG,X1SEX\n0.5,Yes,Male\n-0.2,No,Female\n",
-    )
+    # Above the pipeline's 1,000-student minimum.
+    install_data(raw_dir, "hsls09_public", hsls_rows(1200))
     plan = study.plan_from_flags({}, example="x1mtheff_x4college")
     checks = study.preflight(plan, {})
     assert not study.blocking(checks), [(c.name, c.detail) for c in checks
@@ -485,13 +490,25 @@ def test_preflight_technical_detail_only_in_debug_mode(
     assert "[Technical detail: F-TEMPORAL-ORDER:" in order.detail
 
 
-def test_passing_screen_checks_carry_no_developer_text(raw_dir: Path) -> None:
-    install_data(
-        raw_dir, "hsls09_public",
-        "X1MTHEFF,X4EVRATNDCLG,X1SEX\n0.5,Yes,Male\n-0.2,No,Female\n",
-    )
+def test_a_sample_below_the_pipeline_floor_blocks_the_start(raw_dir: Path) -> None:
+    # 50 students have the outcome: the pipeline would stop at its
+    # 1,000-student minimum (SAMPLE_TOO_SMALL) after the first paid steps.
+    install_data(raw_dir, "hsls09_public", hsls_rows(50))
     plan = study.plan_from_flags({}, example="x1mtheff_x4college")
-    for check in study.preflight(plan, {}):
+    checks = study.preflight(plan, {})
+    sample = next(c for c in checks if c.name == "Enough students with usable data")
+    assert sample.status == "fail", sample
+    assert "Only about 50 of 50 students" in sample.detail
+    assert sample.fix and "edmars data verify" in sample.fix
+    assert study.blocking(checks)
+
+
+def test_passing_screen_checks_carry_no_developer_text(raw_dir: Path) -> None:
+    install_data(raw_dir, "hsls09_public", hsls_rows(1200))
+    plan = study.plan_from_flags({}, example="x1mtheff_x4college")
+    checks = study.preflight(plan, {})
+    assert not study.blocking(checks)
+    for check in checks:
         for word in _DEVELOPER_WORDS + ("Analytic n", "Minority class"):
             assert word not in check.detail, (check.name, check.detail)
 

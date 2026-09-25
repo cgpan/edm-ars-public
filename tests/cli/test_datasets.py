@@ -380,6 +380,20 @@ def test_import_places_the_file_and_trust_on_first_use_catches_changes(
     assert datasets.status("hsls09_public", settings_dict).status == "warn"
 
 
+def test_a_cut_short_import_is_never_shown_as_verified(tmp_path: Path) -> None:
+    settings_dict = _load_settings()
+    src = tmp_path / "hsls fake.csv"
+    src.write_bytes(_csv(HSLS_HEADER, HSLS_LABELLED))
+    assert datasets.validate_file("hsls09_public", src).status == "warn"  # the import warns
+    datasets.import_file("hsls09_public", src, settings_dict)
+    assert settings_dict["datasets"]["hsls09_public"]["sha256"]  # a hash was recorded
+    check = datasets.status("hsls09_public", settings_dict)
+    assert check.status == "warn"
+    assert "incomplete" in check.detail and "verified" not in check.detail
+    assert check.fix == "edmars data install hsls09_public"
+    assert datasets.verify("hsls09_public", settings_dict).status == "warn"
+
+
 def test_importing_the_installed_file_itself_is_fine(tiny_hsls: None) -> None:
     settings_dict = _load_settings()
     dest = datasets.expected_path("hsls09_public", settings_dict)

@@ -1865,6 +1865,29 @@ def _plain_warn(result: Any, report: Any) -> str:
     return message
 
 
+_SMALL_SAMPLE_FIX = (
+    "Choose an outcome that more students have, or check that the data file is "
+    "complete (`edmars data verify`)."
+)
+
+
+def _below_abort_floor(result: Any) -> bool:
+    """True when the probe counted the students who have the outcome and
+    found fewer than the pipeline's 1,000-student minimum.
+
+    Only the outcome count is certain: the pipeline never fills in a
+    missing outcome, so the study cannot have more students than this. A
+    count across all variables (measurement studies) is a lower bound,
+    because missing answers are filled in, so it stays a warning.
+    """
+    message = str(getattr(result, "message", ""))
+    return (
+        str(getattr(result, "code", "")) == "P-ANALYTIC-N"
+        and "abort floor" in message
+        and "outcome-complete" in message
+    )
+
+
 def _technical(result: Any) -> str:
     """The check's own wording, shown only with EDMARS_DEBUG=1."""
     if os.environ.get("EDMARS_DEBUG", "").strip() in ("", "0"):
@@ -1893,6 +1916,17 @@ def _map_report(report: Any) -> list[Check]:
                     "fail",
                     _plain_fail(result, report, registry) + _technical(result),
                     _KILL_FIXES.get(result.code, _DEFAULT_KILL_FIX),
+                )
+            )
+        elif result.status == WARN and _below_abort_floor(result):
+            # The pipeline aborts a study whose analytic sample is under
+            # 1,000 students (SAMPLE_TOO_SMALL) after the first paid steps.
+            out.append(
+                Check(
+                    title,
+                    "fail",
+                    _plain_warn(result, report) + _technical(result),
+                    _SMALL_SAMPLE_FIX,
                 )
             )
         elif result.status == WARN:

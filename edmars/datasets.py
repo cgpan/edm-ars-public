@@ -484,6 +484,16 @@ def status(name: str, settings: dict[str, Any]) -> Check:
 
     rec = _record(name, settings, path)
     size = path.stat().st_size
+    if info.min_bytes and size < info.min_bytes:
+        # The import already warned; a hash of a cut-short file proves only
+        # that it is the same cut-short file, so it is never "verified".
+        return Check(
+            title, "warn",
+            f"Installed at {path}, but the file is only {human_bytes(size)}; the "
+            f"real file is at least {human_bytes(info.min_bytes)}. It looks "
+            "incomplete, and a study on it would stop early.",
+            fix=f"edmars data install {name}",
+        )
     if not rec.get("sha256"):
         return Check(
             title, "warn",
