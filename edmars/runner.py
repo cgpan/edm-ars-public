@@ -1,0 +1,907 @@
+"""Start, stop and resume a study as a detached child process.
+
+The pipeline runs as ``<python> -m src.main --config <run>/run_config.yaml
+--output-dir <run> --dataset <d> [--research-spec ...] [--prompt ...]``
+with the application root as its working directory. The CLI never
+imports the pipeline to run it; it writes a per-run config, launches the
+child, and from then on only reads the run folder.
+
+What this module writes into a run folder:
+
+* ``run_config.yaml`` -- the shipped ``config.yaml`` deep-merged with the
+  user's settings and the study's choices. Absolute paths, sandbox off,
+  no secrets (keys travel only in the child's environment).
+* ``research_spec.locked.json`` -- the study plan, when there is one.
+* ``runner.json`` -- how the run was launched (argv, pid, times), so
+  ``edmars stop`` / ``edmars resume`` / the live view can find it again.
+* ``STOP`` -- a flag file written by ``stop()``.
+
+One study runs at a time: ``<data dir>/active_run.json`` holds the
+running study's pid and folder, and is treated as stale once that pid is
+gone.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import os
+import re
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterable
+
+import yaml
+
+from edmars import paths, proc
+from edmars import secrets as edsecrets
+from edmars.runstate import as_dict, load_state, parse_ts, process_alive
+
+if TYPE_CHECKING:  # pragma: no cover
+    from edmars.model import StudyPlan
+
+
+class RunnerError(RuntimeError):
+    """A launch/stop/resume request that cannot be carried out; the message
+    is written for the person at the keyboard."""
+
+
+#: Provider id -> the environment variable holding its key. The wizard's
+#: provider catalog is authoritative; this is the fallback.
+_PROVIDER_ENV = {
+    "deepseek": "DEEPSEEK_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "local": "OPENAI_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+}
+
+#: Keys passed to the pipeline when present, whatever the provider.
+_OPTIONAL_KEYS = ("SEMANTIC_SCHOLAR_API_KEY", "TAVILY_API_KEY")
+
+_LOCK_NAME = "active_run.json"
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+
+def _sget(settings: dict[str, Any] | None, dotted: str, default: Any = None) -> Any:
+    node: Any = settings or {}
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return default
+        node = node[part]
+    return default if node is None else node
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    out = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+def _write_json(path: Path, data: Any) -> None:
+    _write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _read_runner(run_dir: Path) -> dict[str, Any]:
+    return _read_json(run_dir / "runner.json")
+
+
+def _app_version() -> str | None:
+    try:
+        import edmars
+
+        version = getattr(edmars, "__version__", None)
+        return str(version) if version else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _create_time(pid: int) -> float | None:
+    try:
+        import psutil
+
+        return float(psutil.Process(pid).create_time())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _load_settings() -> dict[str, Any]:
+    from edmars import settings as settings_mod
+
+    loaded = settings_mod.load()
+    return loaded if isinstance(loaded, dict) else {}
+
+
+# ---------------------------------------------------------------------------
+# Locations
+# ---------------------------------------------------------------------------
+
+
+def studies_dir(settings: dict[str, Any]) -> Path:
+    configured = _sget(settings, "studies_dir")
+    base = Path(str(configured)).expanduser() if configured else Path(paths.default_studies_dir())
+    return base.absolute()
+
+
+def raw_data_dir(settings: dict[str, Any]) -> Path:
+    try:
+        from edmars import datasets
+    except ImportError:
+        return (Path(paths.data_dir()) / "data" / "raw").absolute()
+    return Path(datasets.raw_data_dir(settings)).absolute()
+
+
+def _lock_path() -> Path:
+    return Path(paths.data_dir()) / _LOCK_NAME
+
+
+# ---------------------------------------------------------------------------
+# Effective config
+# ---------------------------------------------------------------------------
+
+
+def _provider_models(provider: str, settings: dict[str, Any]) -> dict[str, str]:
+    defaults: dict[str, str] = {}
+    try:
+        from edmars import providers
+
+        got = providers.default_models(provider)
+        if isinstance(got, dict):
+            defaults = {str(k): str(v) for k, v in got.items() if v}
+    except (ImportError, AttributeError, KeyError):
+        defaults = {}
+    overrides = _sget(settings, "models", {}) or {}
+    if isinstance(overrides, dict):
+        defaults.update({str(k): str(v) for k, v in overrides.items() if v})
+    return defaults
+
+
+def _expand_lsar_home(node: Any, home: str) -> Any:
+    if isinstance(node, str):
+        return node.replace("${LSAR_HOME}", home).replace("$LSAR_HOME", home)
+    if isinstance(node, dict):
+        return {k: _expand_lsar_home(v, home) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_expand_lsar_home(v, home) for v in node]
+    return node
+
+
+def _lsar_home(settings: dict[str, Any]) -> Path | None:
+    home = _sget(settings, "lsar.home")
+    if not home:
+        return None
+    path = Path(str(home)).expanduser()
+    return path.absolute() if path.is_dir() else None
+
+
+def review_enabled(settings: dict[str, Any], plan: "StudyPlan") -> bool:
+    """The LSAR gate runs only when the study asks for it, LSAR is set up
+    and enabled, and the provider is not an experimental local model."""
+    if not getattr(plan, "review", False):
+        return False
+    if str(_sget(settings, "provider", "deepseek")) == "local":
+        return False
+    if _sget(settings, "lsar.enabled", True) is False:
+        return False
+    return _lsar_home(settings) is not None
+
+
+def build_effective_config(settings: dict[str, Any], plan: "StudyPlan") -> dict[str, Any]:
+    """The shipped ``config.yaml`` with this user's and this study's choices.
+
+    Never contains a secret: API keys reach the pipeline through the child
+    environment only.
+    """
+    root = Path(paths.app_root())
+    with open(root / "config.yaml", encoding="utf-8") as fh:
+        base = yaml.safe_load(fh) or {}
+    cfg: dict[str, Any] = copy.deepcopy(base)
+
+    provider = str(_sget(settings, "provider", "deepseek") or "deepseek")
+    llm_provider = "openai" if provider == "local" else provider
+    cfg["llm_provider"] = llm_provider
+    models = _provider_models(provider, settings)
+    base_url = _sget(settings, "provider_base_url")
+    writer_model: str | None = None
+    if llm_provider == "anthropic":
+        cfg["models"] = {**(cfg.get("models") or {}), **models}
+        writer_model = cfg["models"].get("writer")
+    else:
+        block = cfg.setdefault(llm_provider, {}) or {}
+        cfg[llm_provider] = block
+        block["models"] = {**(block.get("models") or {}), **models}
+        if base_url and provider in ("local", "openai"):
+            block["base_url"] = str(base_url)
+        writer_model = block["models"].get("writer")
+        if writer_model and not block["models"].get("revision_writer"):
+            # Without this the review gate's reviser falls back to
+            # review_gate.revision_model, which names a DeepSeek model.
+            block["models"]["revision_writer"] = writer_model
+        writer_model = block["models"].get("revision_writer") or writer_model
+
+    # ---- review gate (LSAR) -------------------------------------------------
+    rg = cfg.setdefault("review_gate", {}) or {}
+    cfg["review_gate"] = rg
+    rg["venue"] = str(getattr(plan, "venue", None) or _sget(settings, "defaults.venue", "EDM"))
+    home = _lsar_home(settings)
+    if review_enabled(settings, plan) and home is not None:
+        rg["enabled"] = True
+        rg["lsar_project_path"] = str(home)
+        rg["lsar_config_path"] = str(home / "config.yaml")
+        rg["calibration_path"] = str(home / "calibration" / "anchors_edm.yaml")
+        if writer_model:
+            rg["revision_model"] = writer_model
+    else:
+        rg["enabled"] = False
+    if home is not None:
+        cfg = _expand_lsar_home(cfg, str(home))
+
+    # ---- paths ----------------------------------------------------------------
+    cfg_paths = cfg.setdefault("paths", {}) or {}
+    cfg["paths"] = cfg_paths
+    cfg_paths["raw_data"] = str(raw_data_dir(settings)) + os.sep
+    cfg_paths["output_base"] = str(studies_dir(settings)) + os.sep
+    memory = cfg.setdefault("findings_memory", {}) or {}
+    cfg["findings_memory"] = memory
+    memory["path"] = str((Path(paths.data_dir()) / "findings_memory" / "memory.yaml").absolute())
+
+    # ---- execution --------------------------------------------------------------
+    sandbox = cfg.setdefault("sandbox", {}) or {}
+    cfg["sandbox"] = sandbox
+    sandbox["enabled"] = False
+    rscript = _sget(settings, "r.rscript")
+    if rscript:
+        cfg.setdefault("r_bridge", {})["rscript_path"] = str(rscript)
+
+    # ---- the study itself ----------------------------------------------------------
+    pipeline = cfg.setdefault("pipeline", {}) or {}
+    cfg["pipeline"] = pipeline
+    pipeline["task_type"] = str(plan.task_type)
+    budget = _sget(settings, "defaults.budget_usd")
+    if isinstance(budget, (int, float)) and not isinstance(budget, bool) and budget > 0:
+        pipeline["cost_budget_usd"] = float(budget)
+    writer = cfg.setdefault("writer", {}) or {}
+    cfg["writer"] = writer
+    writer["venue_format"] = "journal" if getattr(plan, "paper_format", "conference") == "journal" else "conference"
+    author = _sget(settings, "author.name")
+    if isinstance(author, str) and author.strip():
+        cfg.setdefault("paper", {})["authors"] = [author.strip(), "EDM-ARS"]
+    mailto = _sget(settings, "literature.crossref_mailto")
+    if mailto:
+        cfg.setdefault("semantic_scholar", {})["crossref_mailto"] = str(mailto)
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Child environment
+# ---------------------------------------------------------------------------
+
+
+def _provider_env_var(provider: str) -> str:
+    try:
+        from edmars import providers
+
+        info = providers.PROVIDERS.get(provider)
+        env_var = getattr(info, "env_var", None) if info is not None else None
+        if isinstance(env_var, str) and env_var:
+            return env_var
+    except (ImportError, AttributeError):
+        pass
+    return _PROVIDER_ENV.get(provider, "DEEPSEEK_API_KEY")
+
+
+def child_env(
+    settings: dict[str, Any],
+    *,
+    provider: str,
+    review: bool,
+    run_id: str,
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Environment for the pipeline process.
+
+    Starts from the current environment, adds the keys this study needs
+    from the keychain, forces UTF-8, keeps user site-packages and a
+    foreign PYTHONPATH out, and puts this interpreter's folder first on
+    PATH so any ``python`` the pipeline starts is this one.
+    """
+    env = dict(os.environ if base_env is None else base_env)
+    names: list[str] = [_provider_env_var(provider)]
+    if review:
+        names.append("DEEPSEEK_API_KEY")  # LSAR scoring is calibrated on DeepSeek
+    names.extend(_OPTIONAL_KEYS)
+    seen: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.append(name)
+    env.update({k: v for k, v in edsecrets.child_secrets(seen).items() if v})
+    if provider == "local" and not env.get("OPENAI_API_KEY"):
+        env["OPENAI_API_KEY"] = "local"  # OpenAI-compatible servers want a non-empty key
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONNOUSERSITE"] = "1"
+    for var in ("PYTHONPATH", "PYTHONHOME"):
+        for key in [k for k in env if k.upper() == var]:
+            env.pop(key, None)
+    path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
+    exe_dir = str(Path(sys.executable).parent)
+    current = env.get(path_key, "")
+    parts = [p for p in current.split(os.pathsep) if p]
+    env[path_key] = os.pathsep.join([exe_dir] + [p for p in parts if p != exe_dir])
+    rscript = _sget(settings, "r.rscript")
+    if rscript:
+        env["EDM_ARS_RSCRIPT"] = str(rscript)
+    home = _lsar_home(settings)
+    if review and home is not None:
+        env["LSAR_HOME"] = str(home)
+    env["EDMARS_RUN_ID"] = run_id
+    return {str(k): str(v) for k, v in env.items()}
+
+
+# ---------------------------------------------------------------------------
+# Run folders
+# ---------------------------------------------------------------------------
+
+
+def slugify(text: str, max_len: int = 40) -> str:
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    slug = ""
+    for word in words:
+        candidate = f"{slug}-{word}" if slug else word
+        if len(candidate) > max_len:
+            break
+        slug = candidate
+    return slug
+
+
+def _new_run_dir(parent: Path, plan: "StudyPlan") -> Path:
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    base = slugify(getattr(plan, "research_question", "") or "") \
+        or slugify(getattr(plan, "example_id", "") or "") \
+        or slugify(str(plan.task_type)) or "study"
+    for _ in range(50):
+        candidate = parent / f"{stamp}_{base}_{os.urandom(2).hex()}"
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RunnerError(f"Could not create a new study folder in {parent}.")
+
+
+def _plan_dataset(plan: "StudyPlan") -> str:
+    spec = getattr(plan, "spec", None)
+    if isinstance(spec, dict) and spec.get("dataset"):
+        return str(spec["dataset"])  # the spec's dataset always wins
+    return str(plan.dataset)
+
+
+def _plan_prompt(plan: "StudyPlan") -> str | None:
+    spec = getattr(plan, "spec", None)
+    if isinstance(spec, dict) and spec.get("research_question"):
+        return str(spec["research_question"])
+    prompt = getattr(plan, "prompt", None) or getattr(plan, "research_question", None)
+    return str(prompt) if prompt else None
+
+
+def build_argv(plan: "StudyPlan", run_dir: Path) -> list[str]:
+    argv = [
+        sys.executable, "-m", "src.main",
+        "--config", str(run_dir / "run_config.yaml"),
+        "--output-dir", str(run_dir),
+        "--dataset", _plan_dataset(plan),
+    ]
+    if isinstance(getattr(plan, "spec", None), dict):
+        argv += ["--research-spec", str(run_dir / "research_spec.locked.json")]
+    prompt = _plan_prompt(plan)
+    if prompt:
+        argv += ["--prompt", prompt]
+    return argv
+
+
+def _study_summary(settings: dict[str, Any], plan: "StudyPlan") -> dict[str, Any]:
+    wanted = bool(getattr(plan, "review", False))
+    enabled = review_enabled(settings, plan)
+    return {
+        "task_type": str(plan.task_type),
+        "dataset": _plan_dataset(plan),
+        "research_question": str(getattr(plan, "research_question", "") or _plan_prompt(plan) or ""),
+        "example_id": getattr(plan, "example_id", None),
+        "experimental": bool(getattr(plan, "experimental", False)),
+        "venue": str(getattr(plan, "venue", "EDM")),
+        "paper_format": str(getattr(plan, "paper_format", "conference")),
+        "review": enabled,
+        "review_requested": wanted,
+        # The study asked for automated review but LSAR is not set up:
+        # the end screen says "not reviewed" instead of staying silent.
+        "review_unavailable": wanted and not enabled,
+        "provider": str(_sget(settings, "provider", "deepseek")),
+    }
+
+
+def prepare_run(settings: dict[str, Any], plan: "StudyPlan") -> Path:
+    """Create a fresh study folder with run_config.yaml, the locked spec
+    (if any) and runner.json. Nothing is started."""
+    parent = studies_dir(settings)
+    parent.mkdir(parents=True, exist_ok=True)
+    run_dir = _new_run_dir(parent, plan)
+    cfg = build_effective_config(settings, plan)
+    _write_text_atomic(run_dir / "run_config.yaml",
+                       yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True))
+    spec = getattr(plan, "spec", None)
+    if isinstance(spec, dict):
+        _write_json(run_dir / "research_spec.locked.json", spec)
+    runner = {
+        "schema": 1,
+        "version": _app_version(),
+        "argv": build_argv(plan, run_dir),
+        "pid": None,
+        "create_time": None,
+        "created_at": _utc_now(),
+        "started_at": None,
+        "python": sys.executable,
+        "app_root": str(Path(paths.app_root()).absolute()),
+        "study": _study_summary(settings, plan),
+    }
+    _write_json(run_dir / "runner.json", runner)
+    return run_dir
+
+
+# ---------------------------------------------------------------------------
+# The one-active-run lock
+# ---------------------------------------------------------------------------
+
+
+def _lock_holder() -> dict[str, Any]:
+    return _read_json(_lock_path())
+
+
+def active_run() -> Path | None:
+    """The study that is running now, or None. Clears a stale lock."""
+    path = _lock_path()
+    data = _lock_holder()
+    if not data:
+        if path.exists():
+            # Unreadable (half-written) lock: leave it if it is brand new.
+            try:
+                if datetime.now().timestamp() - path.stat().st_mtime > 60:
+                    path.unlink()
+            except OSError:
+                pass
+        return None
+    pid = data.get("pid")
+    alive = process_alive(int(pid), data.get("create_time")) if isinstance(pid, int) else False
+    if alive:
+        run_dir = data.get("run_dir")
+        return Path(run_dir) if run_dir else None
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return None
+
+
+def _acquire_lock(run_dir: Path) -> None:
+    path = _lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(3):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            holder = active_run()
+            if holder is not None and Path(holder) != Path(run_dir):
+                raise RunnerError(
+                    f"Another study is still running ({Path(holder).name}). One study runs "
+                    "at a time: wait for it to finish, or stop it with: edmars stop"
+                ) from None
+            if holder is not None:
+                raise RunnerError("This study is already running.") from None
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({
+                "pid": os.getpid(),
+                "create_time": _create_time(os.getpid()),
+                "run_dir": str(run_dir),
+                "state": "starting",
+                "at": _utc_now(),
+            }, fh)
+        return
+    raise RunnerError(f"Could not take the run lock at {path}; remove it if no study is running.")
+
+
+def _set_lock(run_dir: Path, pid: int, create_time: float | None) -> None:
+    _write_json(_lock_path(), {
+        "pid": pid,
+        "create_time": create_time,
+        "run_dir": str(run_dir),
+        "state": "running",
+        "at": _utc_now(),
+    })
+
+
+def _release_lock(run_dir: Path) -> None:
+    data = _lock_holder()
+    if data and data.get("run_dir") and Path(data["run_dir"]) != Path(run_dir):
+        return
+    try:
+        _lock_path().unlink()
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Launch / stop / resume
+# ---------------------------------------------------------------------------
+
+
+def _spawn(run_dir: Path, argv: list[str], env: dict[str, str], settings: dict[str, Any]) -> tuple[int, float | None]:
+    root = Path(paths.app_root()).absolute()
+    try:
+        pid = int(proc.spawn_detached(argv, cwd=root, env=env, log_path=run_dir / "console.log"))
+    except Exception as exc:  # noqa: BLE001
+        _release_lock(run_dir)
+        raise RunnerError(f"Could not start the study: {edsecrets.redact(str(exc))}") from exc
+    create_time = _create_time(pid)
+    _set_lock(run_dir, pid, create_time)
+    if _sget(settings, "defaults.keep_awake", True):
+        try:
+            proc.keep_awake(pid)
+        except Exception:  # noqa: BLE001 -- staying awake is a convenience
+            pass
+    return pid, create_time
+
+
+def launch(settings: dict[str, Any], plan: "StudyPlan") -> Path:
+    """Create the study folder and start the pipeline in the background."""
+    holder = active_run()
+    if holder is not None:
+        raise RunnerError(
+            f"Another study is still running ({holder.name}). One study runs at a time: "
+            "wait for it to finish, or stop it with: edmars stop"
+        )
+    run_dir = prepare_run(settings, plan)
+    try:
+        _acquire_lock(run_dir)
+    except RunnerError:
+        # Another launch won the race. The folder we just made holds only
+        # our own config files; do not leave an empty study behind.
+        shutil.rmtree(run_dir, ignore_errors=True)
+        raise
+    runner = _read_runner(run_dir)
+    env = child_env(
+        settings,
+        provider=str(_sget(settings, "provider", "deepseek")),
+        review=bool(as_dict(runner.get("study")).get("review")),
+        run_id=run_dir.name,
+    )
+    pid, create_time = _spawn(run_dir, list(runner["argv"]), env, settings)
+    runner.update({"pid": pid, "create_time": create_time, "started_at": _utc_now()})
+    _write_json(run_dir / "runner.json", runner)
+    return run_dir
+
+
+def stop(run_dir: Path | str) -> None:
+    """Ask the study to stop, then end its process tree after a grace period.
+
+    Finished steps stay on disk; ``resume`` continues from the last one.
+    """
+    run_dir = Path(run_dir)
+    if not run_dir.is_dir():
+        raise RunnerError(f"There is no study folder at {run_dir}.")
+    runner = _read_runner(run_dir)
+    pid = runner.get("pid")
+    if not (isinstance(pid, int) and process_alive(pid, runner.get("create_time"))):
+        # Never signal a pid that no longer belongs to this study.
+        _release_lock(run_dir)
+        raise RunnerError("This study is not running, so there is nothing to stop.")
+    _write_text_atomic(run_dir / "STOP", _utc_now() + "\n")
+    proc.terminate_tree(pid, grace_s=30)
+    if runner:
+        runner["stopped_at"] = _utc_now()
+        runner["stopped_by_user"] = True
+        _write_json(run_dir / "runner.json", runner)
+    _release_lock(run_dir)
+
+
+def _strip_resume_flags(argv: list[str]) -> list[str]:
+    out: list[str] = []
+    skip_next = False
+    for i, token in enumerate(argv):
+        if skip_next:
+            skip_next = False
+            continue
+        if token in ("--resume", "--dry-run"):
+            continue
+        if token == "--retry-stage":
+            nxt = argv[i + 1] if i + 1 < len(argv) else ""
+            skip_next = bool(nxt) and not nxt.startswith("--")
+            continue
+        if token.startswith("--retry-stage="):
+            continue
+        out.append(token)
+    return out
+
+
+def _reconstruct_argv(run_dir: Path) -> list[str]:
+    """argv for a run that was not started by edmars (no runner.json)."""
+    checkpoint = _read_json(run_dir / "checkpoint.json")
+    dataset = checkpoint.get("dataset_name") or "hsls09_public"
+    config = run_dir / "run_config.yaml"
+    if not config.exists():
+        config = Path(paths.app_root()) / "config.yaml"
+    argv = [sys.executable, "-m", "src.main", "--config", str(config),
+            "--output-dir", str(run_dir), "--dataset", str(dataset)]
+    locked = run_dir / "research_spec.locked.json"
+    if locked.exists():
+        argv += ["--research-spec", str(locked)]
+    return argv
+
+
+def retry_stage_support(app_root: Path | None = None) -> tuple[bool, bool]:
+    """(supported, takes_a_value) for ``src.main --retry-stage``.
+
+    Read from the pipeline's own argument definitions; falls back to its
+    ``--help`` text when the source cannot be read.
+    """
+    root = Path(app_root or paths.app_root())
+    text = ""
+    try:
+        text = (root / "src" / "main.py").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    if text:
+        idx = text.find('"--retry-stage"')
+        if idx < 0:
+            idx = text.find("'--retry-stage'")
+        if idx < 0:
+            return False, False
+        window = text[idx: idx + 600]
+        end = window.find("add_argument(", 1)
+        window = window if end < 0 else window[:end]
+        return True, "store_true" not in window
+    try:
+        result = proc.run([sys.executable, "-m", "src.main", "--help"], timeout=120, cwd=root)
+    except Exception:  # noqa: BLE001
+        return False, False
+    help_text = result.stdout or ""
+    m = re.search(r"--retry-stage(?:[ =]([A-Z_\[]\S*))?", help_text)
+    if not m:
+        return False, False
+    return True, bool(m.group(1))
+
+
+def _failed_stage(run_dir: Path) -> str | None:
+    status = _read_json(run_dir / "run_status.json")
+    abort = status.get("abort") if isinstance(status.get("abort"), dict) else None
+    if abort and abort.get("stage"):
+        return str(abort["stage"])
+    state = load_state(run_dir)
+    if isinstance(state.abort, dict) and state.abort.get("stage"):
+        return str(state.abort["stage"])
+    for st in state.stages:
+        if st.status == "failed":
+            return st.key
+    checkpoint = _read_json(run_dir / "checkpoint.json")
+    done = set(checkpoint.get("completed_stages") or [])
+    for key in ("FORMULATING", "ENGINEERING", "ANALYZING", "CRITIQUING", "WRITING", "REVIEWING", "VERIFYING"):
+        if key not in done:
+            return key
+    return None
+
+
+def resume(run_dir: Path | str) -> None:
+    """Start a stopped study again from its last finished step."""
+    run_dir = Path(run_dir)
+    if not run_dir.is_dir():
+        raise RunnerError(f"There is no study folder at {run_dir}.")
+    runner = _read_runner(run_dir)
+    pid = runner.get("pid")
+    if isinstance(pid, int) and process_alive(pid, runner.get("create_time")):
+        raise RunnerError("This study is still running. Watch it with: edmars status")
+
+    state = load_state(run_dir)
+    if state.final_state in ("COMPLETED", "INCOMPLETE"):
+        raise RunnerError(
+            "This study already finished, so there is nothing to resume. "
+            "See it with: edmars results   Start another with: edmars new"
+        )
+    argv = runner.get("argv") if isinstance(runner.get("argv"), list) else None
+    argv = _strip_resume_flags([str(a) for a in argv]) if argv else _reconstruct_argv(run_dir)
+    if not argv or not Path(argv[0]).exists():
+        argv = [sys.executable] + argv[1:]
+    argv.append("--resume")
+
+    if state.final_state == "ABORTED":
+        from edmars import endstates
+
+        outcome = endstates.classify(run_dir)
+        if outcome.resumable is False:
+            raise RunnerError(
+                f"This study cannot be resumed: {outcome.title}. {outcome.fix}".strip()
+            )
+        supported, takes_value = retry_stage_support(Path(runner.get("app_root") or paths.app_root()))
+        if not supported:
+            raise RunnerError(
+                "This study stopped with an error, and this version of the pipeline "
+                "cannot retry a failed step. Fix the cause, then start a new study "
+                "with: edmars new"
+            )
+        argv.append("--retry-stage")
+        if takes_value:
+            stage = _failed_stage(run_dir)
+            if stage:
+                argv.append(stage)
+
+    settings = _load_settings()
+    holder = active_run()
+    if holder is not None and Path(holder) != run_dir:
+        raise RunnerError(
+            f"Another study is still running ({Path(holder).name}). Wait for it to "
+            "finish, or stop it with: edmars stop"
+        )
+    _acquire_lock(run_dir)
+    study = as_dict(runner.get("study"))
+    config: dict[str, Any] = {}
+    try:
+        config = as_dict(yaml.safe_load((run_dir / "run_config.yaml").read_text(encoding="utf-8")))
+    except (OSError, yaml.YAMLError):
+        config = {}
+    review = bool(as_dict(config.get("review_gate")).get("enabled"))
+    provider = str(study.get("provider") or _sget(settings, "provider", "deepseek"))
+    env = child_env(settings, provider=provider, review=review, run_id=run_dir.name)
+
+    # Keep the earlier console output instead of letting the new process
+    # overwrite it.
+    console = run_dir / "console.log"
+    if console.exists():
+        n = 1
+        while (run_dir / f"console.{n}.log").exists():
+            n += 1
+        try:
+            console.rename(run_dir / f"console.{n}.log")
+        except OSError:
+            pass
+    try:
+        (run_dir / "STOP").unlink()
+    except OSError:
+        pass
+
+    new_pid, create_time = _spawn(run_dir, argv, env, settings)
+    runner = runner or {"schema": 1, "study": study, "created_at": _utc_now()}
+    now = _utc_now()
+    runner.update({
+        "argv": argv,
+        "pid": new_pid,
+        "create_time": create_time,
+        "resumed_at": now,
+        "python": sys.executable,
+        "app_root": runner.get("app_root") or str(Path(paths.app_root()).absolute()),
+    })
+    runner.setdefault("started_at", now)
+    runner.setdefault("resumes", []).append(now)
+    runner.pop("stopped_by_user", None)
+    runner.pop("stopped_at", None)
+    _write_json(run_dir / "runner.json", runner)
+
+
+# ---------------------------------------------------------------------------
+# Listing
+# ---------------------------------------------------------------------------
+
+
+def _is_run_dir(path: Path) -> bool:
+    return path.is_dir() and any(
+        (path / name).exists() for name in ("runner.json", "checkpoint.json", "pipeline.log", "events.jsonl")
+    )
+
+
+def _started(path: Path) -> datetime:
+    runner = _read_runner(path)
+    for key in ("started_at", "created_at"):
+        ts = parse_ts(runner.get(key))
+        if ts is not None:
+            return ts
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return datetime.fromtimestamp(0, timezone.utc)
+
+
+def _candidates(settings: dict[str, Any]) -> list[Path]:
+    root = studies_dir(settings)
+    try:
+        entries: Iterable[Path] = list(root.iterdir())
+    except OSError:
+        return []
+    runs = [p for p in entries if _is_run_dir(p)]
+    runs.sort(key=_started, reverse=True)
+    return runs
+
+
+def list_runs(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every study folder, newest first, with its current label."""
+    from edmars import endstates
+
+    active = active_run()
+    out: list[dict[str, Any]] = []
+    for path in _candidates(settings):
+        runner = _read_runner(path)
+        study = as_dict(runner.get("study"))
+        try:
+            outcome = endstates.classify(path)
+            label, kind = outcome.label, outcome.kind
+        except Exception:  # noqa: BLE001 -- one damaged folder must not hide the rest
+            label, kind = "Unreadable", "stopped"
+        question = study.get("research_question")
+        if not question:
+            spec = _read_json(path / "research_spec.json")
+            question = spec.get("research_question")
+        out.append({
+            "path": str(path),
+            "name": path.name,
+            "started_at": _started(path).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "question": question or "",
+            "task_type": study.get("task_type") or _read_json(path / "checkpoint.json").get("task_type") or "",
+            "dataset": study.get("dataset") or "",
+            "label": label,
+            "kind": kind,
+            "active": active is not None and Path(active) == path,
+        })
+    return out
+
+
+def latest_run(settings: dict[str, Any]) -> Path | None:
+    """The running study if there is one, else the most recent one."""
+    active = active_run()
+    if active is not None:
+        return active
+    runs = _candidates(settings)
+    return runs[0] if runs else None
+
+
+__all__ = [
+    "RunnerError",
+    "active_run",
+    "build_argv",
+    "build_effective_config",
+    "child_env",
+    "latest_run",
+    "launch",
+    "list_runs",
+    "prepare_run",
+    "resume",
+    "retry_stage_support",
+    "review_enabled",
+    "slugify",
+    "stop",
+    "studies_dir",
+]
