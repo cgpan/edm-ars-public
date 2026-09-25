@@ -371,8 +371,9 @@ To keep a variable for future terminals, add the `export` line to `~/.zshrc` or
 `~/.bashrc`, or on Windows run `setx DEEPSEEK_API_KEY "..."` once (it applies to
 terminals opened afterwards). A variable set in the terminal wins over the same
 name in `.env`. The AI-written analysis code runs with API keys removed from its
-environment, but it could still read a `.env` file on disk; see
-[PRIVACY.md](PRIVACY.md).
+own environment, so they do not show up in what it prints. That is not a
+barrier: code running as your user can still reach keys kept either way, so
+use a separate key with a spending limit; see [PRIVACY.md](PRIVACY.md).
 
 Choose the provider in `config.yaml` with `llm_provider`. Each provider has a
 block naming the model for every agent (`deepseek.models`, `minimax.models`,

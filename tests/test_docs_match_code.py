@@ -232,3 +232,21 @@ def test_privacy_states_the_real_size_of_error_excerpts() -> None:
     assert stated <= actual * 1.2, (
         f"PRIVACY.md says {stated}, far above the real {actual}"
     )
+
+
+def test_privacy_does_not_sell_the_key_scrub_as_isolation() -> None:
+    """The scrub keeps keys out of the generated code's own environment
+    (and so out of its printed output). Code running as the user can still
+    read them from the parent process, the shell profile, the registry or
+    .env, so the docs must not promise more, and must not advise moving
+    keys out of .env as if that protected them."""
+    from src.sandbox import child_env
+
+    assert "DEEPSEEK_API_KEY" not in child_env({"DEEPSEEK_API_KEY": "x", "PATH": "p"})
+    privacy = " ".join(PRIVACY.read_text(encoding="utf-8").split())
+    assert "not a security barrier" in privacy
+    assert "cannot read your keys" not in privacy
+    assert "instead of keeping them in" not in privacy
+    readme = " ".join(_readme().split())
+    assert "could still read a `.env` file on disk" not in readme
+    assert "That is not a barrier" in readme

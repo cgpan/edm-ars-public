@@ -49,14 +49,28 @@ machine.
 | Run folders | `output/run_<date>_<time>/` by default, or the folder you give with `--output-dir` | Each contains the paper, figures, results, logs, **row-level data extracts made from the dataset** (for example `train_X.csv` and `test_X.csv`), the generated code, and a `prompts/` folder with a copy of every prompt the pipeline's agents sent to the AI service and every reply. The review gate's revision requests and LSAR's own requests are not copied there, but the paper and the reviews they carry are in the run folder. Treat run folders like the dataset itself: do not post them publicly without removing the data extracts and `prompts/`. |
 | Findings memory | `findings_memory/memory.yaml` in the repository folder | The question, variables, headline result and open questions of each finished run. At the start of later runs this summary goes into the prompts sent to the AI service. Set `findings_memory.enabled: false` in `config.yaml` to turn it off. |
 
-## Keys are kept away from generated code
+## API keys and the AI-written code
 
-The AI-written analysis code runs on your computer. EDM-ARS removes API keys
-and tokens from the environment of that code, so it cannot read your keys
-from its environment. It can still read files your user account can read,
-including a `.env` file. If that matters to you, set the keys as environment
-variables in the terminal you start EDM-ARS from instead of keeping them in
-`.env`.
+The AI-written analysis code runs on your computer, as your user account.
+EDM-ARS removes API keys and tokens from that code's own environment, and
+from the environment it compiles the paper's LaTeX in. This keeps the keys
+out of what the code prints, which is sent back to the AI service when an
+attempt fails and saved in the run folder's `prompts/`.
+
+**This is not a security barrier.** Code running as you can still find your
+keys elsewhere: in the environment of the EDM-ARS process that started it, in
+the `.env` file, in your shell profile, or, for keys saved with `setx` on
+Windows, in your user registry. Keeping the keys in environment variables
+instead of `.env` does not change this. To limit what a leaked key could cost:
+
+- use a separate key for EDM-ARS, with a spending limit or a small prepaid
+  balance at the provider;
+- revoke the key and make a new one if you think it was exposed, and when you
+  stop using EDM-ARS;
+- for isolation, run the generated code in the Docker sandbox
+  (`sandbox.enabled: true`), which sees only the run folder and the dataset.
+  It is experimental and cannot run every study type; see the README's
+  Install section.
 
 ## Deleting everything
 
