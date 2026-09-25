@@ -102,15 +102,21 @@ class TestReviewGateProviderRouting:
         gate = ReviewGate(cfg, str(tmp_path), log_fn=None)
         assert gate._llm_model == "deepseek-v4-flash"
 
-    def test_anthropic_default_branch_unchanged(
+    def test_anthropic_branch_uses_the_writer_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The anthropic branch used to send review_gate.revision_model
+        straight to Anthropic. That key ships as ``deepseek-v4-pro``, so
+        every revision failed with model-not-found (E2). It now follows
+        models.revision_writer -> models.writer, and revision_model is a
+        DeepSeek-only fallback."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
         from src.review_gate import ReviewGate
 
         cfg = {
             "llm_provider": "anthropic",
-            "review_gate": {"revision_model": "claude-sonnet-4-6"},
+            "models": {"writer": "claude-sonnet-4-6"},
+            "review_gate": {"revision_model": "deepseek-v4-pro"},
         }
         gate = ReviewGate(cfg, str(tmp_path), log_fn=None)
         assert gate._llm_provider == "anthropic"

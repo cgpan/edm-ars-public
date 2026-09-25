@@ -26,6 +26,7 @@ from src.agents.llm_client import (
 from src.agents.provider_resolver import (
     ProviderConfigError,
     resolve_provider_for_stage,
+    resolve_revision_writer,
 )
 from src.context import PipelineContext
 from src.errors import ProviderError, code_for_exception
@@ -460,6 +461,76 @@ class TestOpenAIModelRequired:
 
 
 # ---------------------------------------------------------------------------
+# E2 -- the gate's reviser uses a model the active provider serves
+# ---------------------------------------------------------------------------
+
+
+class TestRevisionModel:
+    def _gate(self, tmp_path: Path, cfg: dict) -> Any:
+        from src.review_gate import ReviewGate
+
+        logs: list[str] = []
+        gate = ReviewGate(cfg, str(tmp_path), log_fn=lambda _a, m: logs.append(m))
+        gate._test_logs = logs
+        return gate
+
+    def test_openai_uses_the_writer_model_not_the_deepseek_id(self, tmp_path: Path) -> None:
+        from src.config import load_config
+
+        cfg = load_config(str(ROOT / "config.yaml"))
+        cfg["llm_provider"] = "openai"
+        cfg["openai"] = {"models": {"writer": "gpt-5.4"}}
+        gate = self._gate(tmp_path, cfg)
+        assert gate._llm_provider == "openai"
+        assert gate._llm_model == "gpt-5.4"
+        assert cfg["review_gate"]["revision_model"] == "deepseek-v4-pro"
+
+    def test_revision_writer_entry_wins(self, tmp_path: Path) -> None:
+        cfg = _config("openai", openai={"models": {"writer": "gpt-5.4",
+                                                     "revision_writer": "gpt-5.4-mini"}})
+        assert self._gate(tmp_path, cfg)._llm_model == "gpt-5.4-mini"
+
+    def test_per_stage_revision_writer_is_honoured(self, tmp_path: Path) -> None:
+        cfg = _config("deepseek", per_stage_providers={
+            "revision_writer": {"provider": "openai", "model": "gpt-5.4"}})
+        gate = self._gate(tmp_path, cfg)
+        assert (gate._llm_provider, gate._llm_model) == ("openai", "gpt-5.4")
+
+    def test_no_model_disables_revision_and_says_why(self, tmp_path: Path) -> None:
+        cfg = _config("openai", review_gate={"revision_model": "deepseek-v4-pro"})
+        gate = self._gate(tmp_path, cfg)
+        assert gate._llm_model == ""
+        assert gate._llm_client is None
+        assert "openai.models.revision_writer" in gate.revision_unavailable_reason
+        assert any("revision disabled" in m for m in gate._test_logs)
+        assert gate._call_revision_llm("prompt") is None
+
+    def test_malformed_reviser_setting_disables_revision_only(self, tmp_path: Path) -> None:
+        cfg = _config("deepseek", per_stage_providers={
+            "revision_writer": {"provider": "nope", "model": "x"}})
+        gate = self._gate(tmp_path, cfg)
+        assert gate._llm_client is None
+        assert "invalid reviser configuration" in gate.revision_unavailable_reason
+        assert gate._call_revision_llm("prompt") is None
+
+    def test_deepseek_still_falls_back_to_revision_model(self) -> None:
+        cfg = {"llm_provider": "deepseek", "review_gate": {"revision_model": "deepseek-flash"}}
+        assert resolve_revision_writer(cfg).model == "deepseek-flash"
+
+    def test_revision_failure_is_classified_and_kept(
+        self, tmp_path: Path, sleeps: list[float]
+    ) -> None:
+        gate = self._gate(tmp_path, _config())
+        gate._llm_client = MagicMock()
+        gate._llm_client.chat.completions.create.side_effect = _status_error(
+            openai.APIStatusError, 402, "Insufficient Balance")
+        assert gate._call_revision_llm("prompt") is None
+        assert gate.revision_failures[0]["code"] == "NO_CREDIT"
+        assert any("[NO_CREDIT]" in m for m in gate._test_logs)
+        assert sleeps == []
+
+
+# ---------------------------------------------------------------------------
 # E3 -- one base-URL rule for agents and gate
 # ---------------------------------------------------------------------------
 
@@ -474,6 +545,20 @@ class TestBaseUrlPrecedence:
         agent = _agent(tmp_path, _config())
         assert str(agent.client.base_url).rstrip("/") == "http://proxy.example/v1"
 
+    def test_the_gate_goes_where_the_agents_go(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from src.review_gate import ReviewGate
+
+        monkeypatch.setenv("DEEPSEEK_BASE_URL", "http://proxy.example/v1")
+        cfg = _config()
+        agent = _agent(tmp_path, cfg)
+        gate = ReviewGate(cfg, str(tmp_path), log_fn=None)
+        assert str(gate._llm_client.base_url) == str(agent.client.base_url)
+        monkeypatch.delenv("DEEPSEEK_BASE_URL")
+        del cfg["deepseek"]["base_url"]
+        gate = ReviewGate(cfg, str(tmp_path), log_fn=None)
+        assert str(gate._llm_client.base_url).rstrip("/") == "https://api.deepseek.com"
 
     def test_config_used_when_env_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
