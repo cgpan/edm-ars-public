@@ -11,9 +11,17 @@ The resolution rules:
        (its 'provider' + 'model' fields).
     2. Else, fall back to the legacy config schema:
        - provider = config['llm_provider'] (default 'anthropic')
-       - model = config[<provider>]['models'][<agent_key>] if present,
-         otherwise config['models'][<agent_key>] (Anthropic-direct path),
-         otherwise the provider's hardcoded default.
+       - model = config[<provider>]['models'][<agent_key>] for the
+         minimax / openai / deepseek providers, and
+         config['models'][<agent_key>] for anthropic. A missing entry
+         comes back as "" -- the resolver never guesses. BaseAgent then
+         applies the provider default for deepseek and minimax, and
+         refuses to start for openai, which ships no default block
+         (defect E1: every stage used to run silently on gpt-4o).
+
+  ``ProviderConfig.model_key`` records WHERE the model was (or would
+  have been) read from, e.g. ``deepseek.models.critic``, so an error
+  about a retired or missing model can name the line to edit.
 
   Max tokens:
     1. If config['per_stage_max_tokens'][<agent_key>] is set, use that.
@@ -58,6 +66,12 @@ class ProviderConfig:
     name: str
     model: str
     base_url: str | None = None
+    #: Dotted config path the model id comes from (for error messages).
+    model_key: str = ""
+    #: True when the stage has its own ``per_stage_providers`` entry. Its
+    #: ``base_url`` then names one stage explicitly and outranks the
+    #: provider-wide ``<PROVIDER>_BASE_URL`` environment variable.
+    per_stage: bool = False
 
 
 def resolve_provider_for_stage(
@@ -108,6 +122,8 @@ def resolve_provider_for_stage(
             name=provider,
             model=model,
             base_url=override.get("base_url"),
+            model_key=f"per_stage_providers.{agent_key}.model",
+            per_stage=True,
         )
 
     # Fall back to legacy single-provider schema.
@@ -128,11 +144,115 @@ def resolve_provider_for_stage(
             # decide whether to fall back further.
             model = ""
         base_url = provider_block.get("base_url")
-        return ProviderConfig(name=provider, model=model, base_url=base_url)
+        return ProviderConfig(
+            name=provider,
+            model=model,
+            base_url=base_url,
+            model_key=f"{provider}.models.{agent_key}",
+        )
 
     # Anthropic-direct path uses config["models"][agent_key].
     model = (config.get("models", {}) or {}).get(agent_key, "")
-    return ProviderConfig(name=provider, model=model, base_url=None)
+    return ProviderConfig(
+        name=provider, model=model, base_url=None,
+        model_key=f"models.{agent_key}",
+    )
+
+
+#: Models BaseAgent falls back to when a stage has no entry. openai has
+#: none on purpose (E1): config.yaml ships no openai block, and the old
+#: silent gpt-4o default put every stage, the Critic included, on it.
+_AGENT_DEFAULTS: dict[str, str] = {
+    "deepseek": "deepseek-v4-pro",
+    "minimax": "MiniMax-M2.5",
+}
+
+
+def effective_model(provider_cfg: ProviderConfig, agent_key: str) -> str:
+    """The model id an agent stage will call.
+
+    The configured model when there is one; else the provider default
+    for deepseek and minimax; for openai a ProviderConfigError naming the
+    missing key; for anthropic whatever ``models.<agent_key>`` held (the
+    resolver already read it), possibly "".
+    """
+    if provider_cfg.model:
+        return provider_cfg.model
+    if provider_cfg.name in _AGENT_DEFAULTS:
+        return _AGENT_DEFAULTS[provider_cfg.name]
+    if provider_cfg.name == "openai":
+        raise ProviderConfigError(
+            f"llm_provider is 'openai' but no model is configured for the "
+            f"'{agent_key}' stage. Add openai.models.{agent_key} to "
+            f"config.yaml (or a per_stage_providers.{agent_key} entry "
+            f"with provider and model). EDM-ARS no longer falls back to "
+            f"gpt-4o silently."
+        )
+    return provider_cfg.model
+
+
+#: Last-resort revision models for providers that have a sensible one.
+#: openai and anthropic deliberately have none: the only id the config
+#: could offer them is ``review_gate.revision_model``, which ships as a
+#: DeepSeek id and fails with model-not-found anywhere else (defect E2).
+_REVISION_DEFAULTS: dict[str, str] = {
+    "deepseek": "deepseek-v4-pro",
+    "minimax": "MiniMax-M2.7",
+}
+
+
+def resolve_revision_writer(config: dict) -> ProviderConfig:
+    """Provider and model for the review gate's manuscript reviser.
+
+    Resolution order:
+      1. ``per_stage_providers.revision_writer`` (provider + model).
+      2. ``<provider>.models.revision_writer`` (``models.revision_writer``
+         for anthropic).
+      3. ``<provider>.models.writer`` (``models.writer`` for anthropic):
+         the reviser rewrites the Writer's manuscript, so the Writer's
+         model is the natural fallback.
+      4. ``review_gate.revision_model`` -- ONLY when the provider is
+         deepseek. That key ships as a DeepSeek id; sending it to
+         OpenAI, Anthropic or a local server can only fail.
+      5. The provider's built-in default (deepseek, minimax), else "".
+
+    An empty ``model`` means no reviser can be configured; the caller
+    decides what to do (the gate disables revision and says so).
+    """
+    primary = resolve_provider_for_stage("revision_writer", config)
+    if primary.per_stage or primary.model:
+        return primary
+    # The provider-wide writer entry, not a per_stage_providers.writer
+    # override: that one may name a different provider altogether.
+    if primary.name == "anthropic":
+        writer_model = (config.get("models") or {}).get("writer") or ""
+        writer_key = "models.writer"
+    else:
+        block = config.get(primary.name) or {}
+        writer_model = (block.get("models") or {}).get("writer") or ""
+        writer_key = f"{primary.name}.models.writer"
+    if writer_model:
+        return ProviderConfig(
+            name=primary.name,
+            model=str(writer_model),
+            base_url=primary.base_url,
+            model_key=writer_key,
+        )
+    if primary.name == "deepseek":
+        rv = ((config.get("review_gate") or {}).get("revision_model") or "")
+        if rv:
+            return ProviderConfig(
+                name=primary.name,
+                model=str(rv),
+                base_url=primary.base_url,
+                model_key="review_gate.revision_model",
+            )
+    return ProviderConfig(
+        name=primary.name,
+        model=_REVISION_DEFAULTS.get(primary.name, ""),
+        base_url=primary.base_url,
+        model_key=primary.model_key,
+    )
 
 
 def resolve_max_tokens_for_stage(

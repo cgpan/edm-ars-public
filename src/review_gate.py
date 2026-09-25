@@ -24,8 +24,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-import anthropic  # type: ignore[import-not-found]
-
 
 # ---------------------------------------------------------------------------
 # Dimension → EDM-ARS agent mapping (for suggested_focus_areas)
@@ -277,46 +275,73 @@ class ReviewGate:
         self.revision_model: str = rg_cfg.get("revision_model", "claude-sonnet-4-6")
         self.revision_max_tokens: int = rg_cfg.get("revision_max_tokens", 16000)
 
-        # Build LLM client (same pattern as BaseAgent — respects llm_provider)
-        provider = config.get("llm_provider", "anthropic")
-        self._llm_provider: str = provider
-        if provider == "minimax":
-            api_key = os.environ.get("MINIMAX_API_KEY", "")
-            base_url = config.get("minimax", {}).get(
-                "base_url", "https://api.minimax.io/anthropic"
-            )
-            self._llm_client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
-            minimax_models = config.get("minimax", {}).get("models", {})
-            self._llm_model = minimax_models.get(
-                "revision_writer", minimax_models.get("writer", "MiniMax-M2.7")
-            )
-        elif provider in ("deepseek", "openai"):
-            # OpenAI-compatible chat.completions path. Model resolution:
-            # <provider>.models.revision_writer wins (per-agent tiering),
-            # then review_gate.revision_model.
-            import openai  # deferred: anthropic-only envs need not install it
+        # Build the reviser's LLM client through the same code path as the
+        # agents (src/agents/llm_client.py): same base-URL precedence, same
+        # key checks, same timeout and retry policy (E3/D5). The model is
+        # resolved by provider_resolver.resolve_revision_writer:
+        #   per_stage_providers.revision_writer
+        #   -> <provider>.models.revision_writer
+        #   -> <provider>.models.writer            (models.* for anthropic)
+        #   -> review_gate.revision_model          (deepseek ONLY)
+        #   -> provider default (deepseek, minimax)
+        # review_gate.revision_model ships as a DeepSeek id; it used to be
+        # sent to OpenAI / Anthropic / a local server too, where every
+        # revision failed with model-not-found and the gate re-reviewed an
+        # unrevised manuscript (E2).
+        from src.agents.llm_client import LLMSettings, build_client, llm_settings
+        from src.agents.provider_resolver import (
+            ProviderConfig,
+            ProviderConfigError,
+            resolve_revision_writer,
+        )
 
-            provider_block = config.get(provider, {}) or {}
-            if provider == "deepseek":
-                api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-                base_url = provider_block.get(
-                    "base_url", "https://api.deepseek.com"
+        self._llm_client: Any = None
+        #: Why revisions cannot run (None when they can). Read by the
+        #: summary so a gate that never revised says why.
+        self.revision_unavailable_reason: Optional[str] = None
+        #: One entry per failed revision call: {"code", "message"}.
+        self.revision_failures: list[dict] = []
+        # A malformed reviser setting disables revision (and says so); it
+        # must not take the LSAR review itself down with it.
+        try:
+            self._llm_provider_cfg = resolve_revision_writer(config)
+        except ProviderConfigError as exc:
+            self._llm_provider_cfg = ProviderConfig(
+                name=str(config.get("llm_provider", "anthropic")), model=""
+            )
+            self.revision_unavailable_reason = f"invalid reviser configuration: {exc}"
+        try:
+            self._llm_settings = llm_settings(config)
+        except ProviderConfigError as exc:
+            self._llm_settings = LLMSettings()
+            self.revision_unavailable_reason = (
+                self.revision_unavailable_reason or f"invalid llm settings: {exc}"
+            )
+        provider = self._llm_provider_cfg.name
+        self._llm_provider: str = provider
+        self._llm_model: str = self._llm_provider_cfg.model
+        if self.revision_unavailable_reason is None and not self._llm_model:
+            key = "models" if provider == "anthropic" else f"{provider}.models"
+            self.revision_unavailable_reason = (
+                f"no revision model configured for provider {provider!r}; set "
+                f"{key}.revision_writer (or {key}.writer) in config.yaml"
+            )
+        if self.revision_unavailable_reason is None:
+            try:
+                self._llm_client = build_client(
+                    self._llm_provider_cfg, self._llm_settings
                 )
-            else:
-                api_key = os.environ.get("OPENAI_API_KEY", "")
-                base_url = provider_block.get("base_url")
-            client_kwargs: dict = {"api_key": api_key}
-            if base_url:
-                client_kwargs["base_url"] = base_url
-            self._llm_client = openai.OpenAI(**client_kwargs)
-            provider_models = provider_block.get("models", {}) or {}
-            self._llm_model = (
-                provider_models.get("revision_writer") or self.revision_model
+            except EnvironmentError as exc:
+                self.revision_unavailable_reason = str(exc)
+        if self.revision_unavailable_reason:
+            self._log(
+                f"Paper revision disabled: {self.revision_unavailable_reason}"
             )
         else:
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            self._llm_client = anthropic.Anthropic(api_key=api_key)
-            self._llm_model = self.revision_model
+            self._log(
+                f"Revision model: {provider}/{self._llm_model} "
+                f"(from {self._llm_provider_cfg.model_key or 'provider default'})"
+            )
 
     # ------------------------------------------------------------------
     # Internal logging helper
@@ -843,8 +868,24 @@ class ReviewGate:
     )
 
     def _call_revision_llm(self, prompt: str) -> Optional[str]:
-        """Send *prompt* to the configured provider. ``None`` on failure."""
-        try:
+        """Send *prompt* to the configured provider. ``None`` on failure.
+
+        Transient failures are retried under the shared policy and every
+        wait is logged before it starts; a failure that remains is logged
+        with its code (KEY_REJECTED, NO_CREDIT, MODEL_GONE, ...) and kept
+        in ``revision_failures`` instead of vanishing into a bare None.
+        """
+        from src.agents.llm_client import call_with_retries
+        from src.errors import ProviderError
+
+        if self._llm_client is None:
+            self._log(
+                "LLM revision skipped: "
+                f"{self.revision_unavailable_reason or 'no client'}"
+            )
+            return None
+
+        def _attempt() -> str:
             if self._llm_provider in ("deepseek", "openai"):
                 response = self._llm_client.chat.completions.create(
                     model=self._llm_model,
@@ -864,7 +905,23 @@ class ReviewGate:
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 return stream.get_final_text()
+
+        try:
+            return call_with_retries(
+                _attempt,
+                provider_cfg=self._llm_provider_cfg,
+                model=self._llm_model,
+                settings=self._llm_settings,
+                on_wait=lambda _s, _a, _r, message: self._log(message),
+            )
+        except ProviderError as exc:
+            self.revision_failures.append({"code": exc.code, "message": str(exc)})
+            self._log(f"LLM revision call failed [{exc.code}]: {exc}")
+            return None
         except Exception as exc:
+            self.revision_failures.append(
+                {"code": "UNKNOWN", "message": f"{type(exc).__name__}: {exc}"}
+            )
             self._log(f"LLM revision call failed: {exc}")
             return None
 
