@@ -1,7 +1,60 @@
 """Pytest configuration: registers custom markers and handles integration test skipping."""
 import os
+from pathlib import Path
 
 import pytest
+
+#: The findings memory a real run reads and writes. The shipped config
+#: enables it, so any test that drives the Orchestrator to a terminal state
+#: with that config would otherwise append a fake run to it.
+_LIVE_FINDINGS_MEMORY_DIR = (
+    Path(__file__).resolve().parents[1] / "findings_memory"
+).resolve()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_findings_memory(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Send every read and write of the live findings memory to a temp dir.
+
+    Before this, ``pytest tests/`` -- the README's install check -- left
+    runs such as ``test_happy_path_completes0`` in
+    ``findings_memory/memory.yaml``, and the ProblemFormulator of the
+    user's first real run was told X3TGPAMAT had already been studied by
+    a dozen runs that never happened. Paths outside the live directory
+    (the tests of FindingsMemory itself use tmp_path) pass through.
+    """
+    try:
+        from src import findings_memory as fm
+    except Exception:  # pragma: no cover - src not importable in some units
+        return
+
+    sandbox: dict[str, Path] = {}
+
+    def _redirect(path: str) -> str:
+        try:
+            resolved = Path(path).resolve()
+        except (OSError, TypeError, ValueError):
+            return path
+        if resolved.parent != _LIVE_FINDINGS_MEMORY_DIR:
+            return path
+        if "dir" not in sandbox:
+            sandbox["dir"] = tmp_path_factory.mktemp("findings_memory")
+        return str(sandbox["dir"] / resolved.name)
+
+    original_init = fm.FindingsMemory.__init__
+    original_load = fm.FindingsMemory.load.__func__
+
+    def _init(self: "fm.FindingsMemory", path: str) -> None:
+        original_init(self, _redirect(path))
+
+    def _load(cls: type, path: str) -> "fm.FindingsMemory":
+        return original_load(cls, _redirect(path))
+
+    monkeypatch.setattr(fm.FindingsMemory, "__init__", _init)
+    monkeypatch.setattr(fm.FindingsMemory, "load", classmethod(_load))
 
 
 @pytest.fixture(autouse=True)
