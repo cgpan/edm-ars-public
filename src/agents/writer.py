@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from src.agents.base import BaseAgent
+from src.agents.base import BaseAgent, literature_for_prompt
 from src.citations import (
     build_bibtex,
     format_citation_key_block,
@@ -1132,7 +1132,7 @@ class Writer(BaseAgent):
             "",
             "## literature_context.json",
             "```json",
-            json.dumps(literature_context or {}, indent=2),
+            json.dumps(literature_for_prompt(literature_context or {}), indent=2),
             "```",
             "",
             # Arc P3: enumerate the legal citation keys explicitly. The
@@ -1206,7 +1206,7 @@ class Writer(BaseAgent):
             "",
             "## literature_context.json",
             "```json",
-            json.dumps(literature_context or {}, indent=2),
+            json.dumps(literature_for_prompt(literature_context or {}), indent=2),
             "```",
             "",
             # Arc P3: enumerate the legal citation keys explicitly. The

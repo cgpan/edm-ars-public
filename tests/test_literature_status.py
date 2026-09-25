@@ -191,6 +191,78 @@ class TestRetrievalStatus:
         assert "s2_001" in prompt
 
 
+class TestStatusStaysOutOfDownstreamPrompts:
+    """The status rides on ctx.literature_context (CONTRACT section 6),
+    which the Critic and the Writer paste into their prompts. Recording a
+    search's outcome must not change what those models read."""
+
+    _MODEL_LIT = {
+        "search_query": "q",
+        "novelty_evidence": "n",
+        "papers": [{"paperId": "s2_001", "title": "Real paper", "year": 2024}],
+    }
+    _STATUS = {"semantic_scholar": "ok", "arxiv": "ok", "n_papers": 1,
+               "degraded": False, "n_semantic_scholar": 1, "n_arxiv": 0}
+
+    def _stored(self) -> dict:
+        lit = ProblemFormulator._with_retrieval_status(
+            dict(self._MODEL_LIT), {"retrieval_status": self._STATUS})
+        assert lit["retrieval_status"] == self._STATUS
+        return lit
+
+    def _ctx(self, tmp_path: Path) -> PipelineContext:
+        return PipelineContext(
+            dataset_name="hsls09_public",
+            raw_data_path=str(tmp_path / "raw.csv"),
+            output_dir=str(tmp_path),
+        )
+
+    def test_critic_message_is_unchanged_by_the_status(self, tmp_path: Path) -> None:
+        from src.agents.critic import Critic
+
+        config = load_config(str(ROOT / "config.yaml"))
+        with patch("anthropic.Anthropic"):
+            critic = Critic(self._ctx(tmp_path), "critic", config)
+
+        def build(lit: dict) -> str:
+            return critic._build_user_message(
+                research_spec={}, literature_context=lit, data_report={},
+                results_object={}, registry={}, task_template={}, checklist={},
+                revision_cycle=0,
+            )
+
+        with_status = build(self._stored())
+        assert "retrieval_status" not in with_status
+        assert "s2_001" in with_status
+        assert with_status == build(dict(self._MODEL_LIT))
+
+    def test_writer_messages_are_unchanged_by_the_status(self, tmp_path: Path) -> None:
+        from src.agents.writer import Writer
+
+        config = load_config(str(ROOT / "config.yaml"))
+        with patch("anthropic.Anthropic"):
+            writer = Writer(self._ctx(tmp_path), "writer", config)
+
+        def v1(lit: dict) -> str:
+            return writer._build_user_message(
+                research_spec={}, literature_context=lit, data_report={},
+                results_object={}, review_report={},
+            )
+
+        def v2(lit: dict) -> str:
+            return writer._build_user_message_with_outline(
+                outline={"sections": []}, research_spec={},
+                literature_context=lit, data_report={},
+                results_object={}, review_report={},
+            )
+
+        for build in (v1, v2):
+            with_status = build(self._stored())
+            assert "retrieval_status" not in with_status
+            assert "s2_001" in with_status
+            assert with_status == build(dict(self._MODEL_LIT))
+
+
 class TestProviderFailureIsNotSwallowed:
     def test_query_generation_reraises_a_provider_error(self, tmp_path: Path) -> None:
         from src.errors import ProviderError
