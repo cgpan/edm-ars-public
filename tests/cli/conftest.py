@@ -106,3 +106,9 @@ def reset_ui() -> Iterator[None]:
     ui.reset()
     yield
     ui.reset()
+
+
+# The run/live-view/results fixtures (``run_home`` and the synthetic run
+# folders) live in ``_run_support.py``; importing it here makes them
+# available to every test module.
+from tests.cli._run_support import run_home  # noqa: E402,F401

@@ -1,0 +1,438 @@
+# User-facing wording for the live view, the end screens and summary.html.
+#
+# Everything a researcher reads about a run lives here, not in Python, so
+# the wording can be reviewed (and one day translated) in one place.
+# Placeholders in {braces} are filled in by edmars/endstates.py:
+#   {run}      the study folder, quoted for the shell when needed
+#   {provider} the AI service name       {dataset} the dataset id
+#   {reason}   a short technical reason   {stage}   the step that failed
+# Tests (tests/cli/test_endstates.py) check that every abort code in
+# src/errors.py and every invariant code in src/invariants.py has an entry.
+
+reminder: >-
+  This is an AI-generated draft. Check every number and citation before
+  sharing, and follow your venue's rules on disclosing AI use. See
+  `edmars disclaimer`.
+
+saved_note: "Your finished steps are saved."
+
+stages:
+  FORMULATING:
+    title: "Framing the question & finding related studies"
+    now: >-
+      The AI is turning your question into a precise study plan and
+      searching Semantic Scholar and arXiv for related papers.
+  ENGINEERING:
+    title: "Preparing the data"
+    now: >-
+      The AI is writing and running code that loads the dataset, keeps the
+      variables in the plan, handles missing answers and sets aside a test
+      group of students.
+  ANALYZING:
+    title: "Running the analysis"
+    now:
+      default: "The AI is writing and running the analysis code."
+      prediction: >-
+        Training and comparing several prediction models, with confidence
+        intervals and a check of how well each group of students is
+        predicted.
+      causal_soo: >-
+        Estimating the effect with several methods (matching, weighting,
+        doubly robust), checking that the groups are comparable and how
+        sensitive the result is to hidden bias.
+      causal_itr: >-
+        Learning a rule for who benefits most from the treatment and
+        estimating how much better it does than treating everyone or no
+        one.
+      causal_did: >-
+        Comparing how the gap changed between the two cohorts, with and
+        without adjusting for changes in who was surveyed.
+      psychometrics: >-
+        Fitting measurement models to the survey items: reliability,
+        factor structure, item response models, and whether the items work
+        the same way across groups.
+  CRITIQUING:
+    title: "Internal methods review"
+    now: >-
+      A second AI is checking the methods and the numbers for problems
+      such as data leakage, missing analyses or claims the results do not
+      support.
+  REVISING:
+    title: "Revising (only if the reviewer asks for changes)"
+    now: "The reviewer asked for changes; the affected steps are being redone."
+  WRITING:
+    title: "Writing the paper and making the PDF"
+    now: >-
+      Writing the paper section by section, then turning it into a PDF
+      with LaTeX.
+  REVIEWING:
+    title: "Automated peer review (LSAR)"
+    now: >-
+      LSAR, an automated reviewer, is scoring the paper against papers
+      accepted at the venue. This step often takes 20 to 40 minutes.
+  VERIFYING:
+    title: "Final checks"
+    now: "Checking the paper against the study's own numbers, figures and citations."
+
+task_types:
+  prediction: "Prediction"
+  causal_soo: "Cause and effect (average effect)"
+  causal_itr: "Cause and effect (who benefits)"
+  causal_did: "Cause and effect (gap change between cohorts)"
+  psychometrics: "Measurement"
+
+providers:
+  deepseek: "DeepSeek"
+  openai: "OpenAI"
+  anthropic: "Anthropic"
+  local: "a model on your own computer"
+  minimax: "MiniMax"
+
+outcomes:
+  ready: "Ready"
+  unverified: "Ready, with unresolved concerns"
+  gate_failed: "Ready, below the review benchmark"
+  not_reviewed: "Ready, not reviewed"
+  serious_one: "Ready, with 1 serious issue to check"
+  serious_many: "Ready, with {n} serious issues to check"
+  issues_one: "Ready, with 1 issue to check"
+  issues_many: "Ready, with {n} issues to check"
+  not_checked: "Ready, final checks did not run"
+  not_ready: "Not ready"
+  stopped: "Stopped"
+  running: "Still running"
+
+# Plain wording for why the automated review (LSAR) did not run.
+gate_skip_reasons:
+  lsar_not_found: "LSAR is not installed where EDM-ARS expects it."
+  lsar_import_failed: "LSAR is installed but could not be started."
+  no_pdf: "There was no PDF to review."
+  disabled: "Automated peer review was switched off."
+  exception: "LSAR stopped with an error."
+  not_available: "Automated peer review was requested, but LSAR is not set up on this computer."
+
+# Failure catalog: one entry per code. `command` may hold several lines;
+# each line is one command to type.
+failures:
+  KEY_MISSING:
+    title: "No API key for the AI service"
+    why: >-
+      The study needs an API key for {provider}, and none was found in the
+      system keychain or in the environment.
+    fix: "Add your key with the setup wizard, then resume. Nothing already finished is lost."
+    command: |-
+      edmars setup ai
+      edmars resume {run}
+  KEY_REJECTED:
+    title: "The AI service rejected the API key"
+    why: >-
+      {provider} refused the key (HTTP 401 or 403). It may have been
+      mistyped, revoked, or created for a different service.
+    fix: >-
+      Copy a fresh key from the provider's website, store it with the
+      setup wizard, then resume.
+    command: |-
+      edmars setup ai
+      edmars resume {run}
+  NO_CREDIT:
+    title: "Your AI account is out of credit"
+    why: >-
+      {provider} said the account has no balance left (HTTP 402 or
+      "Insufficient Balance").
+    fix: >-
+      Top up the account on the provider's website (DeepSeek:
+      https://platform.deepseek.com/top_up), then resume. Nothing already
+      finished is lost.
+    command: "edmars resume {run}"
+  RATE_LIMITED:
+    title: "The AI service is limiting requests"
+    why: >-
+      {provider} kept answering "too many requests" (HTTP 429), even after
+      EDM-ARS waited and tried again.
+    fix: "Wait 10 to 30 minutes, then resume. If it keeps happening, check your account's rate limits."
+    command: "edmars resume {run}"
+  NETWORK:
+    title: "Could not reach the AI service"
+    why: >-
+      The connection to {provider} failed several times. The internet
+      connection, a firewall, VPN or proxy, or the provider itself may be
+      down.
+    fix: "Check your internet connection (and any VPN or proxy), then resume."
+    command: "edmars resume {run}"
+  TIMEOUT:
+    title: "A step took too long"
+    why: >-
+      The AI service or the analysis code did not finish within its time
+      limit.
+    fix: >-
+      Resume; slow periods at the provider usually pass. If the analysis
+      code keeps timing out, start a smaller study (fewer variables).
+    command: "edmars resume {run}"
+  MODEL_GONE:
+    title: "The AI model is no longer offered"
+    why: >-
+      {provider} does not recognise a model name in your settings. It may
+      have been retired or renamed.
+    fix: "Pick current models in the setup wizard's AI step, then resume."
+    command: |-
+      edmars setup ai
+      edmars resume {run}
+  PROVIDER_ERROR:
+    title: "The AI service returned an error"
+    why: "{provider} answered with a server error and did not explain it."
+    fix: "Wait a few minutes and resume. If it keeps happening, check the provider's status page."
+    command: "edmars resume {run}"
+  DATA_MISSING:
+    title: "The dataset file is missing"
+    why: >-
+      The data file this study needs ({dataset}) was not found in the
+      EDM-ARS data folder.
+    fix: "Install or import the dataset, then resume."
+    command: |-
+      edmars data install {dataset}
+      edmars resume {run}
+  DATA_WRONG_FORMAT:
+    title: "The dataset file is not in the expected format"
+    why: >-
+      EDM-ARS expects the NCES public-use CSV with text labels (for
+      example "Male" and "Female"). The file it found looks different: a
+      numeric-code extract, another release, or a damaged download.
+    fix: "Check the file, then download or import it again."
+    command: |-
+      edmars data verify
+      edmars data install {dataset}
+  DE_VALIDATION_FAILED:
+    title: "The data could not be prepared"
+    why: >-
+      The AI-written data-preparation code did not pass its own checks
+      after several tries (for example, missing values were left over or
+      the outcome came out in the wrong form).
+    fix: >-
+      Resume once to try again. If it fails again, start a simpler study
+      (fewer variables, a more commonly answered outcome).
+    command: "edmars resume {run}"
+  SAMPLE_TOO_SMALL:
+    title: "Too few students left to analyse"
+    why: >-
+      After removing students with missing answers, fewer than 1,000
+      remained. That is too few for a trustworthy study, and trying again
+      would give the same result.
+    fix: >-
+      Start a new study with an outcome and variables that more students
+      answered. The free feasibility check shows how much is missing
+      before anything is spent.
+    command: "edmars new"
+  DATA_CONTRACT_FAILED:
+    title: "The prepared data did not match the study design"
+    why: >-
+      Cause-and-effect studies need the treatment, the outcome and the
+      background variables in a specific form. After a retry the prepared
+      data still did not have it.
+    fix: >-
+      Resume once. If it fails again, start from one of the example
+      studies, which are known to work.
+    command: "edmars resume {run}"
+  ANALYSIS_FAILED:
+    title: "The analysis code failed"
+    why: >-
+      The AI-written analysis code crashed or produced no usable results
+      after several tries.
+    fix: >-
+      Resume to try again; the prepared data is kept. The last error is in
+      console.log in the study folder.
+    command: "edmars resume {run}"
+  PRE_CRITIC_ABORT:
+    title: "Automatic checks stopped the study"
+    why: >-
+      Built-in checks found a problem that a revision cannot fix (for
+      example, the results the paper would need were missing entirely).
+    fix: "Start a new study, possibly with a simpler question."
+    command: "edmars new"
+  CRITIC_ABORT:
+    title: "The internal reviewer stopped the study"
+    why: >-
+      The methods reviewer judged the study fundamentally flawed (for
+      example, the question cannot be answered with this data). A paper
+      written from it would mislead.
+    fix: >-
+      Read the reviewer's notes in review_report.json in the study folder,
+      then start a new study with a revised question.
+    command: "edmars new"
+  LEAKAGE_SUSPECTED:
+    title: "Possible data leakage"
+    why: >-
+      The results look too good to be true (for example, an AUC above
+      0.95). That usually means a predictor already contains the answer,
+      such as a variable measured after the outcome.
+    fix: "Start a new study without later-wave or outcome-related predictors."
+    command: "edmars new"
+  LLM_OUTPUT_UNPARSEABLE:
+    title: "The AI's answer could not be read"
+    why: >-
+      The AI returned text in the wrong format (for example broken JSON,
+      or no code where code was expected), even after retries.
+    fix: "Resume; this is usually a one-off. If it repeats, the service may be overloaded, so try later."
+    command: "edmars resume {run}"
+  R_MISSING:
+    title: "R was not found"
+    why: >-
+      Measurement studies use R (lavaan, mirt, CDM). EDM-ARS could not
+      find Rscript on this computer.
+    fix: "Install R 4.4 or newer, or point EDM-ARS to it in the setup wizard, then resume."
+    command: |-
+      edmars setup r
+      edmars resume {run}
+  R_PACKAGES_MISSING:
+    title: "R packages are missing"
+    why: >-
+      R was found, but one or more of the packages jsonlite, lavaan, mirt,
+      CDM or MASS is not installed.
+    fix: "Let the setup wizard install them, then resume."
+    command: |-
+      edmars setup r
+      edmars resume {run}
+  LATEX_MISSING:
+    title: "No LaTeX on this computer, so no PDF"
+    why: >-
+      The paper was written (paper.tex is in the study folder), but
+      pdflatex was not found, so it could not be turned into a PDF.
+    fix: >-
+      Install LaTeX with the setup wizard. To get this paper as a PDF now,
+      upload the study folder to an online LaTeX editor such as Overleaf
+      and compile paper.tex there.
+    command: |-
+      edmars setup pdf
+      edmars results {run} --open folder
+  NO_PDF:
+    title: "The PDF could not be made"
+    why: >-
+      LaTeX ran but stopped with errors, so paper.pdf was not produced.
+      The written paper (paper.tex) is in the study folder.
+    fix: >-
+      Open paper.log in the study folder to see the first LaTeX error, or
+      upload the folder to an online LaTeX editor such as Overleaf to fix
+      and compile it.
+    command: "edmars results {run} --open folder"
+  BLOCKING_FINDINGS:
+    title: "The final checks stopped this paper"
+    why: >-
+      The final checks found a problem serious enough that the paper is
+      not marked ready: {reason}.
+    fix: "Open the study folder and read invariants.json for the details."
+    command: "edmars results {run} --open folder"
+  VERIFICATION_NOT_RUN:
+    title: "The final checks did not run"
+    why: >-
+      The step that holds the paper against the study's own numbers did
+      not run or crashed, so nothing confirms the paper matches the
+      results.
+    fix: "Treat every number in the paper as unchecked, and compare it with results.json yourself."
+    command: "edmars results {run} --open folder"
+  INTERRUPTED:
+    title: "The study was stopped"
+    why: >-
+      The study was stopped before it finished: you stopped it, or the
+      computer went to sleep, restarted, or ended the process.
+    fix: "Resume to continue from the last finished step."
+    command: "edmars resume {run}"
+  CRASHED:
+    title: "The study stopped unexpectedly"
+    why: "The pipeline process ended without saying why (an unexpected error, or the process was killed)."
+    fix: >-
+      Resume to continue from the last finished step. If it happens again,
+      run `edmars doctor --bundle` and share the bundle when you ask for
+      help (it contains no API keys).
+    command: "edmars resume {run}"
+  LSAR_MISSING:
+    title: "The automated reviewer (LSAR) is not installed"
+    why: "Automated peer review was switched on, but LSAR was not found or could not be started."
+    fix: "Install it with the setup wizard. You can review this paper afterwards."
+    command: |-
+      edmars setup lsar
+      edmars review {run}
+  LSAR_FAILED:
+    title: "The automated review did not finish"
+    why: >-
+      LSAR started but stopped with an error (often the DeepSeek key or
+      balance, or the network).
+    fix: "Your paper is complete. You can run the review again later."
+    command: "edmars review {run}"
+  INSTALL_BROKEN:
+    title: "EDM-ARS is not fully installed"
+    why: "The pipeline could not start because a part it needs is missing: {reason}"
+    fix: "Check the installation, and run the installer again if the check says so. Then resume."
+    command: |-
+      edmars doctor
+      edmars resume {run}
+  UNKNOWN:
+    title: "The study stopped with an unrecognised error"
+    why: "The pipeline stopped for a reason EDM-ARS does not recognise: {reason}"
+    fix: >-
+      Resume once. If it happens again, run `edmars doctor --bundle` and
+      share the bundle when you ask for help (it contains no API keys).
+    command: "edmars resume {run}"
+
+# Plain one-line titles for the final-check (invariant) codes in
+# src/invariants.py. Unknown codes are shown as the code itself.
+invariants:
+  INV_ALT_TEXT_AS_BODY: "Figure descriptions meant for screen readers are printed in the paper text"
+  INV_BIB_AMPERSAND: "A reference contains a character that can break the reference list"
+  INV_BOOTSTRAP_TOO_FEW_RESAMPLES: "A confidence interval rests on too few bootstrap resamples"
+  INV_CHECK_ERROR: "One of the final checks could not run"
+  INV_CITATION_DUMP: "One citation lumps together an implausible number of references"
+  INV_CLASS_BALANCE_WRONG_SAMPLE: "The reported outcome percentages come from the wrong group of students"
+  INV_CLUSTER_SIZE_UNRECONCILED: "The reported average number of students per school does not match the data"
+  INV_COMPARATOR_MISNAMED: "The paper names the wrong models in its main comparison"
+  INV_COMPARATOR_UNNAMED: "The paper's main model comparison does not say which models were compared"
+  INV_CONTINUOUS_ONE_HOT_ENCODED: "A numeric variable was split into many yes/no columns"
+  INV_DANGLING_CITATION_KEY: "The paper cites a reference that is not in the reference list"
+  INV_DEGENERATE_FEATURE_WEIGHT: "A variable that never changes is reported as important"
+  INV_DUMMY_CARDINALITY: "A category variable has the wrong number of columns in the prepared data"
+  INV_DUPLICATE_FIGURE_IMAGE: "The same image is used for two different figures"
+  INV_ESTIMAND_POPULATION_MISMATCH: "Effect estimates compared side by side were computed on different groups of students"
+  INV_FIGURES_ORPHANED: "The paper shows none of the figures the analysis produced"
+  INV_FIGURES_PARTIALLY_ORPHANED: "Some figures the analysis produced are not in the paper"
+  INV_FIGURE_FILE_MISSING: "The paper includes an image file that does not exist"
+  INV_FLAGGED_COUNT_MISMATCH: "The paper miscounts the variables with many missing answers"
+  INV_GROUP_LABEL_IS_MISSING: "A 'missing' answer is reported as if it were a real group of students"
+  INV_HANDTYPED_CROSSREF: "Tables or figures are referred to by typed numbers that may be wrong"
+  INV_HARMONIC_MEAN_AS_MEAN: "The reported average number of students per school is a different kind of average"
+  INV_IMPUTATION_METHOD_MISMATCH: "The paper describes the missing-data method differently from what was done"
+  INV_LATEX_COMPILE_ERROR: "LaTeX reported errors while making the PDF"
+  INV_LATEX_ENVIRONMENT_UNBALANCED: "The LaTeX source has unclosed or extra blocks"
+  INV_LATEX_NO_PDF: "No PDF was produced"
+  INV_MACRO_METRIC_MISLABEL: "An averaged metric is labelled as if it were a plain one"
+  INV_MANUSCRIPT_EMPTY: "The paper has almost no text"
+  INV_NUMERAL_BINDING_SKIPPED: "The paper's numbers could not be checked against the results"
+  INV_N_GROUP_SUM_MISMATCH: "Group sizes do not add up to the reported total"
+  INV_OMEGA_UNIDIMENSIONAL_POOLING: "A reliability value pools items that belong to different factors"
+  INV_PERCENTAGE_FROM_SPEC_NOT_RUN: "A percentage in the paper comes from the plan, not from the analysis"
+  INV_POST_MATCH_BALANCE_WORSE: "Matching made the groups less comparable, not more"
+  INV_PROMISED_ANALYSIS_MISSING: "An analysis the study plan promised is not in the paper"
+  INV_PROSE_AUTHORITY_UNCITED: "An author and year are named in the text without a matching reference"
+  INV_PROSE_NUMERAL_UNBOUND: "A number in the paper does not appear in any result"
+  INV_SCAFFOLDING_LEAKED: "Internal pipeline notes were left in the paper"
+  INV_SHAP_RANK_DISAGREEMENT: "Two rankings of variable importance disagree"
+  INV_STATED_GAP_ARITHMETIC: "A stated difference does not match the numbers beside it"
+  INV_SUBGROUP_FALSE_UNAVAILABLE: "The paper says a student group was unavailable, but the data has it"
+  INV_SUPERLATIVE_CONTRADICTED: "The paper calls a model the best when the results say otherwise"
+  INV_UNCITED_BIB_ENTRIES: "The reference list includes papers that are never cited"
+  INV_UNDEFINED_CITATION: "LaTeX could not resolve some citations"
+  INV_UNESCAPED_LATEX_SPECIAL: "Special characters may print wrongly in the PDF"
+  INV_UNUSED_CLASS_OPTION: "A document setting was ignored by LaTeX"
+  INV_UNVERIFIED_BLOCK_MISSING: "The paper lacks the required warning about unresolved review concerns"
+  INV_ZERO_MODELS: "No prediction models were trained"
+
+# What each file in a finished study folder is, in one line.
+files:
+  paper.pdf: "Your paper"
+  paper.tex: "The paper's LaTeX source; edit this to change the paper"
+  references.bib: "The reference list"
+  summary.html: "This summary as a web page"
+  results.json: "Every number the analysis produced"
+  data_report.json: "How the data was prepared (students kept, missing answers)"
+  review_report.json: "The internal methods review"
+  invariants.json: "The final checks, finding by finding"
+  lsar_review: "The automated peer review report"
+  prompts: "Everything that was sent to the AI"
+  pipeline.log: "A technical log of the run"
