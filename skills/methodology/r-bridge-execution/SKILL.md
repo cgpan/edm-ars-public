@@ -69,9 +69,14 @@ contract violation — the recipes are certification-locked
 
 ## Environment facts (Critic-checkable)
 
-- R ≥ 4.4 resolved via config `r_bridge.rscript_path` →
-  `EDM_ARS_RSCRIPT` env → common install dirs → PATH. Missing R fails
-  loudly with remediation — never silently skip an analysis.
+- R ≥ 4.4 resolved via `EDM_ARS_RSCRIPT` env (config
+  `r_bridge.rscript_path` reaches generated code as `EDM_ARS_RSCRIPT`
+  when the env var is unset) → PATH → newest standard install
+  (Windows `Program Files\R\R-*`, `%LOCALAPPDATA%\Programs\R\R-*`;
+  macOS R.framework / Homebrew). A configured path that is not an
+  Rscript fails instead of falling back to another R. Missing R, or a
+  missing package (jsonlite, lavaan, mirt, CDM, MASS), fails loudly
+  with remediation — never silently skip an analysis.
 - R is NOT in the Docker sandbox image: psychometrics runs use the
   subprocess executor (`sandbox.enabled: false`).
 - The bridge rejects any script path outside `r_helpers/`.
