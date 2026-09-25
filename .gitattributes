@@ -1,0 +1,5 @@
+# Shell scripts run on the user's machine and must keep LF line endings even
+# in a Windows checkout with core.autocrlf=true; with CRLF, sh stops on the
+# first line ("set: Illegal option -"). scripts/make_release.py also pins
+# line-ending conversion off when it builds the release tarball.
+*.sh text eol=lf

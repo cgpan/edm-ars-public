@@ -19,6 +19,9 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 
+# Release files built by scripts/make_release.py
+dist/
+
 # Secrets
 .env
 *.env
