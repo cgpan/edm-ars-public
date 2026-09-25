@@ -14,7 +14,8 @@ What this module writes into a run folder:
 * ``research_spec.locked.json`` -- the study plan, when there is one.
 * ``runner.json`` -- how the run was launched (argv, pid, times), so
   ``edmars stop`` / ``edmars resume`` / the live view can find it again.
-* ``STOP`` -- a flag file written by ``stop()``.
+* ``STOP`` -- a flag file written by ``stop()``. The pipeline watches for
+  it and stops the way it does on SIGTERM (checkpoint and status saved).
 
 One study runs at a time: ``<data dir>/active_run.json`` holds the
 running study's pid and folder, and is treated as stale once that pid is
@@ -778,7 +779,10 @@ def launch(settings: dict[str, Any], plan: "StudyPlan") -> Path:
 def stop(run_dir: Path | str) -> None:
     """Ask the study to stop, then end its process tree after a grace period.
 
-    Finished steps stay on disk; ``resume`` continues from the last one.
+    The STOP file asks the pipeline to wind down and save its state (on
+    macOS/Linux it also gets SIGTERM). Whatever is still running 30 s
+    later is ended. Finished steps stay on disk; ``resume`` continues from
+    the last one.
     """
     run_dir = Path(run_dir)
     if not run_dir.is_dir():

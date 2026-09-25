@@ -294,6 +294,53 @@ def test_stop_flags_and_terminates(run_home: Path, monkeypatch: pytest.MonkeyPat
     assert runner.active_run() is None
 
 
+#: A detached child that stands in for the pipeline: it uses the
+#: pipeline's own stop handling and records how it ended.
+_STOPPABLE_CHILD = """
+import pathlib, sys, time
+sys.path.insert(0, sys.argv[2])
+from src.main import _stop_signals_interrupt
+run = pathlib.Path(sys.argv[1])
+try:
+    with _stop_signals_interrupt(str(run)):
+        (run / "child_ready").write_text("1", encoding="utf-8")
+        while True:
+            time.sleep(0.05)
+except KeyboardInterrupt as exc:
+    (run / "child_stopped").write_text(
+        type(exc).__name__ + " " + str(getattr(exc, "by_stop_file", "")), encoding="utf-8")
+"""
+
+
+def test_stop_lets_a_detached_run_wind_down_instead_of_killing_it(run_home: Path) -> None:
+    # On Windows no signal reaches a detached run, so before the pipeline
+    # watched the STOP file every `edmars stop` waited out the grace
+    # period and then killed the run without saving its state.
+    import time
+
+    import psutil
+
+    run = make_run(run_home / "studies", pdf=False, log=log_lines((0, "Starting FORMULATING stage")))
+    pid = proc.spawn_detached([sys.executable, "-c", _STOPPABLE_CHILD, str(run), str(REPO_ROOT)],
+                              cwd=run, env=None, log_path=run / "child.log")
+    try:
+        deadline = time.monotonic() + 90
+        while not (run / "child_ready").exists():
+            assert time.monotonic() < deadline, (run / "child.log").read_text(errors="replace")
+            assert proc.pid_alive(pid), (run / "child.log").read_text(errors="replace")
+            time.sleep(0.1)
+        info = json.loads((run / "runner.json").read_text(encoding="utf-8"))
+        info.update({"pid": pid, "create_time": psutil.Process(pid).create_time()})
+        write_json(run / "runner.json", info)
+
+        started = time.monotonic()
+        runner.stop(run)
+        assert time.monotonic() - started < 20
+        assert (run / "child_stopped").read_text(encoding="utf-8") == "_StopRequested True"
+    finally:
+        proc.terminate_tree(pid, grace_s=0)
+
+
 def test_stop_does_not_kill_a_reused_pid(run_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     killed: list[int] = []
     monkeypatch.setattr(proc, "terminate_tree", lambda pid, grace_s=30: killed.append(pid))

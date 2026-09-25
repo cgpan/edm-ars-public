@@ -191,9 +191,13 @@ def terminate_tree(pid: int, grace_s: float = 30) -> None:
 
     First the process gets up to ``grace_s`` seconds to finish on its own:
     on macOS/Linux it is sent SIGTERM (the pipeline saves its checkpoint
-    and exits), on Windows there is no such signal, so the caller writes
-    the run's STOP file before calling this. Then every remaining process
-    in the tree is terminated, and killed if still alive 5 s later.
+    and exits). A detached process on Windows has no console, so no signal
+    can reach it; the caller writes the run's STOP file before calling
+    this, and the pipeline watches for that file (src/main.py) and winds
+    down the same way. Either way the pipeline reacts the next time it
+    runs Python code, so a long call to the AI service or a long analysis
+    script can outlast the grace period. Then every remaining process in
+    the tree is terminated, and killed if still alive 5 s later.
     """
     if not pid or pid <= 0 or pid == os.getpid():
         return
