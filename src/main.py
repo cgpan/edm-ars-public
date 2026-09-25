@@ -16,6 +16,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -362,6 +363,8 @@ class _Plan:
     spec_source: str | None = None
     resume: bool = False
     start_state: str | None = None
+    #: For a resumed ABORTED run: the stage the orchestrator will retry.
+    retry_stage: str | None = None
     #: Files an earlier run left in output_dir (names relative to it).
     earlier_run_files: list[str] = field(default_factory=list)
     earlier_run_state: str | None = None
@@ -453,22 +456,51 @@ def _needs_spec_message(task_type: str, config_path: str) -> str:
     )
 
 
-def _prompt_intent_notice(prompt: str) -> None:
-    """Say so when a free-text prompt asks for something a prediction run
-    does not do. The run itself is not rerouted."""
+#: Words that mark a measurement question. classify_intent knows only
+#: prediction / causal / targeting, so a psychometrics question would
+#: otherwise pass silently as prediction.
+_MEASUREMENT_PATTERN = re.compile(
+    r"\b(reliab\w*|validity|validat\w*|psychometric\w*|measurement"
+    r"|invarian\w*|differential item functioning|dif|factor structure"
+    r"|factor analy\w*|cfa|irt|item response|cognitive diagnos\w*"
+    r"|omega|cronbach)\b",
+    re.IGNORECASE,
+)
+#: "cause"/"causes" are not in classify_intent's keyword list.
+_CAUSE_PATTERN = re.compile(r"\b(cause[sd]?|causing)\b", re.IGNORECASE)
+
+
+def _prompt_intent(prompt: str) -> str:
+    """prediction | causal | targeting | measurement, for the notice only."""
     try:
         from src.design_selector import classify_intent
 
         intent = classify_intent(prompt)
     except Exception:  # noqa: BLE001 - a notice must never stop a run
-        return
-    suggested = {"causal": "causal_soo", "targeting": "causal_itr"}.get(intent)
+        intent = "prediction"
+    if intent == "prediction" and _MEASUREMENT_PATTERN.search(prompt):
+        return "measurement"
+    if intent == "prediction" and _CAUSE_PATTERN.search(prompt):
+        return "causal"
+    return intent
+
+
+def _prompt_intent_notice(prompt: str) -> None:
+    """Say so when a free-text prompt asks for something a prediction run
+    does not do. The run itself is not rerouted."""
+    intent = _prompt_intent(prompt)
+    suggested = {
+        "causal": "causal_soo",
+        "targeting": "causal_itr",
+        "measurement": "psychometrics",
+    }.get(intent)
     if not suggested:
         return
-    kind = (
-        "who benefits from a treatment"
-        if intent == "targeting" else "the effect of one thing on another"
-    )
+    kind, answer = {
+        "causal": ("the effect of one thing on another", "estimate an effect"),
+        "targeting": ("who benefits from a treatment", "estimate who benefits"),
+        "measurement": ("how well a scale measures", "evaluate a scale"),
+    }[intent]
     examples = _fixture_specs(suggested)
     how = (
         f" start from a locked {suggested} spec, for example "
@@ -477,8 +509,8 @@ def _prompt_intent_notice(prompt: str) -> None:
     )
     print(
         f"NOTE: your --prompt reads like a question about {kind}, but this "
-        "run is a prediction study: it will find what predicts the outcome, "
-        f"not estimate an effect. For that kind of answer,{how}.",
+        "run is a prediction study: it will find what predicts an outcome, "
+        f"not {answer}. For that kind of answer,{how}.",
         file=sys.stderr,
     )
 
@@ -553,6 +585,13 @@ def _occupied_message(plan: "_Plan") -> str:
     more = len(plan.earlier_run_files) - 6
     if more > 0:
         shown += f" and {more} more"
+    if plan.earlier_run_state in _TERMINAL_FINISHED:
+        return (
+            f"{plan.output_dir} already holds a finished run "
+            f"({plan.earlier_run_state}). Choose a new --output-dir for a new "
+            "run, or add --overwrite to delete that run's files and start "
+            "again here."
+        )
     if plan.earlier_run_state:
         return (
             f"{plan.output_dir} already holds a run that stopped at "
@@ -677,6 +716,9 @@ def _plan_run(args: argparse.Namespace) -> _Plan:
             resume=True,
             start_state=_state_name(checkpoint.get("current_state")) or None,
         )
+        abort = checkpoint.get("abort_info")
+        if plan.start_state == "ABORTED" and isinstance(abort, dict):
+            plan.retry_stage = str(abort.get("stage") or "") or None
     else:
         if args.research_spec:
             raw_spec = _read_spec_json(args.research_spec)
@@ -724,7 +766,17 @@ def _plan_run(args: argparse.Namespace) -> _Plan:
             locked_spec=locked_spec,
             spec_source=args.research_spec if locked_spec else None,
         )
-        plan.earlier_run_files = _existing_run_files(output_dir)
+        # The run's own inputs are never an earlier run's output: a spec
+        # saved as <folder>/research_spec.json, or --config pointed at a
+        # config_snapshot.yaml, must not be refused or deleted.
+        inputs = {
+            os.path.normcase(os.path.abspath(p))
+            for p in (args.research_spec, config_path) if p
+        }
+        plan.earlier_run_files = [
+            name for name in _existing_run_files(output_dir)
+            if os.path.normcase(os.path.join(output_dir, name.rstrip("/"))) not in inputs
+        ]
         if plan.earlier_run_files:
             try:
                 checkpoint = _read_checkpoint(output_dir)
@@ -753,7 +805,8 @@ def _preflight(plan: _Plan) -> list[Finding]:
         bool((plan.config.get("review_gate") or {}).get("enabled", False)),
         locked_spec=plan.locked_spec,
     )
-    if plan.resume and plan.start_state in _PAST_ENGINEERING:
+    resumes_at = plan.retry_stage or plan.start_state
+    if plan.resume and resumes_at in _PAST_ENGINEERING:
         findings = [
             f._replace(
                 severity=WARN,

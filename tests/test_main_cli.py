@@ -925,3 +925,60 @@ def test_ctrl_c_before_the_run_starts(
     monkeypatch.setattr(main_mod, "check_run_prerequisites", _stop)
     assert _run(env) == 4
     assert "before the run started" in capsys.readouterr().err
+
+
+def test_a_finished_run_folder_is_refused_without_offering_resume(
+    env: dict[str, Path], no_orchestrator: None, capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = env["root"] / "done"
+    _checkpoint(run_dir, current_state="COMPLETED")
+    assert main(["--config", str(env["config"]), "--output-dir", str(run_dir)]) == 1
+    err = capsys.readouterr().err
+    assert "finished run (COMPLETED)" in err and "--resume" not in err
+
+
+def test_the_runs_own_spec_in_the_folder_is_not_an_earlier_run(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+) -> None:
+    run_dir = env["root"] / "study"
+    run_dir.mkdir()
+    spec = run_dir / "research_spec.json"
+    spec.write_text((FIXTURES / "spec_x1mtheff_x4college.json").read_text(
+        encoding="utf-8"), encoding="utf-8")
+    assert main(["--config", str(env["config"]), "--output-dir", str(run_dir),
+                 "--research-spec", str(spec)]) == 0
+    assert spec.exists()
+
+
+def test_resuming_an_abort_judges_the_data_need_by_the_retried_stage(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = env["root"] / "aborted"
+    _checkpoint(run_dir, current_state="ABORTED", abort_info={
+        "stage": "WRITING", "code": "NETWORK", "message": "x", "resumable": True})
+    plan = main_mod._plan_run(main_mod._build_parser().parse_args(
+        ["--config", str(env["config"]), "--output-dir", str(run_dir), "--resume"]))
+    assert plan.retry_stage == "WRITING"
+    monkeypatch.setattr(main_mod, "check_run_prerequisites", lambda *a, **k: [
+        Finding("DATA_MISSING", "fail", "The data file was not found.", "Get it.")])
+    assert [f.severity for f in main_mod._preflight(plan)] == ["warn"]
+
+
+@pytest.mark.parametrize("prompt, suggested", [
+    ("Does taking algebra in 9th grade cause higher college enrollment?", "causal_soo"),
+    ("For whom does counseling raise college enrollment?", "causal_itr"),
+    ("Is the math self-efficacy scale invariant across sex (DIF)?", "psychometrics"),
+    ("How reliable is the science identity scale?", "psychometrics"),
+])
+def test_prompt_notices_name_the_study_type_that_fits(
+    env: dict[str, Path], no_orchestrator: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], prompt: str, suggested: str,
+) -> None:
+    monkeypatch.setattr(main_mod, "check_run_prerequisites", lambda *a, **k: [])
+    assert main(["--dry-run", "--config", str(env["config"]), "--prompt", prompt]) == 0
+    err = capsys.readouterr().err
+    assert f"locked {suggested} spec" in err and "runs/fixtures/" in err
+
+
+def test_because_is_not_a_causal_question() -> None:
+    assert main_mod._prompt_intent("Because of low attendance, who drops out?") == "prediction"
