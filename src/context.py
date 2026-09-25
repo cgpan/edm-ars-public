@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 
 class PipelineState(str, Enum):
@@ -68,6 +68,10 @@ class PipelineContext:
     errors: list = field(default_factory=list)
     log: list = field(default_factory=list)
     run_start_time: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+
+    # Live event side channel (src/events.py). Never serialized: it is a
+    # handle on <run>/events.jsonl, re-attached after a checkpoint load.
+    event_sink: Any = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {
