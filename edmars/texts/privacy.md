@@ -121,9 +121,14 @@ sent, and to whom* above applies. In addition:
 
 `edmars` hands your keys to the pipeline only through the environment of
 the process it starts, and the pipeline removes them from the environment
-of the AI-written code, as described in *Keys are kept away from generated
-code*. A key kept in the fallback file (see the table) is a file your user
-account can read, so that code could read it too.
+of the AI-written code, as described in *API keys and the AI-written code*.
+As that section says, this is not a security barrier. The AI-written code
+runs as your user account, with the same Python as `edmars` (which includes
+the `keyring` package), so it can still read your keys: from your
+credential store, from the fallback file (see the table), and from the
+environment of the pipeline process that started it. The same advice
+applies: use a separate key with a spending limit or a small prepaid
+balance, and revoke it and make a new one if you think it was exposed.
 
 **Deleting everything**
 

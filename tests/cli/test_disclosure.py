@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,21 @@ def test_texts_say_what_they_must() -> None:
     assert "WHAT LEAVES YOUR COMPUTER" in ack
     assert "edmars disclaimer" in ack and "edmars privacy" in ack
     assert "edmars disclaimer" in disclosure.AI_DRAFT_REMINDER
+
+
+def test_privacy_notice_does_not_imply_stored_keys_are_out_of_reach() -> None:
+    """The AI-written code runs in the edmars Python, which has keyring
+    installed, so keys in the credential store are as reachable as the
+    fallback file. The notice once named only the file, and pointed at a
+    section title that no longer existed."""
+    privacy = disclosure.privacy_text()
+    flat = " ".join(privacy.split())
+    edmars_part = flat[flat.index("## If you use the `edmars` command"):]
+    assert "it can still read your keys: from your credential store" in edmars_part
+    assert "not a security barrier" in edmars_part
+    headings = {line.lstrip("#").strip() for line in privacy.splitlines() if line.startswith("#")}
+    for ref in re.findall(r"as described in \*([^*]+)\*", flat):
+        assert ref in headings, f"the privacy notice points at a section that does not exist: {ref!r}"
 
 
 def test_not_acknowledged_by_default() -> None:
