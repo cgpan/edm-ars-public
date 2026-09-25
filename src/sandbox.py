@@ -14,6 +14,7 @@ import pathlib
 import subprocess
 import sys
 import warnings
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -96,6 +97,33 @@ BLAS_THREAD_VARS = (
 DEFAULT_INNER_THREADS = 2
 
 
+#: Environment variable NAMES that say they hold a credential. Generated
+#: code never needs one: it makes no network calls and talks to no
+#: provider. What it can do is print os.environ while debugging, and its
+#: stdout/stderr go into the retry prompt sent to the provider and into
+#: prompts/<agent>/.../rendered_prompt.txt in the run folder.
+#:
+#: A denylist, not an allowlist, on purpose: Python needs SYSTEMROOT on
+#: Windows, R needs R_HOME/R_LIBS*, the bridge needs EDM_ARS_RSCRIPT and
+#: EDM_ARS_R_HELPERS, and conda/venv activation leaves a dozen more. None
+#: of those names matches below.
+_SECRET_NAME = re.compile(
+    r"(?i)(?:API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|SECRET|PASSWORD|PASSWD"
+    r"|CREDENTIALS?|CONNECTION_?STRING"
+    r"|(?:^|_)TOKENS?(?:_|$)|(?:^|_)PAT$|(?:^|_)KEYS?$)"
+)
+
+
+def is_secret_name(name: str) -> bool:
+    """True when an environment variable name marks it as a credential."""
+    return bool(_SECRET_NAME.search(name))
+
+
+def scrub_secrets(env: Mapping[str, str]) -> dict[str, str]:
+    """Return a copy of *env* without the credential-named variables."""
+    return {k: v for k, v in env.items() if not is_secret_name(k)}
+
+
 def blas_thread_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """Cap the inner BLAS/OpenMP pools for generated analysis code.
 
@@ -114,8 +142,12 @@ def blas_thread_env(base: dict[str, str] | None = None) -> dict[str, str]:
     pool from that, so it oversubscribes inside the quota.
 
     An operator who has already set any of these vars keeps their value.
+
+    Credential-named variables are dropped (see ``_SECRET_NAME``) whether
+    the base is the host environment or an explicit mapping, so no caller
+    can hand a key to generated code by accident.
     """
-    env = dict(base if base is not None else os.environ)
+    env = scrub_secrets(base if base is not None else os.environ)
     threads = os.environ.get("EDMARS_INNER_THREADS", str(DEFAULT_INNER_THREADS))
     for var in BLAS_THREAD_VARS:
         env.setdefault(var, threads)

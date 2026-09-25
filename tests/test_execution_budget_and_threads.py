@@ -60,10 +60,20 @@ def test_the_container_does_not_inherit_the_host_environment() -> None:
     assert "PATH" not in env
 
 
-def test_the_default_base_is_the_real_environment() -> None:
-    """The subprocess still needs PATH to find python."""
+def test_the_default_base_is_the_real_environment_minus_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The subprocess still needs PATH to find python -- but not the keys.
+
+    This used to assert only that the whole host environment was copied,
+    which also pinned every provider API key into LLM-written code's
+    environment. See tests/test_sandbox_secrets.py.
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-key")
     env = blas_thread_env()
     assert len(env) > len(BLAS_THREAD_VARS)
+    assert "PATH" in env
+    assert "DEEPSEEK_API_KEY" not in env
 
 
 # --- execution budget --------------------------------------------------
