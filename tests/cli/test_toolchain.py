@@ -447,3 +447,16 @@ def test_install_tinytex_installs_then_fills_in_whatever_a_test_compile_misses(
     assert saved["latex"]["mode"] == "tinytex"
     assert saved["latex"]["pdflatex"] == str(bin_dir / pdflatex_name)
     assert toolchain._first_error("all fine\n") == ""
+
+
+def test_tools_never_receive_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "not-for-r")
+    seen: list[dict[str, str]] = []
+
+    def run(args: list[str], **kwargs: Any) -> Any:
+        seen.append(kwargs["env"])
+        return completed(args, 0, "R_VERSION 4.5.1 \n")
+
+    monkeypatch.setattr(proc, "run", run)
+    toolchain.probe_r("Rscript")
+    assert seen and "DEEPSEEK_API_KEY" not in seen[0] and "PATH" in {k.upper() for k in seen[0]}

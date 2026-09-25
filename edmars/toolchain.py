@@ -180,6 +180,18 @@ def _tool_args(path: str, *args: str) -> list[str]:
     return [path, *args]
 
 
+def _tool_env() -> dict[str, str]:
+    """This process's environment without API keys and other secrets.
+
+    TeX, R and the TinyTeX installer never need a key, so none is handed
+    to them.
+    """
+    return {
+        k: v for k, v in os.environ.items()
+        if not any(h in k.upper() for h in ("API_KEY", "TOKEN", "SECRET", "PASSWORD"))
+    }
+
+
 def _run(
     args: Sequence[str],
     *,
@@ -192,7 +204,7 @@ def _run(
     try:
         done = proc.run(list(args), timeout=timeout,
                         cwd=str(cwd) if cwd is not None else None,
-                        env=dict(env) if env is not None else None)
+                        env=dict(env) if env is not None else _tool_env())
     except Exception as exc:  # noqa: BLE001 - classify below, re-raise the rest
         if type(exc).__name__ == "TimeoutExpired":
             return ToolResult(None, _as_text(getattr(exc, "stdout", "")),
