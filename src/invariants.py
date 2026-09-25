@@ -2428,6 +2428,34 @@ def _undefined_citations(log: str) -> list[str]:
     return keys
 
 
+def _no_log_compile_record(a: "RunArtifacts") -> dict:
+    """What ``latex_compile.json`` says about a compile that left no log.
+
+    The orchestrator writes that file after every compile; it is the only
+    place the reason survives when pdflatex never started (not installed,
+    not on PATH) and so never wrote ``paper.log``.
+    """
+    record = a.json("latex_compile.json")
+    if not isinstance(record, dict):
+        return {}
+    raw_steps = record.get("steps")
+    steps: list = raw_steps if isinstance(raw_steps, list) else []
+    first_bad = next(
+        (
+            s
+            for s in steps
+            if isinstance(s, dict) and s.get("returncode") not in (0, 1)
+        ),
+        None,
+    )
+    return {
+        "missing_tool": record.get("missing_tool"),
+        "failed_step": (first_bad or {}).get("cmd") or record.get("failed_step"),
+        "stderr": str((first_bad or {}).get("stderr") or "")[:300],
+        "returncode": (first_bad or {}).get("returncode"),
+    }
+
+
 def check_latex_compile_errors(a: RunArtifacts) -> list[Finding]:
     """Errors in the run's own LaTeX log.
 
@@ -2446,7 +2474,56 @@ def check_latex_compile_errors(a: RunArtifacts) -> list[Finding]:
     """
     log = a.text("paper.log")
     if not log:
-        return []
+        # No log is not the same as no compile. The orchestrator compiles
+        # every manuscript it writes; when pdflatex is not installed or
+        # not on PATH it never starts, writes neither paper.log nor
+        # paper.pdf, and this check used to return nothing -- so the one
+        # blocking code could not fire and a run with no PDF at all was
+        # released as clean. A manuscript with neither a log nor a PDF
+        # beside it is a deliverable that was not produced. A directory
+        # with no manuscript (an aborted run) or with a PDF (a log
+        # cleaned up afterwards) still claims nothing.
+        if a.paper_name is None or a.exists("paper.pdf"):
+            return []
+        record = _no_log_compile_record(a)
+        tool = record.get("missing_tool")
+        if tool:
+            why = (
+                f"{tool} was not found, so the compile never ran. Install a "
+                "TeX distribution (TeX Live, MiKTeX or MacTeX) and make sure "
+                f"{tool} is on the PATH this pipeline runs with."
+            )
+        elif record.get("failed_step"):
+            why = (
+                f"the compile step `{record['failed_step']}` failed "
+                f"(rc={record.get('returncode')}) before writing a log"
+                + (f": {record['stderr']}" if record.get("stderr") else ".")
+            )
+        else:
+            why = (
+                "pdflatex never ran or died before writing its log (is a "
+                "TeX distribution installed and pdflatex on PATH?)."
+            )
+        return [
+            Finding(
+                code="INV_LATEX_NO_PDF",
+                severity="critical",
+                message=(
+                    f"LaTeX did not produce a PDF: {a.paper_name} has no "
+                    f"paper.log and no paper.pdf beside it; {why}"
+                ),
+                artifact=a.paper_name,
+                evidence={
+                    "fatal_markers": [],
+                    "paper_pdf_present": False,
+                    "paper_log_present": False,
+                    "compile_ran": False,
+                    "missing_tool": tool,
+                    "failed_step": record.get("failed_step"),
+                    "errors": [],
+                },
+            )
+        ]
     errors = [
         ln.strip()
         for ln in log.splitlines()

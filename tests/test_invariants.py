@@ -458,9 +458,58 @@ def test_a_clean_compile_is_silent(tmp_path):
     assert "INV_LATEX_COMPILE_ERROR" not in codes
 
 
-def test_no_log_at_all_claims_nothing(tmp_path):
-    """No log means no compile was attempted -- not a failed one."""
+def test_a_manuscript_with_no_log_and_no_pdf_is_critical(tmp_path):
+    """pdflatex never ran (not installed / not on PATH): no paper.log and
+    no paper.pdf. This used to claim nothing -- "no log means no compile
+    was attempted" -- but the orchestrator compiles every manuscript it
+    writes, so the one blocking code could not fire and a run with no PDF
+    was released as clean (B1)."""
     run = _run(tmp_path, paper__tex=r"\begin{document}Body.\end{document}")
+    hits = _by_code(run, "INV_LATEX_NO_PDF")
+    assert len(hits) == 1
+    assert hits[0].severity == "critical"
+    assert hits[0].evidence["paper_log_present"] is False
+    assert hits[0].evidence["compile_ran"] is False
+    assert "never ran" in hits[0].message
+
+
+def test_no_log_names_the_missing_tool_from_the_compile_record(tmp_path):
+    """latex_compile.json is the only place the reason survives."""
+    run = _run(
+        tmp_path,
+        paper__tex=r"\begin{document}Body.\end{document}",
+        latex_compile__json={
+            "success": False,
+            "pdf_exists": False,
+            "missing_tool": "pdflatex",
+            "steps": [
+                {
+                    "cmd": "pdflatex -interaction=nonstopmode paper.tex",
+                    "returncode": -1,
+                    "stderr": "'pdflatex' not found - is it installed and on PATH?",
+                }
+            ],
+        },
+    )
+    hits = _by_code(run, "INV_LATEX_NO_PDF")
+    assert len(hits) == 1
+    assert hits[0].evidence["missing_tool"] == "pdflatex"
+    assert "pdflatex was not found" in hits[0].message
+
+
+def test_no_log_but_a_pdf_claims_nothing(tmp_path):
+    """A PDF with its log cleaned up afterwards is a delivered paper."""
+    run = _run(
+        tmp_path,
+        paper__tex=r"\begin{document}Body.\end{document}",
+        paper__pdf="%PDF-1.5 stub",
+    )
+    assert "INV_LATEX_NO_PDF" not in _codes(run)
+
+
+def test_no_manuscript_no_log_claims_nothing(tmp_path):
+    """An aborted run wrote no paper, so there is nothing to compile."""
+    run = _run(tmp_path, results__json={"best_model": "X"})
     assert "INV_LATEX_NO_PDF" not in _codes(run)
 
 
