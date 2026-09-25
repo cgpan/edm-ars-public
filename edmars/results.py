@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from edmars.endstates import READY_KINDS, Outcome, classify, messages, quote_path
+from edmars.endstates import READY_KINDS, Outcome, classify, gate_skip_text, messages, quote_path
 from edmars.runstate import RunState, fmt_ci, fmt_num, fmt_score, load_state
 
 Line = tuple[str, str]  # (text, rich style)
@@ -109,7 +109,8 @@ def _gate_line(state: RunState, outcome: Outcome) -> str | None:
     m = state.metrics
     if m.get("gate_ran") is False:
         reason = m.get("gate_skip_reason")
-        return f"Automated peer review (LSAR): did not run{f' ({reason})' if reason else ''}"
+        text = "Automated peer review (LSAR): did not run."
+        return f"{text} {gate_skip_text(reason)}" if reason else text
     if m.get("gate_score") is None:
         if state.lsar_enabled:
             return "Automated peer review (LSAR): no score"
@@ -220,9 +221,12 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
             actions.append(("Automated peer review", f"edmars review {run}"))
         elif outcome.code in ("LSAR_MISSING", "LSAR_FAILED"):
             actions.append(("Automated peer review", f"edmars review {run}"))
-        actions.append(("Start a new study", "edmars new"))
         if outcome.code in ("LSAR_MISSING",):
-            actions.insert(-1, ("First set up LSAR", "edmars setup lsar"))
+            # Setting up the reviewer comes before asking it for a review.
+            review_at = next((i for i, (label, _) in enumerate(actions)
+                              if label == "Automated peer review"), len(actions))
+            actions.insert(review_at, ("First set up LSAR", "edmars setup lsar"))
+        actions.append(("Start a new study", "edmars new"))
         for label, cmd in actions:
             add(f"  {label}:")
             add(f"    {cmd}", "bold")

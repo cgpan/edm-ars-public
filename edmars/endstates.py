@@ -414,7 +414,8 @@ def _gate_facts(run_dir: Path, state: RunState, status: dict[str, Any] | None) -
     return gate
 
 
-def _gate_skip_text(reason: Any) -> str:
+def gate_skip_text(reason: Any) -> str:
+    """Why the automated peer review did not run, in plain words."""
     text = str(reason or "")
     table = messages().get("gate_skip_reasons") or {}
     key = text.split(":", 1)[0].strip()
@@ -630,7 +631,7 @@ def _concerns(run_dir: Path, state: RunState, status: dict[str, Any] | None,
     if not skip_gate:
         gate = _gate_facts(run_dir, state, status)
         if gate.get("enabled") and gate.get("ran") is False:
-            out.append(f"Automated peer review did not run: {_gate_skip_text(gate.get('skip_reason'))}")
+            out.append(f"Automated peer review did not run: {gate_skip_text(gate.get('skip_reason'))}")
         elif gate.get("ran") and gate.get("passed") is False and not gate.get("advisory"):
             out.append(_gate_sentence(gate))
     lit = status.get("literature") if isinstance(status, dict) else None
@@ -741,7 +742,7 @@ def _ready(run_dir: Path, state: RunState, status: dict[str, Any] | None,
         fix = "Read review_report.json and check the paper against each concern."
     elif code == "GATE_NOT_RUN":
         label = str(labels.get("not_reviewed", "Ready, not reviewed"))
-        reason = _gate_skip_text(gate.get("skip_reason"))
+        reason = gate_skip_text(gate.get("skip_reason"))
         headline = f"Your paper is written, but the automated peer review did not run: {reason}"
         out_code = _gate_code(gate.get("skip_reason"))
         entry = failure_entry(out_code)
@@ -788,6 +789,7 @@ __all__ = [
     "code_from_text",
     "failure_entry",
     "fill",
+    "gate_skip_text",
     "invariant_title",
     "load_findings",
     "messages",

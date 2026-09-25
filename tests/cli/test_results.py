@@ -79,6 +79,23 @@ def test_gate_scores_on_success_screen(run_home: Path, capsys: pytest.CaptureFix
     assert "Automated peer review (LSAR): 5.1 out of 10, below the benchmark of 6.3" in " ".join(out.split())
 
 
+def test_a_review_that_did_not_run_is_explained_and_setup_comes_first(
+    run_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gate = {"enabled": True, "ran": False, "skip_reason": "lsar_not_found: /x/y", "passed": None,
+            "score": None, "threshold": None, "advisory": None, "venue": "EDM"}
+    run = _ready(run_home, review_gate_enabled=True,
+                 gate_summary={"ran": False, "skip_reason": "lsar_not_found: /x/y", "venue": "EDM"},
+                 status=v2_status(reason_code="GATE_NOT_RUN", gate=gate))
+    _, out = _show(run, capsys)
+    flat = " ".join(out.split())
+    assert ("Automated peer review (LSAR): did not run. LSAR is not installed where "
+            "EDM-ARS expects it.") in flat
+    assert "lsar_not_found" not in out and "/x/y" not in out
+    lines = [line.strip() for line in out.splitlines()]
+    assert lines.index("First set up LSAR:") < lines.index("Automated peer review:")
+
+
 @pytest.mark.parametrize("code, expected_rc", [("NO_CREDIT", 3), ("DATA_MISSING", 3)])
 def test_failure_screen(run_home: Path, capsys: pytest.CaptureFixture[str], code: str, expected_rc: int) -> None:
     run = make_run(run_home, pdf=False,
