@@ -623,10 +623,14 @@ For the methodology and system design, see the technical report:
 }
 ```
 
-Papers produced by this system carry a fixed author line (EDM-ARS, AI_Name,
-Human_Author_Name) and a Methods sentence disclosing automated generation. Replace the
-two placeholder names with your own in `templates/paper_template_v2.tex` and
-`templates/paper_template_journal.tex`. Please keep the automated-generation
+Papers produced by this system name EDM-ARS as an author and carry a Methods
+sentence disclosing automated generation. By default EDM-ARS is the only author.
+To add people to a conference paper (the default format), uncomment the AI and
+human author blocks in `templates/paper_template_v2.tex` and fill them in. A
+journal paper (`writer.venue_format: journal`) takes its byline from
+`paper: authors: [...]` in `config.yaml` (there is a commented example); leave
+the byline in `templates/paper_template_journal.tex` as it is, because the
+Writer fills it. Please keep EDM-ARS in the byline and the automated-generation
 disclosure in anything you publish from it.
 
 ## License

@@ -364,6 +364,14 @@ writer:
   #   (templates/paper_template_journal.tex; needs apa7, biblatex-apa, biber).
   venue_format: conference
 
+# Journal byline (writer.venue_format: journal). Unset, the byline is
+# EDM-ARS alone. To credit people, list them here and keep EDM-ARS in the
+# list. Conference papers ignore this key: their authors are the block in
+# templates/paper_template_v2.tex (uncomment and fill in the AI and human
+# author blocks there).
+# paper:
+#   authors: ["EDM-ARS", "Your Name"]
+
 paths:
   data_registry: data_registry/
   raw_data: data/raw/

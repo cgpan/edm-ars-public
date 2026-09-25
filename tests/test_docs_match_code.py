@@ -250,3 +250,28 @@ def test_privacy_does_not_sell_the_key_scrub_as_isolation() -> None:
     readme = " ".join(_readme().split())
     assert "could still read a `.env` file on disk" not in readme
     assert "That is not a barrier" in readme
+
+
+def test_author_instructions_match_the_templates_and_writer() -> None:
+    """The README told users to replace two placeholder names in both
+    templates. The conference template's extra authors are commented out,
+    so renaming them changes nothing; the journal template holds only the
+    %%PLACEHOLDER:AUTHORS%% marker the Writer fills from ``paper.authors``,
+    and overwriting it fails test_writer_scaffolding."""
+    import yaml
+
+    from src.agents.writer import Writer
+
+    readme = " ".join(_readme().split())
+    assert "AI_Name" not in readme and "Human_Author_Name" not in readme
+    assert "`paper: authors: [...]`" in readme
+    journal = (ROOT / "templates" / "paper_template_journal.tex").read_text(encoding="utf-8")
+    assert r"\authorsnames{%%PLACEHOLDER:AUTHORS%%}" in journal
+
+    lines = (ROOT / "config.yaml").read_text(encoding="utf-8").splitlines()
+    start = lines.index("# paper:")
+    example = "\n".join(line[2:] for line in lines[start:start + 2])
+    config = yaml.safe_load(example)
+    writer = object.__new__(Writer)
+    writer.config = config
+    assert writer._author_line() == "EDM-ARS, Your Name"
