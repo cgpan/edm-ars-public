@@ -97,7 +97,9 @@ class DataEngineer(BaseAgent):
         execution_ok = False
         last_stderr = ""
         for attempt in range(self.MAX_RETRIES + 1):
-            exec_result = self.execute_code(code)
+            exec_result = self.execute_code_attempt(
+                code, attempt=attempt + 1, max_attempts=self.MAX_RETRIES + 1
+            )
             if exec_result["returncode"] == 0:
                 execution_ok = True
                 break

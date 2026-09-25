@@ -420,6 +420,57 @@ class TestWaitsAndEvents:
         assert end["data"]["error_class"] == "Timeout"
         assert end["data"]["timeout_s"] == 600
 
+    def test_analyst_loop_numbers_its_attempts(self, tmp_path: Path) -> None:
+        from src.agents.analyst import Analyst
+        from src.config import load_config
+        from tests.test_analyst import _DATA_REPORT, _RESEARCH_SPEC, _make_valid_results
+
+        ctx = _ctx(tmp_path)
+        agent = Analyst(ctx, "analyst", load_config(str(ROOT / "config.yaml")))
+        expected = _make_valid_results("continuous")
+        agent.call_llm = MagicMock(side_effect=[  # type: ignore[method-assign]
+            "```python\n# failing\n```",
+            "```python\n# fixed\n```\n```json\n" + json.dumps(expected) + "\n```",
+        ])
+        agent.execute_code = MagicMock(side_effect=[  # type: ignore[method-assign]
+            {"returncode": 1, "stdout": "", "stderr": "SyntaxError: bad syntax"},
+            {"returncode": 0, "stdout": "", "stderr": ""},
+        ])
+        (tmp_path / "results.json").write_text(json.dumps(expected))
+        agent.run(data_report=_DATA_REPORT, research_spec=_RESEARCH_SPEC)
+
+        ends = _events(tmp_path, "attempt.end")
+        assert [e["data"]["attempt"] for e in ends] == [1, 2]
+        assert {e["data"]["max_attempts"] for e in ends} == {agent.MAX_RETRIES + 1}
+        assert ends[0]["data"]["error_class"] == "SyntaxError"
+        assert ends[1]["data"]["returncode"] == 0
+        assert ends[0]["stage"] is None or isinstance(ends[0]["stage"], str)
+
+    def test_data_engineer_loop_numbers_its_attempts(self, tmp_path: Path) -> None:
+        from src.agents.data_engineer import DataEngineer
+        from src.config import load_config
+
+        ctx = _ctx(tmp_path)
+        ctx.research_spec = {"outcome_variable": "X3TGPAMAT", "predictor_set": []}
+        agent = DataEngineer(ctx, "data_engineer", load_config(str(ROOT / "config.yaml")))
+        agent.call_llm = MagicMock(  # type: ignore[method-assign]
+            return_value="```python\nprint('prep')\n```")
+        agent.execute_code = MagicMock(return_value={  # type: ignore[method-assign]
+            "returncode": 1, "stdout": "",
+            "stderr": "Traceback (most recent call last):\nFileNotFoundError: raw.csv\n"})
+        report = agent.run()
+
+        assert report["validation_passed"] is False
+        starts = _events(tmp_path, "attempt.start")
+        ends = _events(tmp_path, "attempt.end")
+        n = agent.MAX_RETRIES + 1
+        assert [e["data"]["attempt"] for e in starts] == list(range(1, n + 1))
+        assert all(e["data"]["max_attempts"] == n for e in starts)
+        assert all(e["data"]["error_class"] == "FileNotFoundError" for e in ends)
+        # The DataEngineer runs under the executor's own default timeout.
+        for call in agent.execute_code.call_args_list:
+            assert call.kwargs == {}
+
 
 # ---------------------------------------------------------------------------
 # E1 -- no silent gpt-4o
