@@ -553,6 +553,34 @@ class DockerSandbox:
                     pass
 
 
+#: What to do about a LaTeX tool that could not be started, per tool: a
+#: missing biber on a machine that has pdflatex is a different fix from
+#: having no TeX distribution at all.
+_LATEX_TOOL_HINTS: dict[str, str] = {
+    "pdflatex": (
+        "install a TeX distribution (TeX Live, MiKTeX or TinyTeX) and make "
+        "sure pdflatex is on PATH"
+    ),
+    "bibtex": (
+        "bibtex ships with every TeX distribution; make sure the "
+        "distribution's bin folder is on PATH"
+    ),
+    "biber": (
+        "biblatex manuscripts need biber; install it with your TeX "
+        "distribution's package manager (e.g. tlmgr install biber)"
+    ),
+}
+
+
+def _file_stamp(path: str) -> tuple[int, int] | None:
+    """(mtime_ns, size) of *path*, or None when it does not exist."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int = 120) -> dict[str, Any]:
     """Run the full pdflatex → bibtex → pdflatex → pdflatex compilation sequence.
 
@@ -563,11 +591,34 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
 
     Returns:
         dict with keys:
-          ``success`` (bool), ``steps`` (list of step result dicts with
-          ``cmd``, ``returncode``, ``stdout``, ``stderr``).
+          ``success`` (bool) -- every step ran cleanly AND this compile
+          wrote the PDF. Return codes alone cannot decide it: pdflatex in
+          nonstopmode exits 1 both for recoverable errors and for a fatal
+          abort that writes nothing, which used to be logged as
+          "paper.pdf written" with no paper.pdf on disk.
+          ``pdf_exists`` (bool) -- ``<base>.pdf`` exists and was written by
+          THIS compile: it appeared, or its modification stamp changed,
+          between the start of the first pass and the end of the last.
+          Comparing the file with itself, rather than with the wall clock,
+          holds on synced and network folders whose timestamps are coarse
+          or skewed.
+          ``stale_pdf`` (bool) -- a ``<base>.pdf`` is on disk but this
+          compile did not write it (it is left over from an earlier run).
+          ``pdf_path`` (str) -- where the PDF is expected.
+          ``missing_tool`` (str | None) -- the first of pdflatex / bibtex /
+          biber that could not be started because it is not installed or
+          not on PATH.
+          ``failed_step`` (str | None) -- the command line of the first
+          step that failed; when every step exited 0/1 but no PDF appeared,
+          the last pdflatex pass.
+          ``message`` (str) -- one plain-English line for the log.
+          ``steps`` (list of step result dicts with ``cmd``,
+          ``returncode``, ``stdout``, ``stderr``).
     """
     base = tex_file.replace(".tex", "")
+    pdf_path = os.path.join(output_dir, base + ".pdf")
     steps_results: list[dict[str, Any]] = []
+    missing: list[str] = []
 
     def _run(cmd: list[str]) -> dict[str, Any]:
         try:
@@ -575,7 +626,11 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
                 cmd,
                 cwd=output_dir,
                 capture_output=True,
+                # TeX and biber write UTF-8 (or raw 8-bit) bytes; the locale
+                # codec lost the whole stream on the first undecodable one.
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_s,
             )
             return {
@@ -585,11 +640,19 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
                 "stderr": proc.stderr[-2000:] if proc.stderr else "",
             }
         except FileNotFoundError:
+            missing.append(cmd[0])
             return {
                 "cmd": " ".join(cmd),
                 "returncode": -1,
                 "stdout": "",
                 "stderr": f"{cmd[0]!r} not found — is it installed and on PATH?",
+            }
+        except OSError as exc:
+            return {
+                "cmd": " ".join(cmd),
+                "returncode": -1,
+                "stdout": "",
+                "stderr": f"{cmd[0]!r} could not be started: {exc}",
             }
         except subprocess.TimeoutExpired:
             return {
@@ -613,6 +676,7 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
     except OSError:
         pass
 
+    stamp_before = _file_stamp(pdf_path)
     for cmd in [
         pdflatex_cmd,
         bib_engine,
@@ -624,9 +688,58 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
         # If pdflatex exits non-zero on first pass, abort early
         if result["returncode"] not in (0, 1) and cmd == pdflatex_cmd:
             break
+    stamp_after = _file_stamp(pdf_path)
 
-    success = all(s["returncode"] in (0, 1) for s in steps_results)
-    return {"success": success, "steps": steps_results}
+    pdf_exists = stamp_after is not None and stamp_after != stamp_before
+    stale_pdf = stamp_after is not None and not pdf_exists
+    steps_ok = all(s["returncode"] in (0, 1) for s in steps_results)
+    success = steps_ok and pdf_exists
+
+    failed = next(
+        (s for s in steps_results if s["returncode"] not in (0, 1)), None
+    )
+    failed_step: str | None = None
+    if failed is not None:
+        failed_step = failed["cmd"]
+    elif not pdf_exists:
+        passes = [s for s in steps_results if s["cmd"] == " ".join(pdflatex_cmd)]
+        failed_step = passes[-1]["cmd"] if passes else " ".join(pdflatex_cmd)
+
+    missing_tool = missing[0] if missing else None
+    pdf_name = base + ".pdf"
+    if missing_tool:
+        message = (
+            f"{missing_tool} was not found: "
+            f"{_LATEX_TOOL_HINTS.get(missing_tool, 'install it and put it on PATH')}."
+        )
+        if pdf_exists:
+            message += f" {pdf_name} was written without it."
+    elif success:
+        message = f"{pdf_name} written."
+    elif pdf_exists and failed is not None:
+        message = (
+            f"{pdf_name} written, but `{failed['cmd']}` failed "
+            f"(rc={failed['returncode']}); citations or cross-references "
+            "may be incomplete."
+        )
+    elif stale_pdf:
+        message = (
+            f"LaTeX produced no new {pdf_name}; the one on disk is left over "
+            f"from an earlier compile. See {base}.log."
+        )
+    else:
+        message = f"LaTeX produced no {pdf_name}. See {base}.log."
+
+    return {
+        "success": success,
+        "pdf_exists": pdf_exists,
+        "stale_pdf": stale_pdf,
+        "pdf_path": pdf_path,
+        "missing_tool": missing_tool,
+        "failed_step": failed_step,
+        "message": message,
+        "steps": steps_results,
+    }
 
 
 def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecutor:
