@@ -182,10 +182,64 @@ failures.
 
 ## Easiest install (preview)
 
-A one-command installer and an `edmars` command (a setup wizard, a guided
-"new study" flow, a live progress view and plain-language results) are in
-development on the `feat/edmars-cli` branch. They are not on this branch yet;
-until they land, install by hand as described below.
+This branch (`feat/edmars-cli`) adds a one-command installer and the
+`edmars` command: a setup wizard, a guided "new study" flow, a live progress
+view and plain-language results, for people who have never used a terminal.
+It is a preview: it has been tested on Windows 11, not yet on macOS or Linux.
+
+**Install.** The installer needs no administrator rights, installs its own
+private Python 3.11 with the tested package versions (`requirements.lock`),
+and starts `edmars setup` at the end. See [install/README.md](install/README.md)
+for the options, the careful "download, inspect, then run" route and what goes
+where. Once a release is published on
+[GitHub Releases](https://github.com/cgpan/edm-ars-public/releases):
+
+```powershell
+irm https://github.com/cgpan/edm-ars-public/releases/latest/download/install.ps1 | iex   # Windows
+```
+```sh
+curl -LsSf https://github.com/cgpan/edm-ars-public/releases/latest/download/install.sh | sh   # macOS / Linux
+```
+
+Until then, install from a copy of this branch (once it is merged, leave out
+`-b feat/edmars-cli`):
+
+```powershell
+git clone -b feat/edmars-cli https://github.com/cgpan/edm-ars-public.git
+powershell -ExecutionPolicy Bypass -File .\edm-ars-public\install\install.ps1 -FromLocal .\edm-ars-public
+```
+```sh
+git clone -b feat/edmars-cli https://github.com/cgpan/edm-ars-public.git
+sh edm-ars-public/install/install.sh --from-local ./edm-ars-public
+```
+
+Or, in an environment set up as in [Install](#install), add the command's
+own packages and run it from the repository folder:
+`pip install -r requirements-cli.txt`, then `python -m edmars` wherever this
+section says `edmars`.
+
+**Commands.** `edmars --help` lists them; each has its own `--help`.
+
+| Command | What it does |
+|---|---|
+| `edmars setup [SECTION]` | The setup wizard: the notice to accept, AI service and key (kept in your system's credential store), literature search key, datasets, PDF tools, R, the automated reviewer. `edmars setup ai` (or `pdf`, `r`, `reviewer`, `datasets`, ...) changes one part; `--yes` with options sets up without questions. |
+| `edmars doctor` | Checks this computer and the setup and says how to fix what is missing. `--deep` also tests the keys online and compiles a test PDF; `--bundle` makes a support file with keys removed. |
+| `edmars new` | Start a study by answering a few questions, with a free feasibility check and a summary to confirm before anything is sent. |
+| `edmars run --type TYPE ...` | Start a study from options (for scripts): `--prompt` for prediction, `--example ID` or `--spec FILE` for the other types; `--yes` starts without asking. |
+| `edmars status [STUDY]` | Watch a running study (or the latest one); Ctrl+C leaves it running or stops it. |
+| `edmars runs` | List your studies and how each ended. |
+| `edmars results [STUDY]` | The result in plain words, what to check, and the files; `--open pdf\|folder\|summary`. |
+| `edmars stop` / `edmars resume [STUDY]` | Stop the running study; continue a stopped one from its last finished step. |
+| `edmars review [STUDY]` | Run the automated reviewer (LSAR) on a finished paper. |
+| `edmars data list\|install\|import\|verify` | Datasets: download (after you accept the terms), use a file you already have, check a file. |
+| `edmars explain TERM` | A plain definition of a term in the results (AUC, SHAP, ATE, DIF, ...). |
+| `edmars privacy` / `edmars disclaimer` | The texts in [PRIVACY.md](PRIVACY.md) and [DISCLAIMER.md](DISCLAIMER.md). |
+| `edmars version` / `edmars update` / `edmars uninstall` | Version; check for a newer release; remove settings, stored keys and downloads (asks about datasets and studies). |
+
+Every command takes `--plain` (no colour or animation; for screen readers and
+logs). Studies still run the AI-written code on your computer without a
+sandbox, exactly as described in [Disclaimer and privacy](#disclaimer-and-privacy);
+`edmars` asks you to accept that notice before the first study.
 
 ---
 
