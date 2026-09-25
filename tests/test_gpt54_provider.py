@@ -24,19 +24,24 @@ import pytest
 
 
 class TestOpenAIProviderClassPresent:
-    def test_openai_provider_branch_exists_in_base_agent(self) -> None:
-        """BaseAgent.__init__ has a provider=='openai' branch."""
-        from src.agents import base as base_module
+    def test_openai_client_is_built_for_the_openai_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An openai stage gets an OpenAI-SDK client.
 
-        # Pull the source so we can grep for the branch literal — easier
-        # than reflecting over the constructor.
-        import inspect
+        This used to grep BaseAgent's source for a provider=='openai'
+        branch. Client construction now lives in
+        src/agents/llm_client.build_client, shared with the review gate
+        (defect E3), so the check is on what the builder produces.
+        """
+        import openai  # type: ignore[import-not-found]
 
-        source = inspect.getsource(base_module.BaseAgent)
-        assert 'provider == "openai"' in source or "elif provider == 'openai'" in source, (
-            "BaseAgent.__init__ should retain the 'openai' provider branch "
-            "(added in 3b.5; preserved in 3b.7 additive MiniMax integration)."
-        )
+        from src.agents.llm_client import LLMSettings, build_client
+        from src.agents.provider_resolver import ProviderConfig
+
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        client = build_client(ProviderConfig(name="openai", model="gpt-5.4"), LLMSettings())
+        assert isinstance(client, openai.OpenAI)
 
     def test_openai_sdk_importable(self) -> None:
         """If the OpenAI SDK isn't installed, the provider class won't

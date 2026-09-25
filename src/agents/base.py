@@ -9,10 +9,24 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any
 
-import anthropic  # type: ignore[import-not-found]
 import yaml
 
-from src.cost import extract_usage, record_usage
+from src.agents.llm_client import (
+    LLMSettings,
+    build_client,
+    call_with_retries,
+    llm_settings,
+)
+from src.cost import (
+    TokenUsage,
+    cost_usd,
+    extract_usage,
+    load_pricing,
+    rate_is_unverified,
+    record_usage,
+)
+from src.errors import ProviderError
+from src.events import emit
 from src.skills import Skill, format_skills_for_prompt
 
 _SKILLS_PLACEHOLDER = "{{SKILLS}}"
@@ -130,6 +144,35 @@ def _image_content_part(path: str) -> dict | None:
     return {"type": "image_url", "image_url": {"url": f"data:{media};base64,{b64}"}}
 
 
+#: ``execute_code``'s own default, reported in attempt events when a
+#: caller does not pass a timeout.
+_DEFAULT_EXEC_TIMEOUT_S = 300
+
+_EXC_LINE_RE = re.compile(
+    r"^\s*([A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt|Warning|Timeout))\b"
+)
+
+
+def _error_class_from_result(result: Any) -> str | None:
+    """Best guess at what a failed script died of, from its stderr.
+
+    Python prints the exception class at the start of the last traceback
+    line (``KeyError: 'X1SES'``). The executors report a kill on timeout
+    as ``Timeout after Ns`` / ``Timed out after Ns``.
+    """
+    if not isinstance(result, dict):
+        return None
+    stderr = str(result.get("stderr") or "")
+    lowered = stderr.lower()
+    if "timeout after" in lowered or "timed out after" in lowered:
+        return "Timeout"
+    for line in reversed(stderr.strip().splitlines()):
+        match = _EXC_LINE_RE.match(line)
+        if match:
+            return match.group(1).rsplit(".", 1)[-1]
+    return "NonZeroExit" if result.get("returncode") not in (0, None) else None
+
+
 class BaseAgent(ABC):
     def __init__(
         self,
@@ -187,77 +230,22 @@ class BaseAgent(ABC):
         provider_cfg = resolve_provider_for_stage(agent_key, config)
         provider = provider_cfg.name
         self._provider: str = provider
+        self._provider_cfg = provider_cfg
+        # Transport limits (D5): explicit timeout, bounded network retries.
+        self._llm_settings: LLMSettings = llm_settings(config)
         # Annotated as Any because the concrete type varies by provider
-        # (anthropic.Anthropic for anthropic+minimax; openai.OpenAI for openai).
-        self.client: Any
-        if provider == "minimax":
-            api_key = os.environ.get("MINIMAX_API_KEY")
-            if not api_key:
-                raise EnvironmentError(
-                    "provider 'minimax' selected but MINIMAX_API_KEY is not set. "
-                    "Add it to a .env file or export it in your shell."
-                )
-            base_url = provider_cfg.base_url or os.environ.get(
-                "MINIMAX_BASE_URL", "https://api.minimax.io/anthropic"
-            )
-            self.model = provider_cfg.model or "MiniMax-M2.5"
-            self.client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
-        elif provider == "openai":
-            api_key = os.environ.get("OPENAI_API_KEY")
-            if not api_key:
-                raise EnvironmentError(
-                    "provider 'openai' selected but OPENAI_API_KEY is not set. "
-                    "Add it to a .env file or export it in your shell."
-                )
-            try:
-                import openai  # type: ignore[import-not-found]
-            except ImportError as exc:
-                raise EnvironmentError(
-                    "provider 'openai' selected but the openai SDK is not "
-                    "installed. Install it with: pip install openai"
-                ) from exc
-            base_url = provider_cfg.base_url or os.environ.get("OPENAI_BASE_URL")
-            self.model = provider_cfg.model or "gpt-4o"
-            client_kwargs: dict[str, Any] = {"api_key": api_key}
-            if base_url:
-                client_kwargs["base_url"] = base_url
-            self.client = openai.OpenAI(**client_kwargs)
-        elif provider == "deepseek":
-            # Phase 3b.10.5: DeepSeek-V4-Pro provider integration.
-            # API is OpenAI-compatible at https://api.deepseek.com.
-            # Replaces MiniMax as the project default per the project
-            # instruction. The MiniMax branch (above) is retained for
-            # backward-compat with 3b.5 / 3b.7 / 3b.9 run artifacts and
-            # any pinned config that still references it.
-            api_key = os.environ.get("DEEPSEEK_API_KEY")
-            if not api_key:
-                raise EnvironmentError(
-                    "provider 'deepseek' selected but DEEPSEEK_API_KEY is "
-                    "not set. Add it to a .env file or export it in your shell."
-                )
-            try:
-                import openai  # type: ignore[import-not-found]
-            except ImportError as exc:
-                raise EnvironmentError(
-                    "provider 'deepseek' selected but the openai SDK is "
-                    "not installed (DeepSeek uses the OpenAI-compatible "
-                    "endpoint). Install it with: pip install openai"
-                ) from exc
-            base_url = provider_cfg.base_url or os.environ.get(
-                "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
-            )
-            self.model = provider_cfg.model or "deepseek-v4-pro"
-            self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
-        else:
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
-            if not api_key:
-                raise EnvironmentError(
-                    "ANTHROPIC_API_KEY environment variable is not set. "
-                    "Export it before running the pipeline: "
-                    "export ANTHROPIC_API_KEY=sk-ant-..."
-                )
-            self.model = provider_cfg.model or config.get("models", {}).get(agent_key, "")
-            self.client = anthropic.Anthropic(api_key=api_key)
+        # (anthropic.Anthropic for anthropic+minimax; openai.OpenAI for
+        # openai+deepseek). Construction -- API-key check, base URL
+        # precedence, timeout -- is shared with the review gate in
+        # src/agents/llm_client.py so the two cannot drift apart (E3).
+        # DeepSeek's API is OpenAI-compatible (Phase 3b.10.5); the
+        # MiniMax branch is kept for 3b.5 / 3b.7 / 3b.9 artifacts.
+        # The model is resolved first: a missing openai.models entry is a
+        # config.yaml problem and should be reported as one even when the
+        # key is missing too.
+        self.model = self._resolve_model(provider_cfg, agent_key, config)
+        self.client: Any = build_client(provider_cfg, self._llm_settings)
+        self._pricing: dict | None = None
 
         # Phase 3b.10 / §10.2: per-stage max_tokens resolution.
         # Stash the resolved value as a default; per-call max_tokens
@@ -279,6 +267,93 @@ class BaseAgent(ABC):
         else:
             from src.sandbox import create_executor
             self._executor = create_executor(config)
+
+    @staticmethod
+    def _resolve_model(provider_cfg: Any, agent_key: str, config: dict) -> str:
+        """The model id this stage calls, or a configuration error.
+
+        deepseek and minimax fall back to their long-standing defaults.
+        openai does NOT: config.yaml ships no ``openai`` block, so a
+        fallback meant every stage -- the Critic included, which the SPEC
+        puts on the strongest tier -- quietly ran on gpt-4o, and nothing
+        said so until the tokens were spent (defect E1).
+        """
+        from src.agents.provider_resolver import effective_model
+
+        return effective_model(provider_cfg, agent_key)
+
+    # ------------------------------------------------------------------
+    # Live progress: pipeline.log lines and structured events
+    # ------------------------------------------------------------------
+
+    def _note(self, message: str) -> None:
+        """Record *message* in ctx.log AND pipeline.log, right now.
+
+        Agent notes otherwise reach disk only inside checkpoint.json at the
+        end of a stage, so a paused run looked frozen (D6). The line format
+        is the orchestrator's ``_log`` format exactly, so pipeline.log
+        stays one uniform stream. Never raises.
+        """
+        timestamp = datetime.utcnow().isoformat()
+        try:
+            self.ctx.log.append(
+                {"timestamp": timestamp, "agent": self.agent_name, "message": message}
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            output_dir = getattr(self.ctx, "output_dir", None)
+            if isinstance(output_dir, str) and output_dir and os.path.isdir(output_dir):
+                with open(
+                    os.path.join(output_dir, "pipeline.log"), "a", encoding="utf-8"
+                ) as fh:
+                    fh.write(f"{timestamp} [{self.agent_name}] {message}\n")
+        except Exception:  # noqa: BLE001 -- a log line must not fail a stage
+            pass
+
+    def _emit(self, event_type: str, plain: str | None = None, **data: Any) -> None:
+        """Emit a structured event tagged with this agent's stage and cycle."""
+        try:
+            cycle_raw = getattr(self.ctx, "revision_cycle", None)
+            cycle = int(cycle_raw) if isinstance(cycle_raw, int) else None
+            emit(
+                self.ctx,
+                event_type,
+                stage=getattr(self.ctx, "current_state", None),
+                cycle=cycle,
+                agent=self.agent_name,
+                plain=plain,
+                **data,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_llm_wait(self, seconds: float, attempt: int, reason: str, message: str) -> None:
+        """Announce a retry wait before sleeping through it (D6)."""
+        self._note(message)
+        self._emit(
+            "llm.wait",
+            plain=f"Waiting {seconds:.0f} s for {self._provider} ({reason.replace('_', ' ')})",
+            seconds=seconds,
+            attempt=attempt,
+            reason=reason,
+            model=self.model,
+            provider=self._provider,
+        )
+
+    def _price(self, usage: TokenUsage | None) -> tuple[float | None, bool]:
+        """(USD, is_estimate) for one call; (None, False) when unpriced."""
+        if usage is None:
+            return None, False
+        try:
+            if self._pricing is None:
+                self._pricing = load_pricing(self.config)
+            cost = cost_usd(usage, self._pricing)
+            if cost is None:
+                return None, False
+            return cost, rate_is_unverified(self._pricing.get(usage.model))
+        except Exception:  # noqa: BLE001 -- pricing is informational
+            return None, False
 
     def render_system_prompt(self) -> str:
         """Return the system prompt with the {{SKILLS}} placeholder resolved.
@@ -377,7 +452,7 @@ class BaseAgent(ABC):
         except OSError:
             pass
 
-    def _meter(self, response: Any) -> None:
+    def _meter(self, response: Any) -> TokenUsage | None:
         """Record measured token usage for one LLM call (K1).
 
         Every provider path funnels through here so the run's
@@ -410,8 +485,9 @@ class BaseAgent(ABC):
                     "model": self.model,
                 }
             )
+            return usage
         except Exception:  # noqa: BLE001 — metering is never fatal
-            pass
+            return None
 
     def call_llm(
         self,
@@ -447,8 +523,6 @@ class BaseAgent(ABC):
                 )
         except Exception:
             capture_dir = None
-        # Retry on rate-limit (429): exponential backoff up to 3 attempts
-        max_attempts = 3
         # One content payload, built once. A list of parts for the
         # OpenAI-compatible providers when images are attached; the bare
         # string otherwise, so every existing call is byte-identical.
@@ -472,129 +546,153 @@ class BaseAgent(ABC):
                     stacklevel=2,
                 )
 
-        for attempt in range(max_attempts):
-            try:
-                if self._provider == _PROVIDER_OPENAI:
-                    # OpenAI Chat Completions path. We don't use streaming
-                    # here because OpenAI's SDK has a generous default
-                    # request timeout and the response sizes are typical
-                    # of EDM agent outputs.
-                    #
-                    # Use `max_completion_tokens` (not `max_tokens`) — the
-                    # GPT-5 family rejects `max_tokens` outright, while
-                    # gpt-4o accepts both. So `max_completion_tokens` is
-                    # the cross-model-compatible spelling.
-                    response = self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": rendered_system_prompt},
-                            {"role": "user", "content": user_content},
-                        ],
-                        max_completion_tokens=max_tokens,
-                        temperature=temperature,
-                    )
-                    full_text = response.choices[0].message.content or ""
-                    self._meter(response)
-                    if capture_dir is not None:
-                        try:
-                            self._write_response_capture(capture_dir, full_text)
-                        except Exception:
-                            pass
-                    return full_text
+        # One attempt against the provider. Retrying -- 429 waits, bounded
+        # network/server retries -- and turning an unrecoverable failure
+        # into a classified ProviderError happen in call_with_retries
+        # (src/agents/llm_client.py), which announces every wait before
+        # sleeping through it.
+        metered: dict[str, Any] = {}
 
-                if self._provider == _PROVIDER_DEEPSEEK:
-                    # Phase 3b.10.5: DeepSeek-V4-Pro path. Uses the openai
-                    # SDK against DeepSeek's OpenAI-compatible endpoint.
-                    #
-                    # Thinking mode is DISABLED by default. DeepSeek-V4-Pro
-                    # ships with thinking enabled; the same thinking-block
-                    # overhead pattern that caused F-3b9-ANALYST-CODEGEN-
-                    # CRASH and F-3b9-WRITER-ONLY-BIBTEX under MiniMax-M2.7
-                    # would recur. Thinking can be re-enabled per-stage in
-                    # the future via a config.per_stage_providers.<stage>
-                    # .extra block; not implemented in 3b.10.5 (premature
-                    # until 3b.11 surfaces evidence that thinking helps).
-                    #
-                    # DeepSeek's OpenAI compat accepts max_tokens (the
-                    # standard parameter shown in their docs). Using
-                    # max_tokens here rather than max_completion_tokens
-                    # because DeepSeek isn't a GPT-5-family model.
-                    response = self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": rendered_system_prompt},
-                            {"role": "user", "content": user_content},
-                        ],
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        extra_body={"thinking": {"type": "disabled"}},
-                    )
-                    full_text = response.choices[0].message.content or ""
-                    self._meter(response)
-                    if capture_dir is not None:
-                        try:
-                            self._write_response_capture(capture_dir, full_text)
-                        except Exception:
-                            pass
-                    return full_text
-
-                # Anthropic / MiniMax (Anthropic-SDK-compatible) path.
-                # Use streaming to avoid SDK timeout on large responses
-                # (> 10 min non-streaming limit).
-                with self.client.messages.stream(
+        def _attempt() -> str:
+            if self._provider == _PROVIDER_OPENAI:
+                # OpenAI Chat Completions path. We don't use streaming
+                # here: the client carries an explicit read timeout
+                # (llm.request_timeout_s, default 600 s) and the
+                # response sizes are typical of EDM agent outputs.
+                #
+                # Use `max_completion_tokens` (not `max_tokens`) — the
+                # GPT-5 family rejects `max_tokens` outright, while
+                # gpt-4o accepts both. So `max_completion_tokens` is
+                # the cross-model-compatible spelling.
+                response = self.client.chat.completions.create(
                     model=self.model,
-                    max_tokens=max_tokens,
+                    messages=[
+                        {"role": "system", "content": rendered_system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    max_completion_tokens=max_tokens,
                     temperature=temperature,
-                    system=rendered_system_prompt,
-                    messages=[{"role": "user", "content": user_message}],
-                ) as stream:
-                    final_message = stream.get_final_message()
-                # Phase 3b.7 / sub-phase A.1: MiniMax-M2.7 emits "thinking"
-                # content blocks alongside text (similar to Anthropic
-                # extended thinking). The SDK's get_final_text() raises
-                # RuntimeError when thinking-only responses come back.
-                # Extract the text content manually from content blocks
-                # so both pure-text and thinking+text responses work.
-                full_text = "".join(
-                    getattr(block, "text", "") or ""
-                    for block in final_message.content
-                    if getattr(block, "type", None) == "text"
                 )
-                self._meter(final_message)
+                full_text = response.choices[0].message.content or ""
+                metered["usage"] = self._meter(response)
                 if capture_dir is not None:
                     try:
                         self._write_response_capture(capture_dir, full_text)
                     except Exception:
                         pass
                 return full_text
-            except Exception as exc:
-                # Catch rate-limit errors from either SDK and back off.
-                # We can't reference openai.RateLimitError unconditionally
-                # because the openai SDK may not be installed; rely on
-                # class-name + module-name introspection instead.
-                exc_name = type(exc).__name__
-                exc_module = type(exc).__module__ or ""
-                is_rate_limit = (
-                    isinstance(exc, anthropic.RateLimitError)
-                    or (exc_name == "RateLimitError" and exc_module.startswith("openai"))
+
+            if self._provider == _PROVIDER_DEEPSEEK:
+                # Phase 3b.10.5: DeepSeek-V4-Pro path. Uses the openai
+                # SDK against DeepSeek's OpenAI-compatible endpoint.
+                #
+                # Thinking mode is DISABLED by default. DeepSeek-V4-Pro
+                # ships with thinking enabled; the same thinking-block
+                # overhead pattern that caused F-3b9-ANALYST-CODEGEN-
+                # CRASH and F-3b9-WRITER-ONLY-BIBTEX under MiniMax-M2.7
+                # would recur. Thinking can be re-enabled per-stage in
+                # the future via a config.per_stage_providers.<stage>
+                # .extra block; not implemented in 3b.10.5 (premature
+                # until 3b.11 surfaces evidence that thinking helps).
+                #
+                # DeepSeek's OpenAI compat accepts max_tokens (the
+                # standard parameter shown in their docs). Using
+                # max_tokens here rather than max_completion_tokens
+                # because DeepSeek isn't a GPT-5-family model.
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": rendered_system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    extra_body={"thinking": {"type": "disabled"}},
                 )
-                if not is_rate_limit:
-                    raise
-                if attempt == max_attempts - 1:
-                    raise
-                wait_s = 60 * (attempt + 1)  # 60s, 120s
-                self.ctx.log.append(
-                    {
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "agent": self.agent_name,
-                        "message": (
-                            f"Rate limit hit (attempt {attempt + 1}/{max_attempts}); "
-                            f"waiting {wait_s}s before retry. ({exc})"
-                        ),
-                    }
-                )
-                time.sleep(wait_s)
-        raise RuntimeError("call_llm: unreachable")
+                full_text = response.choices[0].message.content or ""
+                metered["usage"] = self._meter(response)
+                if capture_dir is not None:
+                    try:
+                        self._write_response_capture(capture_dir, full_text)
+                    except Exception:
+                        pass
+                return full_text
+
+            # Anthropic / MiniMax (Anthropic-SDK-compatible) path.
+            # Use streaming to avoid SDK timeout on large responses
+            # (> 10 min non-streaming limit).
+            with self.client.messages.stream(
+                model=self.model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=rendered_system_prompt,
+                messages=[{"role": "user", "content": user_message}],
+            ) as stream:
+                final_message = stream.get_final_message()
+            # Phase 3b.7 / sub-phase A.1: MiniMax-M2.7 emits "thinking"
+            # content blocks alongside text (similar to Anthropic
+            # extended thinking). The SDK's get_final_text() raises
+            # RuntimeError when thinking-only responses come back.
+            # Extract the text content manually from content blocks
+            # so both pure-text and thinking+text responses work.
+            full_text = "".join(
+                getattr(block, "text", "") or ""
+                for block in final_message.content
+                if getattr(block, "type", None) == "text"
+            )
+            metered["usage"] = self._meter(final_message)
+            if capture_dir is not None:
+                try:
+                    self._write_response_capture(capture_dir, full_text)
+                except Exception:
+                    pass
+            return full_text
+
+        started = time.monotonic()
+        self._emit(
+            "llm.start",
+            plain=f"Waiting for {self.model}",
+            model=self.model,
+            provider=self._provider,
+        )
+        try:
+            full_text = call_with_retries(
+                _attempt,
+                provider_cfg=self._provider_cfg,
+                model=self.model,
+                settings=self._llm_settings,
+                on_wait=self._on_llm_wait,
+            )
+        except BaseException as exc:
+            self._emit(
+                "llm.end",
+                model=self.model,
+                provider=self._provider,
+                ok=False,
+                error_code=exc.code if isinstance(exc, ProviderError) else None,
+                error_class=type(exc).__name__,
+                prompt_tokens=0,
+                completion_tokens=0,
+                cached_tokens=0,
+                cost_usd=None,
+                duration_s=round(time.monotonic() - started, 3),
+            )
+            raise
+        usage = metered.get("usage")
+        cost, estimated = self._price(usage)
+        self._emit(
+            "llm.end",
+            model=self.model,
+            provider=self._provider,
+            ok=True,
+            prompt_tokens=getattr(usage, "prompt_tokens", 0),
+            completion_tokens=getattr(usage, "completion_tokens", 0),
+            cached_tokens=getattr(usage, "cached_prompt_tokens", 0),
+            cost_usd=cost,
+            cost_estimated=estimated,
+            duration_s=round(time.monotonic() - started, 3),
+        )
+        return full_text
 
     def execute_code(self, code: str, timeout_s: int = 300) -> dict:
         """Execute generated Python code via configured executor (Docker sandbox or subprocess)."""
@@ -604,6 +702,62 @@ class BaseAgent(ABC):
             raw_data_path=getattr(self.ctx, "raw_data_path", None),
             timeout_s=timeout_s,
         )
+
+    def execute_code_attempt(
+        self,
+        code: str,
+        *,
+        attempt: int,
+        max_attempts: int,
+        timeout_s: int | None = None,
+    ) -> dict:
+        """``execute_code`` bracketed by ``attempt.start`` / ``attempt.end``.
+
+        The DataEngineer and Analyst retry loops call this with their own
+        attempt numbers, so a live view can say "attempt 2 of 3" while the
+        generated script runs, and what the last one died of. It forwards
+        to ``execute_code`` with the same arguments the loops always
+        passed (``timeout_s`` only when the loop sets one), so a test or
+        subclass that replaces ``execute_code`` keeps working.
+        """
+        effective_timeout = timeout_s if timeout_s is not None else _DEFAULT_EXEC_TIMEOUT_S
+        self._emit(
+            "attempt.start",
+            plain=f"Running the generated code (attempt {attempt} of {max_attempts})",
+            attempt=attempt,
+            max_attempts=max_attempts,
+            timeout_s=effective_timeout,
+        )
+        started = time.monotonic()
+        try:
+            if timeout_s is None:
+                result = self.execute_code(code)
+            else:
+                result = self.execute_code(code, timeout_s=timeout_s)
+        except BaseException as exc:
+            self._emit(
+                "attempt.end",
+                attempt=attempt,
+                max_attempts=max_attempts,
+                returncode=None,
+                duration_s=round(time.monotonic() - started, 3),
+                timeout_s=effective_timeout,
+                error_class=type(exc).__name__,
+            )
+            raise
+        returncode = result.get("returncode") if isinstance(result, dict) else None
+        self._emit(
+            "attempt.end",
+            attempt=attempt,
+            max_attempts=max_attempts,
+            returncode=returncode,
+            duration_s=round(time.monotonic() - started, 3),
+            timeout_s=effective_timeout,
+            error_class=(
+                None if returncode == 0 else _error_class_from_result(result)
+            ),
+        )
+        return result
 
     def load_registry(self) -> dict:
         path = os.path.join(
