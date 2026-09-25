@@ -433,6 +433,42 @@ def test_completed_run_stays_terminal_on_resume(tmp_path: Path) -> None:
     assert _status(tmp_path)["written_at"] == before["written_at"]
 
 
+def test_resuming_at_a_completed_verifying_verifies_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checkpoint can name VERIFYING as the stage to run while also
+    listing it complete (Ctrl-C between the two, or a hand edit to re-run
+    it). The resume deleted the held-back verdict and then declared the
+    run COMPLETED without checking, rebuilding a status with
+    ``released: true`` -- a paper with no PDF reported as released."""
+    monkeypatch.setattr("src.orchestrator.compile_latex", _fake_compile_no_pdflatex)
+    cfg = _config(tmp_path)
+    first = _orch(tmp_path, cfg)
+    _wire(first)
+    assert first.run().current_state == PipelineState.INCOMPLETE
+    assert _status(tmp_path)["released"] is False
+
+    cp_path = tmp_path / "checkpoint.json"
+    cp = json.loads(cp_path.read_text(encoding="utf-8"))
+    assert "VERIFYING" in cp["completed_stages"]
+    cp["current_state"] = "VERIFYING"
+    cp_path.write_text(json.dumps(cp), encoding="utf-8")
+
+    second = _orch(tmp_path, cfg)
+    calls = _wire(second)
+    assert second.run().current_state == PipelineState.INCOMPLETE
+    assert sum(calls.values()) == 0
+    status = _status(tmp_path)
+    assert status["state"] == "INCOMPLETE"
+    assert status["released"] is False
+    assert status["reason_code"] == "BLOCKING_FINDINGS"
+    assert status["blocking_findings"] == ["INV_LATEX_NO_PDF"]
+    assert (tmp_path / "invariants.json").exists()
+    assert second.ctx.completed_stages.count("VERIFYING") == 1
+    ends = [e for e in _events(tmp_path) if e["type"] == "run.end"]
+    assert ends[-1]["data"]["exit_code"] == 2
+
+
 # ---------------------------------------------------------------------------
 # Interrupts and crashes (finalize_interrupted)
 # ---------------------------------------------------------------------------

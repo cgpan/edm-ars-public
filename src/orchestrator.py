@@ -2284,8 +2284,22 @@ class Orchestrator:
         Promote checks to blocking individually, on evidence.
         """
         if "VERIFYING" in self.ctx.completed_stages:
-            self.ctx.current_state = PipelineState.COMPLETED
-            return
+            # The stage finishes by moving to COMPLETED or INCOMPLETE, so a
+            # run only gets here from a checkpoint that names VERIFYING as
+            # the stage to run although it is recorded complete: an
+            # interrupt between the two, or a hand edit to re-run it.
+            # _prepare_resume has removed the verdict files, so declaring
+            # the run COMPLETED here released a paper nothing had checked
+            # (the rebuilt status said so). The battery is deterministic
+            # and cheap: run it again.
+            self._log(
+                "Orchestrator",
+                "VERIFYING is recorded complete but is the stage to run; "
+                "running the invariant battery again",
+            )
+            self.ctx.completed_stages = [
+                s for s in self.ctx.completed_stages if s != "VERIFYING"
+            ]
         self._log("Orchestrator", "Starting VERIFYING stage (invariant battery)")
 
         cfg = self.config.get("verification", {}) or {}
