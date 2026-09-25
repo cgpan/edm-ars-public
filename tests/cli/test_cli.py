@@ -358,6 +358,25 @@ def test_new_needs_a_terminal() -> None:
     assert "edmars run --type" in result.output
 
 
+def test_new_stops_before_any_question_without_an_ai_key(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from edmars import secrets as edsecrets
+    from edmars import ui
+
+    accept_disclosure()
+    asked: list[Any] = []
+    fake_module(monkeypatch, "study", new_study_interactive=lambda s: asked.append(s))
+    monkeypatch.setattr(ui, "is_interactive", lambda: True)
+    result = invoke("new")
+    assert result.exit_code == 1
+    assert "no DeepSeek key" in result.output and "edmars setup ai" in result.output
+    assert asked == []  # not one question was asked
+    edsecrets.set_secret("DEEPSEEK_API_KEY", "sk-" + "t" * 32)
+    result = invoke("new")
+    assert asked, result.output  # with a key, the questions start
+    assert "sk-" not in result.output
+
+
 def test_status_watches_then_shows_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     shown: list[Any] = []
     fake_module(monkeypatch, "runner", active_run=lambda: tmp_path, latest_run=lambda s: None)
@@ -426,6 +445,7 @@ def test_resume_confirms_spending(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_review_adapts_to_the_lsar_function_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    accept_disclosure()
     folder = make_study()
     seen: list[tuple[Any, Any]] = []
 
@@ -437,6 +457,19 @@ def test_review_adapts_to_the_lsar_function_signature(monkeypatch: pytest.Monkey
     result = invoke("review", folder.name, "--yes")
     assert result.exit_code == 0, result.output
     assert seen == [("EDM", folder)]
+
+
+def test_review_requires_the_disclosure(monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = make_study()
+    reviewed: list[Path] = []
+    fake_module(monkeypatch, "lsar", review=lambda run_dir: reviewed.append(run_dir) or 0)
+    result = invoke("review", folder.name, "--yes")
+    assert result.exit_code == 1
+    assert "accept" in result.output
+    assert reviewed == []  # the paper was not sent anywhere
+    result = invoke("review", folder.name, "--yes", "--accept-disclosure")
+    assert result.exit_code == 0, result.output
+    assert reviewed == [folder]
 
 
 def test_review_without_a_review_function(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -516,6 +549,14 @@ def test_data_install_requires_accepting_the_terms(monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 1
     assert "--accept-terms" in result.output
     assert downloads == []
+
+
+def test_data_install_of_a_manual_dataset_points_to_import() -> None:
+    # The real catalog: ASSISTments has no automatic download yet.
+    result = invoke("data", "install", "assistments_0910", "--accept-terms")
+    assert result.exit_code == 1
+    assert "Downloading" not in result.output
+    assert "edmars data import assistments_0910" in " ".join(result.output.split())
 
 
 def test_data_install_records_the_dataset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

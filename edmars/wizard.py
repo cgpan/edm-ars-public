@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from edmars import doctor as _doctor
+from edmars import estimates
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     pass
@@ -1882,8 +1883,8 @@ class _Wizard:
             "LSAR is EDM-ARS's companion reviewer. It reads your finished PDF and scores it from 1 to 10 the "
             "way a conference reviewer would, using accepted papers as the benchmark. If the score is low, "
             "EDM-ARS revises the paper and asks again, up to 2 rounds.\n\n"
-            "It adds about 20-40 minutes per study and costs about US$0.05 per review with DeepSeek (a low "
-            "score can trigger up to 6 reviews). It needs a DeepSeek key, because LSAR's scoring was "
+            f"It adds {estimates.REVIEW_TIME} per study and costs {estimates.REVIEW_COST_DEEPSEEK}. "
+            "It needs a DeepSeek key, because LSAR's scoring was "
             "calibrated with DeepSeek, and it needs PDFs (step 7).\n\n"
             "Good to know: two readings of the same paper can differ by about 2 points. Treat the score as a "
             "rough signal, not a verdict."

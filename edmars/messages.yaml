@@ -6,6 +6,8 @@
 #   {run}      the study folder, quoted for the shell when needed
 #   {provider} the AI service name       {dataset} the dataset id
 #   {reason}   a short technical reason   {stage}   the step that failed
+#   {get_data} the command that installs (or, for ASSISTments, imports)
+#              the dataset
 # Tests (tests/cli/test_endstates.py) check that every abort code in
 # src/errors.py and every invariant code in src/invariants.py has an entry.
 
@@ -69,7 +71,7 @@ stages:
     title: "Automated peer review (LSAR)"
     now: >-
       LSAR, an automated reviewer, is scoring the paper against papers
-      accepted at the venue. This step often takes 20 to 40 minutes.
+      accepted at the venue. This step often takes 10 to 45 minutes.
   VERIFYING:
     title: "Final checks"
     now: "Checking the paper against the study's own numbers, figures and citations."
@@ -189,7 +191,7 @@ failures:
       EDM-ARS data folder.
     fix: "Install or import the dataset, then resume."
     command: |-
-      edmars data install {dataset}
+      {get_data}
       edmars resume {run}
   DATA_WRONG_FORMAT:
     title: "The dataset file is not in the expected format"
@@ -200,7 +202,7 @@ failures:
     fix: "Check the file, then download or import it again."
     command: |-
       edmars data verify
-      edmars data install {dataset}
+      {get_data}
   DE_VALIDATION_FAILED:
     title: "The data could not be prepared"
     why: >-

@@ -56,6 +56,13 @@ def install_data(raw: Path, dataset: str, content: str = "") -> Path:
     return path
 
 
+def hsls_rows(n: int) -> str:
+    """A tiny HSLS extract with ``n`` students who all have the outcome."""
+    rows = [f"0.{i % 9},{'Yes' if i % 2 else 'No'},{'Male' if i % 3 else 'Female'}"
+            for i in range(n)]
+    return "\n".join(["X1MTHEFF,X4EVRATNDCLG,X1SEX", *rows]) + "\n"
+
+
 def load_with_pipeline_loader(spec: dict, tmp_path: Path, dataset: str) -> dict:
     """Round-trip through the pipeline's own src.main loader."""
     # Via the study module's accessor: importing src.main directly would run
@@ -237,10 +244,8 @@ def test_example_preflight_without_data_fails_only_on_the_data_file(
 
 
 def test_example_preflight_with_data_present_is_clear(raw_dir: Path) -> None:
-    install_data(
-        raw_dir, "hsls09_public",
-        "X1MTHEFF,X4EVRATNDCLG,X1SEX\n0.5,Yes,Male\n-0.2,No,Female\n",
-    )
+    # Above the pipeline's 1,000-student minimum.
+    install_data(raw_dir, "hsls09_public", hsls_rows(1200))
     plan = study.plan_from_flags({}, example="x1mtheff_x4college")
     checks = study.preflight(plan, {})
     assert not study.blocking(checks), [(c.name, c.detail) for c in checks
@@ -448,6 +453,115 @@ def test_preflight_adds_a_language_note() -> None:
     assert notes and notes[0].status == "info" and "English" in notes[0].detail
 
 
+def _late_treatment_plan() -> StudyPlan:
+    """A causal plan whose cause (11th grade) comes after its outcome (9th)."""
+    spec = study.build_menu_spec(
+        {}, "causal_soo", "hsls09_public",
+        {"treatment": "X1MTHEFF", "outcome": "X4EVRATNDCLG"},
+    )
+    spec["treatment"]["variable"] = "X2MTHEFF"
+    spec["outcome"]["variable"] = "X1TXMTSCOR"
+    return StudyPlan("causal_soo", "hsls09_public", spec["research_question"],
+                     spec=spec, experimental=True)
+
+
+_DEVELOPER_WORDS = ("Why:", "temporal_order", "registry wave", "role=", "['",
+                    "Tier-", "predicate", "dispatch", ".yaml")
+
+
+def test_preflight_explains_a_blocking_check_in_plain_words() -> None:
+    checks = study.preflight(_late_treatment_plan(), {}, run_probes=False)
+    order = next(c for c in checks if c.name == "Earlier measures come before the outcome")
+    assert order.status == "fail"
+    assert "X2MTHEFF is measured in 2012 (11th grade), after the outcome" in order.detail
+    assert "The outcome X1TXMTSCOR is measured in 2009 (9th grade)" in order.detail
+    assert order.fix == "Choose an outcome measured after the other variables."
+    for check in checks:
+        for word in _DEVELOPER_WORDS:
+            assert word not in check.detail, (check.name, check.detail)
+
+
+def test_preflight_technical_detail_only_in_debug_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EDMARS_DEBUG", "1")
+    checks = study.preflight(_late_treatment_plan(), {}, run_probes=False)
+    order = next(c for c in checks if c.name == "Earlier measures come before the outcome")
+    assert "[Technical detail: F-TEMPORAL-ORDER:" in order.detail
+
+
+def test_a_sample_below_the_pipeline_floor_blocks_the_start(raw_dir: Path) -> None:
+    # 50 students have the outcome: the pipeline would stop at its
+    # 1,000-student minimum (SAMPLE_TOO_SMALL) after the first paid steps.
+    install_data(raw_dir, "hsls09_public", hsls_rows(50))
+    plan = study.plan_from_flags({}, example="x1mtheff_x4college")
+    checks = study.preflight(plan, {})
+    sample = next(c for c in checks if c.name == "Enough students with usable data")
+    assert sample.status == "fail", sample
+    assert "Only about 50 of 50 students" in sample.detail
+    assert sample.fix and "edmars data verify" in sample.fix
+    assert study.blocking(checks)
+
+
+def test_passing_screen_checks_carry_no_developer_text(raw_dir: Path) -> None:
+    install_data(raw_dir, "hsls09_public", hsls_rows(1200))
+    plan = study.plan_from_flags({}, example="x1mtheff_x4college")
+    checks = study.preflight(plan, {})
+    assert not study.blocking(checks)
+    for check in checks:
+        for word in _DEVELOPER_WORDS + ("Analytic n", "Minority class"):
+            assert word not in check.detail, (check.name, check.detail)
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "fragment"),
+    [
+        ("F-VAR-ABSENT", "Variable(s) do not exist in this dataset: FOO, BAR.",
+         "These variables are not in HSLS:09: FOO, BAR."),
+        ("F-TIER3-EXCLUDED", "Tier-3 excluded name(s) used as study variables: "
+         "W1STUDENT. These are weights, sampling/administrative IDs, or "
+         "processing flags.", "not measures of students: W1STUDENT."),
+        ("F-DEAD-VARIABLE", "Variable(s) carry no usable data: X1ASIAN "
+         "(100.0% missing).", "suppressed or empty): X1ASIAN (100.0% missing)."),
+        ("F-ESTIMATOR-UNCERTIFIED", "Estimator(s) RD are certified on synthetic "
+         "DGPs but shelved: no executable task type implements them.",
+         "cannot run these methods for this kind of study yet: RD."),
+        ("F-SPEC-INCOMPLETE", "Spec cannot be dispatched as causal_soo: missing "
+         "treatment, outcome.", "missing parts the pipeline needs: treatment, outcome."),
+    ],
+)
+def test_blocking_checks_name_the_offending_parts(
+    code: str, message: str, fragment: str
+) -> None:
+    from src.ideation.feasibility import KILL, CheckResult, FeasibilityReport
+
+    report = FeasibilityReport(
+        "t", KILL, [CheckResult(code, KILL, message, "evidence ['x']")],
+        dataset="hsls09_public", task_type="causal_soo",
+    )
+    (check,) = study._map_report(report)
+    assert check.status == "fail"
+    assert fragment in check.detail
+    assert "evidence" not in check.detail
+
+
+def test_run_shows_only_names_for_passing_checks(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from edmars import cli, ui
+
+    ui.set_plain(True)
+    cli._show_study_checks([
+        Check("Enough students with usable data", "ok", "Passed."),
+        Check("Earlier measures come before the outcome", "fail", "X is too late.",
+              "Choose an outcome measured after the other variables."),
+    ])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "Enough students with usable data" in out and "Passed." not in out
+    assert "X is too late." in out and "Choose an outcome" in out
+
+
 # --------------------------------------------------------------------------
 # Out of scope, language, "Not sure"
 # --------------------------------------------------------------------------
@@ -535,6 +649,34 @@ def test_english_is_not_flagged(text: str) -> None:
 )
 def test_suggest_study_type(text: str, task_type: str) -> None:
     assert study.suggest_study_type(text).task_type == task_type
+
+
+@pytest.mark.parametrize(
+    ("text", "task_type"),
+    [
+        # Everyday cause-and-effect wording the pipeline keywords miss.
+        ("Does taking algebra in 8th grade cause higher college enrollment?",
+         "causal_soo"),
+        ("Does math self-efficacy affect college attendance?", "causal_soo"),
+        ("Does taking calculus lead to higher GPA?", "causal_soo"),
+        ("Does taking calculus influence college enrollment?", "causal_soo"),
+        # The family menu's own words: "does one thing change another?"
+        ("Does tutoring change math scores?", "causal_soo"),
+        ("Does tutoring improve math scores?", "causal_soo"),
+        # The causal-kind menu's own words: "who would benefit most from X?"
+        ("Who would benefit most from tutoring?", "causal_itr"),
+        ("Which students benefit most from taking advanced math?", "causal_itr"),
+        # Forecasting wording stays a prediction even with a change verb.
+        ("Can 9th-grade scores predict whether GPA will increase?", "prediction"),
+        ("Which students are likely to reduce their course load?", "prediction"),
+        # "because" is not "cause".
+        ("Which students drop out because of low grades, and can we predict it?",
+         "prediction"),
+    ],
+)
+def test_suggest_study_type_plain_causal_wording(text: str, task_type: str) -> None:
+    suggestion = study.suggest_study_type(text)
+    assert suggestion.task_type == task_type
 
 
 # --------------------------------------------------------------------------
@@ -640,6 +782,18 @@ def test_flags_take_defaults_from_settings() -> None:
     assert (plan.venue, plan.paper_format, plan.review) == ("JLA", "journal", True)
     settings["provider"] = "local"  # LSAR is off for local models
     assert study.plan_from_flags(settings, example="x1mtheff_itr").review is False
+
+
+@pytest.mark.parametrize("venue", ["JEDM", "JLA", "AERA Open"])
+def test_a_journal_venue_flag_means_a_journal_article(venue: str) -> None:
+    from edmars import settings as settings_mod
+
+    loaded = settings_mod.load()  # fills defaults.paper_format = conference
+    assert settings_mod.get(loaded, "defaults.paper_format") == "conference"
+    plan = study.plan_from_flags(loaded, example="x1mtheff_itr", venue=venue)
+    assert plan.paper_format == "journal"
+    plan = study.plan_from_flags(loaded, example="x1mtheff_itr", venue="EDM")
+    assert plan.paper_format == "conference"
 
 
 # --------------------------------------------------------------------------

@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence
 
-from edmars import fetch
+from edmars import estimates, fetch
 from edmars.model import Check
 
 LSAR_REPO = "https://github.com/cgpan/LSAR-public"
@@ -285,7 +285,7 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
     if not home_value:
         return [Check(title, "fail",
                       "Not installed. It scores each finished paper against a benchmark "
-                      "and adds about 20-40 minutes per study.",
+                      f"and adds {estimates.REVIEW_TIME} per study.",
                       fix="edmars setup reviewer")]
     home = Path(str(home_value))
     problems = _file_problems(home)
@@ -897,7 +897,7 @@ def review_run(
     from edmars import ui
 
     run_dir = Path(run_dir)
-    note = ("Reviewing the paper with LSAR. This usually takes 10-40 minutes; "
+    note = (f"Reviewing the paper with LSAR. This usually takes {estimates.MANUAL_REVIEW_TIME}; "
             "you can leave this window open.")
     try:
         status_cm = getattr(ui, "status", None)

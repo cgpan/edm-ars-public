@@ -175,3 +175,31 @@ def test_causal_and_psychometric_result_sentences(run_home: Path) -> None:
                    results={"headline": "The scale functions equivalently across sex.",
                             "measurement_results": {}})
     assert results.result_sentence(load_state(psy)) == "The scale functions equivalently across sex."
+
+
+def test_an_experimental_plan_is_labelled_on_the_result_and_summary(
+        run_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    run = _ready(run_home, study={"experimental": True})
+    code, out = _show(run, capsys)
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0].startswith("[ok] Ready")
+    assert lines[1] == "[EXPERIMENTAL] plan - not a tested example study"
+    html_text = (run / "summary.html").read_text(encoding="utf-8")
+    assert "[EXPERIMENTAL] plan - not a tested example study" in html_text
+    assert "not been run end to end" in html_text
+    failed = make_run(run_home, name="2026-09-25_1400_failed_ef01", pdf=False,
+                      study={"experimental": True},
+                      status=v2_status("ABORTED", released=False, reason_code="ABORTED",
+                                       abort={"stage": "FORMULATING", "code": "NO_CREDIT",
+                                              "message": "x", "resumable": True}))
+    _, out = _show(failed, capsys)
+    assert out.splitlines()[1] == "[EXPERIMENTAL] plan - not a tested example study"
+
+
+def test_a_tested_plan_carries_no_experimental_label(
+        run_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    run = _ready(run_home)
+    _, out = _show(run, capsys)
+    assert "EXPERIMENTAL" not in out
+    assert "EXPERIMENTAL" not in (run / "summary.html").read_text(encoding="utf-8")

@@ -284,6 +284,28 @@ def _require_ack(settings: dict[str, Any], accept: bool) -> None:
     raise typer.Exit(1)
 
 
+def _require_ai_key(settings: dict[str, Any]) -> None:
+    """Stop `edmars new` before the first question when no AI key is saved.
+
+    The pipeline's own start-up check would find it too, but only after
+    every question and the Start button, and the answers would be lost.
+    """
+    from edmars import providers
+    from edmars import secrets as edsecrets
+    from edmars import settings as settings_mod
+
+    provider = str(settings_mod.get(settings, "provider", "deepseek") or "deepseek")
+    info = providers.PROVIDERS.get(provider)
+    if provider == "local" or info is None:
+        return  # a local server needs no key; an unknown one is setup's to explain
+    if edsecrets.secret_source(info.env_var):
+        return
+    name = info.label.split(" (")[0].split(" - ")[0]
+    ui.fail(f"There is no {name} key saved on this computer, so a study cannot start yet.")
+    ui.info("Add it with `edmars setup ai`, then run `edmars new` again. Nothing was spent.")
+    raise typer.Exit(1)
+
+
 def _find_run(settings: dict[str, Any], text: str) -> Path:
     """Resolve a RUN argument: a path, a folder name, or part of one."""
     from edmars import settings as settings_mod
@@ -390,6 +412,16 @@ def _launch(settings: dict[str, Any], plan: Any, *, watch: bool) -> None:
     _after_start(run_dir, watch)
 
 
+def _show_study_checks(checks: list[Any]) -> None:
+    """The free check's list: only the name of a check that passed, as
+    ``edmars new`` shows it; problems keep their sentence and their fix."""
+    for check in checks:
+        if check.status == "ok":
+            ui.ok(check.name)
+        else:
+            ui.show_checks([check])
+
+
 def _preflight_confirm_launch(settings: dict[str, Any], plan: Any, *, yes: bool, watch: bool) -> None:
     """``edmars run``: check the plan, show the confirmation card, start it."""
     study = _module("study")
@@ -398,7 +430,7 @@ def _preflight_confirm_launch(settings: dict[str, Any], plan: Any, *, yes: bool,
         "can take a few minutes)"
     ):
         checks = study.preflight(plan, settings)
-    ui.show_checks(checks)
+    _show_study_checks(checks)
     if study.blocking(checks):
         ui.fail("This study cannot start until the problems above are fixed.")
         raise typer.Exit(1)
@@ -681,6 +713,7 @@ def new_cmd(
         raise typer.Exit(1)
     settings = _settings()
     _require_ack(settings, accept_disclosure)
+    _require_ai_key(settings)
     study = _module("study")
     # new_study_interactive runs the feasibility check, the options and the
     # confirmation card itself (R4-R6); it returns a plan only after the
@@ -715,7 +748,11 @@ def run_cmd(
     ] = None,
     paper_format: Annotated[
         Optional[PaperFormat],
-        typer.Option("--paper-format", help="conference or journal (default: your setup's choice)."),
+        typer.Option(
+            "--paper-format",
+            help="conference or journal (default: journal for a journal --venue, "
+            "otherwise your setup's choice).",
+        ),
     ] = None,
     review: Annotated[
         Optional[bool],
@@ -885,18 +922,28 @@ def resume_cmd(
 
 @app.command("review")
 @_friendly
-def review_cmd(run: RunArg = None, plain: PlainOpt = False, yes: YesOpt = False) -> None:
+def review_cmd(
+    run: RunArg = None,
+    accept_disclosure: AcceptOpt = False,
+    plain: PlainOpt = False,
+    yes: YesOpt = False,
+) -> None:
     """Run the automated reviewer (LSAR) on a finished study's paper."""
+    from edmars import estimates
+
     non_interactive = _modes(plain, yes)
     settings = _settings()
     lsar = _module("lsar")
     review = getattr(lsar, "review_run", None) or getattr(lsar, "review", None)
     if review is None:
         raise FeatureMissing("lsar.review")
+    # The review sends the paper to DeepSeek, which the notice describes;
+    # like new, run and resume, it needs the current notice accepted.
+    _require_ack(settings, accept_disclosure)
     run_dir = _resolve_run(settings, run, prefer_active=False)
     _confirm_spend(
         f"Review the paper in {run_dir.name}? This sends it to DeepSeek and usually "
-        "takes 20 to 40 minutes.",
+        f"takes {estimates.MANUAL_REVIEW_TIME}.",
         non_interactive,
     )
     outcome = _call_with(review, run_dir=run_dir, settings=settings)
@@ -982,8 +1029,12 @@ def data_install_cmd(
     _modes(plain, yes)
     datasets = _module("datasets")
     settings = _settings()
-    _dataset_info(datasets, name)
+    info = _dataset_info(datasets, name)
 
+    if getattr(info, "source", "download") == "manual":
+        # Nothing to download (yet): install() explains how to import it,
+        # without a terms screen or a "Downloading" line first.
+        datasets.install(name, settings)
     if name == "did_els_hsls_panel":
         with ui.status("Building the combined ELS:2002 + HSLS:09 panel from your two datasets"):
             path = Path(datasets.install(name, settings))

@@ -398,3 +398,20 @@ def test_labels_never_say_release_yes(run_home: Path) -> None:
     out = classify(run)
     blob = " ".join([out.label, out.headline, out.why, out.fix, out.command or ""])
     assert "Release:" not in blob and "YES" not in blob
+
+
+@pytest.mark.parametrize(("dataset", "first_command"), [
+    ("hsls09_public", "edmars data install hsls09_public"),
+    # ASSISTments cannot be downloaded yet: `install` only says "coming later".
+    ("assistments_0910", "edmars data import assistments_0910 <path to the .csv file>"),
+])
+def test_data_missing_names_a_command_that_works(run_home: Path, dataset: str,
+                                                  first_command: str) -> None:
+    run = make_run(run_home, pdf=False, log=log_lines((3, "ABORTED: something")),
+                   study={"dataset": dataset},
+                   status=v2_status("ABORTED", released=False, reason_code="ABORTED",
+                                    abort={"stage": "ENGINEERING", "code": "DATA_MISSING",
+                                           "message": "m", "resumable": True}))
+    out = classify(run)
+    assert out.commands[0] == first_command
+    assert out.commands[-1].startswith("edmars resume")

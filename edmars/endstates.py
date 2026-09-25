@@ -436,6 +436,15 @@ def _latex_missing(run_dir: Path, state: RunState) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _get_data_command(dataset: str) -> str:
+    """install, or import for a dataset EDM-ARS cannot download yet."""
+    try:
+        from edmars.datasets import get_command
+    except Exception:  # noqa: BLE001 -- the wording must never crash a screen
+        return f"edmars data install {dataset}"
+    return get_command(dataset)
+
+
 def _ctx(run_dir: Path, state: RunState, **extra: Any) -> dict[str, Any]:
     providers = messages().get("providers") or {}
     provider = providers.get(state.provider, state.provider) if isinstance(providers, dict) else state.provider
@@ -443,6 +452,7 @@ def _ctx(run_dir: Path, state: RunState, **extra: Any) -> dict[str, Any]:
         "run": quote_path(run_dir),
         "provider": provider or "the AI service",
         "dataset": state.dataset or "hsls09_public",
+        "get_data": _get_data_command(state.dataset or "hsls09_public"),
         **extra,
     }
 

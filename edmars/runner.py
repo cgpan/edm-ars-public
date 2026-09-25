@@ -550,7 +550,7 @@ _FINDING_FIXES = {
     "PROVIDER_CONFIG_INVALID": "Run `edmars setup ai` (and `edmars setup advanced` for per-step models).",
     "SDK_MISSING": "Reinstall EDM-ARS, then run `edmars doctor`.",
     "INSTALL_INCOMPLETE": "Reinstall EDM-ARS, then run `edmars doctor`.",
-    "DATA_MISSING": "Run `edmars data install {dataset}` (or `edmars data import {dataset} FILE`).",
+    "DATA_MISSING": "Run `{get_data}`.",
     "LATEX_MISSING": "Run `edmars setup pdf`.",
     "R_MISSING": "Run `edmars setup r`.",
     "R_PACKAGES_MISSING": "Run `edmars setup r`.",
@@ -558,6 +558,47 @@ _FINDING_FIXES = {
     "LSAR_IMPORT_FAILED": "Run `edmars setup reviewer`.",
     "LSAR_KEY_MISSING": "Run `edmars setup reviewer` to add a DeepSeek key.",
 }
+
+
+#: Provider ids as people know them.
+_PROVIDER_NAMES = {
+    "deepseek": "DeepSeek",
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "minimax": "MiniMax",
+}
+
+
+def _plain_finding(code: str, message: str) -> str:
+    """The pipeline's finding in words for a non-programmer.
+
+    The pipeline names its internal step ids ("problem_formulator,
+    data_engineer, ...") and environment variables; the user only needs
+    to know which service's key or setting is missing.
+    """
+    from edmars.wizard import STAGE_LABELS
+
+    if code == "KEY_MISSING":
+        match = re.search(r"the (\w+) provider needs it for: (.+?)\.?\s*$", message)
+        if match:
+            provider = _PROVIDER_NAMES.get(match.group(1), match.group(1))
+            steps = [s.strip() for s in match.group(2).split(",") if s.strip()]
+            labels = [STAGE_LABELS.get(s, s.replace("_", " ")) for s in steps]
+            return (
+                f"No {provider} key is saved on this computer, and the study "
+                f"needs one for {len(labels)} step(s): {', '.join(labels)}."
+            )
+    if code == "LSAR_KEY_MISSING":
+        return (
+            "No DeepSeek key is saved on this computer. The automated reviewer "
+            "always uses DeepSeek, so the review would fail."
+        )
+    if code == "PROVIDER_CONFIG_INVALID":
+        match = re.search(r"setting for (\w+) is not valid: (.+)$", message)
+        if match:
+            step = STAGE_LABELS.get(match.group(1), match.group(1).replace("_", " "))
+            return f"The AI model setting for the step '{step}' is not valid: {match.group(2)}"
+    return message
 
 
 def pipeline_check(settings: dict[str, Any], plan: "StudyPlan", *,
@@ -630,11 +671,17 @@ def pipeline_check(settings: dict[str, Any], plan: "StudyPlan", *,
         code = str(item.get("code") or "")
         severity: Literal["fail", "warn"] = "fail" if str(item.get("severity")) == "fail" else "warn"
         fix = _FINDING_FIXES.get(code)
-        fix = fix.format(dataset=_plan_dataset(plan)) if fix else str(item.get("fix") or "")
+        if fix:
+            from edmars.datasets import get_command
+
+            dataset = _plan_dataset(plan)
+            fix = fix.format(dataset=dataset, get_data=get_command(dataset))
+        else:
+            fix = str(item.get("fix") or "")
         checks.append(Check(
             _FINDING_TITLES.get(code, code.replace("_", " ").capitalize() or "Pipeline check"),
             severity,
-            edsecrets.redact(str(item.get("message") or code)),
+            edsecrets.redact(_plain_finding(code, str(item.get("message") or code))),
             edsecrets.redact(fix) or None,
         ))
     if not checks:

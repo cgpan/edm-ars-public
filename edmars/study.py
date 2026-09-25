@@ -41,7 +41,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterator, Sequence
 
-from edmars import paths
+from edmars import estimates, paths
 from edmars.model import Check, StudyPlan
 
 # --------------------------------------------------------------------------
@@ -141,14 +141,11 @@ VENUES: dict[str, str] = {
 JOURNAL_VENUES: frozenset[str] = frozenset({"JEDM", "JLA", "AERA_OPEN"})
 
 # R6 text constants. Ranges, not promises; ASCII so --plain output is safe.
-TIME_WITHOUT_REVIEW = "usually 10-35 minutes"
-TIME_WITH_REVIEW = (
-    "usually 35-60 minutes with the automated review, occasionally about 2 hours"
-)
-COST_DEEPSEEK = (
-    "roughly US$0.05-0.20 per study with DeepSeek, including the automated "
-    "review (measured on only a few runs). You pay DeepSeek directly."
-)
+# Times and the DeepSeek price come from edmars/estimates.py, the one
+# source every screen and the README share.
+TIME_WITHOUT_REVIEW = estimates.TIME_WITHOUT_REVIEW
+TIME_WITH_REVIEW = estimates.TIME_WITH_REVIEW
+COST_DEEPSEEK = estimates.COST_DEEPSEEK
 COST_OTHER = (
     "not estimated for this AI service; live token counts are shown while the "
     "study runs. You pay the service directly."
@@ -696,6 +693,47 @@ _DID_TIME = re.compile(
     r"\bcohorts?\b|\bbetween (19|20)\d\d and (19|20)\d\d\b|\bover (time|the years)\b"
 )
 
+# Plain-English wording the pipeline's keyword list does not cover. The
+# CLI's own menus ask "who would benefit most from X?" and "does one thing
+# change another?", so a novice who picks "Not sure" writes exactly these.
+_TARGETING_WORDS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p)
+    for p in (
+        r"\bbenefits?\s+(the\s+)?most\b",
+        r"\bgains?\s+(the\s+)?most\b",
+        r"\bwho\s+(would|will|might|could|should|does|do)\s+benefit\b",
+        r"\bwhich\s+students\s+(would|will|might|could)\s+benefit\b",
+    )
+)
+_CAUSAL_WORDS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p)
+    for p in (
+        r"\bcaus(e|es|ed|ing)\b",
+        r"\baffect(s|ed|ing)?\b",
+        r"\binfluenc(e|es|ed|ing)\b",
+        r"\b(lead|leads|led|leading)\s+to\b",
+        r"\beffects?\s+(of|on)\b",
+    )
+)
+# "Does tutoring change / improve math scores?" is an effect question too,
+# unless the sentence is plainly about forecasting.
+_CAUSAL_CHANGE = re.compile(
+    r"\b(does|do|did|would|will|can)\b[^?.!]*\b(change|improve|increase|raise|"
+    r"reduce|lower|boost|benefit)(s|d|ed)?\b"
+)
+_PREDICTIVE_WORDS = re.compile(r"\bpredict\w*|\bforecast\w*|\blikely\b|\brisk\b")
+
+
+def _plain_intent(lowered: str) -> str | None:
+    """The CLI-side intent for wording the pipeline's keywords miss."""
+    if any(p.search(lowered) for p in _TARGETING_WORDS):
+        return "targeting"
+    if any(p.search(lowered) for p in _CAUSAL_WORDS):
+        return "causal"
+    if _CAUSAL_CHANGE.search(lowered) and not _PREDICTIVE_WORDS.search(lowered):
+        return "causal"
+    return None
+
 _WHY: dict[str, str] = {
     "prediction": "It asks which students are likely to reach an outcome, or "
     "how well an outcome can be forecast.",
@@ -714,8 +752,9 @@ def suggest_study_type(text: str, dataset: str = DEFAULT_DATASET) -> Suggestion:
     """Guess a task type from an English description.
 
     Uses ``src.design_selector.classify_intent`` + ``select_design`` (the
-    same deterministic layer the pipeline uses) plus two keyword groups
-    the selector does not cover: measurement and cross-cohort gap change.
+    same deterministic layer the pipeline uses) plus keyword groups the
+    selector does not cover: measurement, cross-cohort gap change, and
+    everyday cause-and-effect or "who benefits most" wording.
     """
     lowered = " ".join(str(text or "").lower().split())
     if any(p.search(lowered) for p in _MEASUREMENT_PATTERNS):
@@ -726,6 +765,8 @@ def suggest_study_type(text: str, dataset: str = DEFAULT_DATASET) -> Suggestion:
     from src.design_selector import classify_intent, select_design
 
     intent = classify_intent(text)
+    if intent == "prediction":
+        intent = _plain_intent(lowered) or intent
     try:
         report = select_design(_registry(dataset), question=text, intent=intent)
         recommended = str(report.get("recommended_task_type") or "")
@@ -1605,8 +1646,261 @@ def _check_title(code: str) -> str:
     return _CHECK_TITLES.get(code, code)
 
 
+def _after_colon(message: str) -> str:
+    """The list at the end of a check message ("...: A, B." -> "A, B")."""
+    match = re.search(r":\s*([^:]+?)\.?\s*$", str(message or ""))
+    return match.group(1).strip() if match else ""
+
+
+def _wave_phrase(registry: dict, wave: str) -> str:
+    """ "first_follow_up" -> "2012 (11th grade)", read from the registry."""
+    info = ((registry or {}).get("waves") or {}).get(wave) or {}
+    year, label = info.get("year"), info.get("label")
+    if year and label:
+        return f"{year} ({label})"
+    return str(label or year or wave.replace("_", " "))
+
+
+def _plain_temporal(message: str, registry: dict) -> str | None:
+    """ "X2MTHEFF is measured in 2012 (11th grade), after the outcome ..."."""
+    outcome = re.search(r"outcome '([^']+)' \(wave=(\w+)\)", message)
+    late = re.findall(r"(\w+) \(registry wave=(\w+), role=\w+\)", message)
+    if not outcome or not late:
+        return None
+    name, outcome_wave = outcome.groups()
+    by_wave: dict[str, list[str]] = {}
+    for var, wave in late:
+        by_wave.setdefault(wave, [])
+        if var not in by_wave[wave]:
+            by_wave[wave].append(var)
+    parts: list[str] = []
+    for wave, names in by_wave.items():
+        when = "at the same time as" if wave == outcome_wave else "after"
+        verb = "is" if len(names) == 1 else "are"
+        parts.append(
+            f"{', '.join(names)} {verb} measured in {_wave_phrase(registry, wave)}, "
+            f"{when} the outcome"
+        )
+    return (
+        "; ".join(parts)
+        + f". The outcome {name} is measured in {_wave_phrase(registry, outcome_wave)}. "
+        "A cause or predictor has to be measured before the outcome."
+    )
+
+
+_PITFALL_PLAIN: dict[str, str] = {
+    "protected_attribute_misuse": "the plan uses sex, race or family income as "
+    "an input but does not compare results across those groups",
+    "school_level_misinterpretation": "the plan mentions a school-level "
+    "(multilevel) model, but the public data file hides which school each "
+    "student attends",
+    "public_use_suppression": "some variables hold only 'data suppressed' codes "
+    "in the public file",
+    "non_equated_tests": "the plan talks about test scores rising, but the two "
+    "cohorts took different tests, so only changes in rank can be compared",
+}
+
+
+def _plain_fail(result: Any, report: Any, registry: dict) -> str:
+    """One plain sentence for a check that blocks the study."""
+    code, message = str(result.code), str(result.message)
+    names = _after_colon(message)
+    dataset = str(getattr(report, "dataset", "") or "")
+    task_type = str(getattr(report, "task_type", "") or "")
+    short = _dataset_short(dataset) if dataset else "this dataset"
+    if code == "F-TASK-INCOMPATIBLE":
+        return unsupported_reason(dataset, task_type) or (
+            f"{short} cannot support this kind of study."
+        )
+    if code == "F-VAR-ABSENT" and names:
+        return f"These variables are not in {short}: {names}."
+    if code == "F-COL-ABSENT" and names:
+        return f"These variables are not in the data file on this computer: {names}."
+    if code == "F-TEMPORAL-ORDER":
+        plain = _plain_temporal(message, registry)
+        if plain:
+            return plain
+    if code == "F-TIER3-EXCLUDED":
+        match = re.search(r"study variables: (.+?)\. These are", message)
+        if match:
+            return (
+                "These are survey weights, ID numbers or processing flags, not "
+                f"measures of students: {match.group(1)}."
+            )
+    if code == "F-DEAD-VARIABLE" and names:
+        return (
+            "These variables have no usable data in the public file (they are "
+            f"suppressed or empty): {names}."
+        )
+    if code == "F-ESTIMATOR-UNCERTIFIED":
+        shelved = re.search(r"Estimator\(s\) (.+?) are certified", message)
+        listed = shelved.group(1) if shelved else names
+        if listed:
+            return (
+                "EDM-ARS cannot run these methods for this kind of study yet: "
+                f"{listed}."
+            )
+    if code == "F-DESIGN-INFEASIBLE":
+        return (
+            f"This study design cannot be carried out with {short}, so the "
+            f"{TASK_LABELS.get(task_type, 'study')} would not be trustworthy."
+        )
+    if code == "F-SPEC-INCOMPLETE":
+        match = re.search(r"missing (.+?)\.?\s*$", message)
+        if match:
+            return (
+                "The study plan is missing parts the pipeline needs: "
+                f"{match.group(1)}."
+            )
+    if code == "F-NO-PROTECTED-ATTRS":
+        return (
+            "The question compares groups of students, but this dataset has no "
+            "group variables (such as sex, race or family income) to compare."
+        )
+    if code == "F-ITEM-BANK-TOO-FEW" and names:
+        return (
+            "A scale needs at least 3 survey items to be modelled, and these "
+            f"have fewer: {names}."
+        )
+    return message
+
+
+def _plain_warn(result: Any, report: Any) -> str:
+    """One plain sentence for a check that does not block the study."""
+    code, message = str(result.code), str(result.message)
+    names = _after_colon(message)
+    if code.startswith("F-CHECK-ERROR"):
+        return "This automatic check could not run. It does not stop the study."
+    if code == "F-VAR-ABSENT" and names:
+        if "not curated" in message:
+            return (
+                "These variables are in the data, but EDM-ARS has no notes on "
+                "them, so when they were measured and how much is missing was "
+                f"not checked: {names}."
+            )
+        return (
+            "These variables could not be checked because the data file is not "
+            f"on this computer: {names}."
+        )
+    if code == "F-METADATA-UNVERIFIED":
+        return (
+            "Some variables have no notes in EDM-ARS, so when they were "
+            "measured and how much is missing could not be checked."
+        )
+    if code == "F-SUBGROUP-VAR-UNKNOWN" and names:
+        return f"These group variables were not found in the dataset: {names}."
+    if code == "F-PITFALL-TOUCHED":
+        fired = [
+            _PITFALL_PLAIN.get(part.split(":", 1)[0].strip())
+            for part in message.partition(":")[2].split(";")
+        ]
+        plain = [p for p in fired if p]
+        if plain:
+            return "Known problem with this dataset: " + "; ".join(plain) + "."
+        return "The plan touches a known problem with this dataset."
+    if code == "F-NO-PROTECTED-ATTRS":
+        return (
+            "The question sounds like it compares groups of students, but this "
+            "dataset has no group variables (such as sex or race), so that part "
+            "cannot be supported."
+        )
+    if code == "F-SPEC-INCOMPLETE":
+        return (
+            "The pipeline's study-plan check noted small issues. They do not "
+            "stop the study."
+        )
+    if code in ("F-TASK-INCOMPATIBLE", "F-DESIGN-INFEASIBLE", "F-TIER3-EXCLUDED"):
+        return "This could not be checked for this dataset. It does not stop the study."
+    if code == "P-ANALYTIC-N":
+        match = re.search(r"Analytic n = ([\d,]+) of ([\d,]+) rows", message)
+        if match:
+            usable, total = match.groups()
+            if "abort floor" in message:
+                return (
+                    f"Only about {usable} of {total} students have usable data. "
+                    "The pipeline stops when fewer than 1,000 students are usable."
+                )
+            return (
+                f"About {usable} of {total} students have usable data. A "
+                "prediction study works best with at least 10,000."
+            )
+    if code == "P-CLASS-BALANCE":
+        match = re.search(r"minority class = ([\d.]+%)", message)
+        if match:
+            return (
+                f"Only {match.group(1)} of students are in the smaller outcome "
+                "group, so the outcome is hard to predict well."
+            )
+    if code == "P-POSITIVITY":
+        match = re.search(r"probe: ([\d.]+%)", message)
+        if match:
+            return (
+                f"For {match.group(1)} of students, the data almost decide "
+                "whether they got the treatment, so treated and untreated "
+                "students may be too different to compare fairly."
+            )
+    if code == "P-DID-CELLS":
+        cells = re.search(r"only (\d+) populated cell", message)
+        if cells:
+            return (
+                f"Only {cells.group(1)} of the four group-by-cohort cells have "
+                "students; the comparison needs all four."
+            )
+        smallest = re.search(r"has (\d+) rows", message)
+        if smallest:
+            return (
+                f"The smallest group-by-cohort cell has only {smallest.group(1)} "
+                "students."
+            )
+    if code == "P-CDM-SCOPE":
+        match = re.search(r"Only (\d+) item", message)
+        if match:
+            return (
+                f"Only {match.group(1)} problems were answered by at least 300 "
+                "students; skill models need more."
+            )
+    return message
+
+
+_SMALL_SAMPLE_FIX = (
+    "Choose an outcome that more students have, or check that the data file is "
+    "complete (`edmars data verify`)."
+)
+
+
+def _below_abort_floor(result: Any) -> bool:
+    """True when the probe counted the students who have the outcome and
+    found fewer than the pipeline's 1,000-student minimum.
+
+    Only the outcome count is certain: the pipeline never fills in a
+    missing outcome, so the study cannot have more students than this. A
+    count across all variables (measurement studies) is a lower bound,
+    because missing answers are filled in, so it stays a warning.
+    """
+    message = str(getattr(result, "message", ""))
+    return (
+        str(getattr(result, "code", "")) == "P-ANALYTIC-N"
+        and "abort floor" in message
+        and "outcome-complete" in message
+    )
+
+
+def _technical(result: Any) -> str:
+    """The check's own wording, shown only with EDMARS_DEBUG=1."""
+    if os.environ.get("EDMARS_DEBUG", "").strip() in ("", "0"):
+        return ""
+    return f" [Technical detail: {result.code}: {result.message} {result.evidence}]"
+
+
 def _map_report(report: Any) -> list[Check]:
     from src.ideation.feasibility import KILL, WARN
+
+    registry: dict = {}
+    if getattr(report, "dataset", None):
+        try:
+            registry = _registry(str(report.dataset))
+        except Exception:
+            registry = {}
 
     out: list[Check] = []
     skipped: list[str] = []
@@ -1617,25 +1911,34 @@ def _map_report(report: Any) -> list[Check]:
                 Check(
                     title,
                     "fail",
-                    f"{result.message} Why: {result.evidence}",
+                    _plain_fail(result, report, registry) + _technical(result),
                     _KILL_FIXES.get(result.code, _DEFAULT_KILL_FIX),
                 )
             )
+        elif result.status == WARN and _below_abort_floor(result):
+            # The pipeline aborts a study whose analytic sample is under
+            # 1,000 students (SAMPLE_TOO_SMALL) after the first paid steps.
+            out.append(
+                Check(
+                    title,
+                    "fail",
+                    _plain_warn(result, report) + _technical(result),
+                    _SMALL_SAMPLE_FIX,
+                )
+            )
         elif result.status == WARN:
-            out.append(Check(title, "warn", result.message))
+            out.append(
+                Check(title, "warn", _plain_warn(result, report) + _technical(result))
+            )
         elif str(result.message).startswith("Skipped"):
             skipped.append(re.sub(r"^Skipped:\s*", "", result.message).rstrip("."))
         else:
-            out.append(Check(title, "ok", result.message))
+            out.append(Check(title, "ok", "Passed." + _technical(result)))
     if skipped:
-        shown = "; ".join(skipped[:3]) + ("; ..." if len(skipped) > 3 else "")
-        out.append(
-            Check(
-                "Checks that did not apply",
-                "info",
-                f"{len(skipped)} automatic check(s) were skipped ({shown}).",
-            )
-        )
+        detail = f"{len(skipped)} automatic check(s) did not apply to this study."
+        if os.environ.get("EDMARS_DEBUG", "").strip() not in ("", "0"):
+            detail += f" [Technical detail: {'; '.join(skipped)}]"
+        out.append(Check("Checks that did not apply", "info", detail))
     return out
 
 
@@ -1903,10 +2206,12 @@ def plan_from_flags(
         )
     options = _default_options(settings)
     if venue:
+        # A journal named on the command line gets a journal article, as
+        # in `edmars new`; `--paper-format` (applied by the caller) still
+        # wins. settings.load() always fills defaults.paper_format, so the
+        # saved default cannot be what decides this.
         options["venue"] = normalize_venue(venue)
-        if options["venue"] in JOURNAL_VENUES and not _sget(
-            settings, "defaults.paper_format"
-        ):
+        if options["venue"] in JOURNAL_VENUES:
             options["paper_format"] = "journal"
 
     if example:
@@ -2522,7 +2827,7 @@ def _ask_options(ui: Any, settings: dict | None, plan: StudyPlan) -> StudyPlan:
         review = bool(
             ui.confirm(
                 "Run the automated peer review (LSAR) after the paper is written? "
-                "It adds about 20-40 minutes, and scores vary by about 2 points "
+                f"It adds {estimates.REVIEW_TIME}, and scores vary by about 2 points "
                 "between runs.",
                 default=plan.review,
             )

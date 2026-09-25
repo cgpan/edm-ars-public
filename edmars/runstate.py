@@ -114,6 +114,16 @@ class StageState:
         return None
 
 
+#: Shown on every screen of a study whose plan is not a tested example
+#: (built with the menus, or the user's own spec file): runner.json's
+#: study.experimental.
+EXPERIMENTAL_LINE = "[EXPERIMENTAL] plan - not a tested example study"
+EXPERIMENTAL_WHY = (
+    "This study plan was not one of the tested examples. A plan like it has "
+    "not been run end to end before, so check the results with extra care."
+)
+
+
 def _new_stages() -> list[StageState]:
     return [StageState(key=k, title=_FALLBACK_TITLES[k]) for k in STAGE_ORDER]
 
@@ -127,6 +137,8 @@ class RunState:
     task_type: str = ""
     dataset: str = ""
     provider: str = ""
+    #: The plan was menu-built or the user's own file (runner.json).
+    experimental: bool = False
     stages: list[StageState] = field(default_factory=_new_stages)
     current_stage: str | None = None
     now_text: str = ""
@@ -1268,6 +1280,7 @@ def _enrich(state: RunState, run_dir: Path, files: _FileCache, *, tail: bool) ->
         or ""
     )
     state.dataset = str(study.get("dataset") or state.dataset or checkpoint.get("dataset_name") or "")
+    state.experimental = bool(study.get("experimental") or state.experimental)
     state.provider = str(study.get("provider") or state.provider or config.get("llm_provider") or "")
     rg = as_dict(config.get("review_gate"))
     if rg.get("enabled"):

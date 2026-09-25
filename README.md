@@ -12,7 +12,8 @@ output before anything is called finished.
 
 > **Version 5.** Five study types, ten certified estimators, four curated
 > datasets, 70 composable skill units, ~3,000 automated tests. A complete gated
-> paper takes 18–46 minutes and costs about **$0.15** in API spend at DeepSeek
+> paper usually takes 20–60 minutes (occasionally about 2 hours; 10–35 minutes
+> without the automated review) and costs about **$0.15** in API spend at DeepSeek
 > rates (token counts measured on one instrumented run, priced at the rates in
 > `config.yaml`, one of which is not yet verified — see [Cost](#cost)).
 
