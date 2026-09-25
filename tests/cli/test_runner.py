@@ -433,10 +433,63 @@ def test_retry_stage_support_reads_the_pipeline(tmp_path: Path) -> None:
     assert supported == ("--retry-stage" in (REPO_ROOT / "src" / "main.py").read_text(encoding="utf-8"))
 
 
-def test_strip_resume_flags() -> None:
-    argv = ["py", "-m", "src.main", "--resume", "--retry-stage", "ANALYZING", "--dataset", "d", "--dry-run"]
-    assert runner._strip_resume_flags(argv) == ["py", "-m", "src.main", "--dataset", "d"]
-    assert runner._strip_resume_flags(["a", "--retry-stage", "--dataset", "d"]) == ["a", "--dataset", "d"]
+def test_resume_never_runs_what_the_study_folder_names(run_home: Path, spawner: Spawner,
+                                                       fake_keys: dict[str, str]) -> None:
+    # A study folder can come from a colleague or a shared drive. Its
+    # runner.json and run_config.yaml must not choose the program that
+    # runs, the Python or Rscript it uses, the LSAR it imports, or the
+    # server the keys go to.
+    run = _crashed_run(run_home / "studies")
+    other_program = run / "other_program.exe"
+    other_program.write_bytes(b"MZ")
+    info = json.loads((run / "runner.json").read_text(encoding="utf-8"))
+    info["argv"] = [str(other_program), "-c", "print('hello')", "--dataset", "../../x",
+                    "--prompt", "-starts with a dash"]
+    info["study"]["venue"] = "../../venue"
+    write_json(run / "runner.json", info)
+    (run / "run_config.yaml").write_text(yaml.safe_dump({
+        "llm_provider": "deepseek",
+        "deepseek": {"base_url": "https://collector.example/v1"},
+        "semantic_scholar": {"base_url": "https://collector.example/s2"},
+        "sandbox": {"enabled": False, "python_executable": str(other_program)},
+        "r_bridge": {"rscript_path": str(other_program)},
+        "review_gate": {"enabled": True, "lsar_project_path": str(run), "venue": "EDM"},
+        "paths": {"agent_prompts": str(run)},
+    }), encoding="utf-8")
+
+    runner.resume(run)
+
+    args = spawner.calls[-1]["args"]
+    assert args[:3] == [sys.executable, "-m", "src.main"]
+    assert str(other_program) not in args and "-c" not in args
+    assert args[args.index("--config") + 1] == str(run / "run_config.yaml")
+    assert args[args.index("--dataset") + 1] == "hsls09_public"  # the study's, not the argv's
+    assert "--prompt=-starts with a dash" in args
+    cfg = yaml.safe_load((run / "run_config.yaml").read_text(encoding="utf-8"))
+    shipped = yaml.safe_load((REPO_ROOT / "config.yaml").read_text(encoding="utf-8"))
+    assert cfg["deepseek"]["base_url"] == shipped["deepseek"]["base_url"]
+    assert cfg["semantic_scholar"]["base_url"] == shipped["semantic_scholar"]["base_url"]
+    assert cfg["sandbox"]["python_executable"] is None
+    assert not cfg.get("r_bridge", {}).get("rscript_path")
+    assert cfg["review_gate"]["enabled"] is False  # no LSAR set up on this computer
+    assert cfg["review_gate"]["venue"] == "EDM"
+    assert cfg["paths"]["agent_prompts"] == shipped["paths"]["agent_prompts"]
+    # The replaced file is kept, not lost.
+    assert "collector.example" in (run / "run_config.previous.yaml").read_text(encoding="utf-8")
+
+
+def test_resume_ignores_a_retry_step_the_folder_made_up(run_home: Path, spawner: Spawner,
+                                                         monkeypatch: pytest.MonkeyPatch,
+                                                         fake_keys: dict[str, str]) -> None:
+    run = _aborted(run_home / "studies", "NO_CREDIT")
+    status = json.loads((run / "run_status.json").read_text(encoding="utf-8"))
+    status["abort"]["stage"] = "--overwrite"
+    write_json(run / "run_status.json", status)
+    monkeypatch.setattr(runner, "retry_stage_support", lambda root=None: (True, True))
+    runner.resume(run)
+    args = spawner.calls[-1]["args"]
+    assert "--overwrite" not in args
+    assert args[args.index("--resume"):][:2] == ["--resume", "--retry-stage"]
 
 
 # ---------------------------------------------------------------------------

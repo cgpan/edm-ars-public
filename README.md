@@ -230,7 +230,7 @@ section says `edmars`.
 | `edmars status [STUDY]` | Watch a running study (or the latest one); Ctrl+C leaves it running or stops it. |
 | `edmars runs` | List your studies and how each ended. |
 | `edmars results [STUDY]` | The result in plain words, what to check, and the files; `--open pdf\|folder\|summary`. |
-| `edmars stop` / `edmars resume [STUDY]` | Stop the running study; continue a stopped one from its last finished step. |
+| `edmars stop` / `edmars resume [STUDY]` | Stop the running study; continue a stopped one from its last finished step, with your current settings (AI service, models, reviewer). |
 | `edmars review [STUDY]` | Run the automated reviewer (LSAR) on a finished paper. |
 | `edmars data list\|install\|import\|verify` | Datasets: download (after you accept the terms), use a file you already have, check a file. |
 | `edmars explain TERM` | A plain definition of a term in the results (AUC, SHAP, ATE, DIF, ...). |

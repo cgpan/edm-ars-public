@@ -309,6 +309,17 @@ def _find_run(settings: dict[str, Any], text: str) -> Path:
     raise typer.Exit(1)
 
 
+def _outside_studies(settings: dict[str, Any], run_dir: Path) -> bool:
+    """True when ``run_dir`` is not inside this user's studies folder."""
+    from edmars import settings as settings_mod
+
+    try:
+        run_dir.resolve().relative_to(settings_mod.studies_dir(settings).resolve())
+    except (ValueError, OSError):
+        return True
+    return False
+
+
 def _resolve_run(
     settings: dict[str, Any],
     run: str | None,
@@ -873,6 +884,13 @@ def resume_cmd(
     settings = _settings()
     _require_ack(settings, accept_disclosure)
     run_dir = _resolve_run(settings, run, prefer_active=False)
+    if _outside_studies(settings, run_dir):
+        ui.warn(
+            f"{run_dir} is not in your studies folder, so it may have come from someone "
+            "else. Continuing a study runs AI-written analysis code on this computer and "
+            "uses your AI key. Only continue a study you started yourself or got from "
+            "someone you trust."
+        )
     _confirm_spend(
         f"Continue the study in {run_dir.name}? It will use your AI service again.",
         non_interactive,

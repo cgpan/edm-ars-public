@@ -425,6 +425,24 @@ def test_resume_confirms_spending(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resumed == [folder]
 
 
+def test_resume_warns_about_a_folder_from_outside_the_studies_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    accept_disclosure()
+    resumed: list[Path] = []
+    fake_module(monkeypatch, "runner", resume=resumed.append)
+    own = make_study()
+    result = invoke("resume", str(own), "--yes", "--no-watch")
+    assert result.exit_code == 0, result.output
+    assert "not in your studies folder" not in result.output
+    shared = tmp_path / "shared" / "2026-09-25_1402_gpa_ab12"
+    shared.mkdir(parents=True)
+    result = invoke("resume", str(shared), "--yes", "--no-watch")
+    assert result.exit_code == 0, result.output
+    assert "not in your studies folder" in " ".join(result.output.split())
+    assert resumed == [own.resolve(), shared.resolve()]
+
+
 def test_review_adapts_to_the_lsar_function_signature(monkeypatch: pytest.MonkeyPatch) -> None:
     folder = make_study()
     seen: list[tuple[Any, Any]] = []
