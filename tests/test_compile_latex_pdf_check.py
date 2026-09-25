@@ -64,7 +64,7 @@ def test_exit_codes_of_one_and_no_pdf_is_not_success(
     assert result["pdf_exists"] is False
     assert result["stale_pdf"] is False
     assert result["missing_tool"] is None
-    assert result["failed_step"] == "pdflatex -interaction=nonstopmode paper.tex"
+    assert result["failed_step"] == "pdflatex -no-shell-escape -interaction=nonstopmode paper.tex"
     assert "no paper.pdf" in result["message"]
 
 
@@ -129,7 +129,7 @@ def test_a_missing_pdflatex_is_named(
     assert result["success"] is False
     assert result["pdf_exists"] is False
     assert len(result["steps"]) == 1  # stops after the first pass
-    assert result["failed_step"] == "pdflatex -interaction=nonstopmode paper.tex"
+    assert result["failed_step"] == "pdflatex -no-shell-escape -interaction=nonstopmode paper.tex"
     assert "TeX distribution" in result["message"]
 
 

@@ -616,6 +616,25 @@ def test_gate_score_is_shown_against_its_benchmark(
     assert "score 5.90, benchmark 6.30 - below the benchmark" in out
 
 
+def test_a_revised_paper_that_was_not_re_reviewed_is_said(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub.status = _status_v2(
+        reason_code="GATE_FAILED", advisories=["review gate did not pass"],
+        gate={"enabled": True, "ran": True, "skip_reason": None, "passed": False,
+              "score": 5.0, "threshold": 6.3, "advisory": False, "venue": "EDM",
+              "final_manuscript_reviewed": False,
+              "last_cycle_failure": "lsar_scoring_failed: simulated"},
+    )
+    _run(env)
+    out = capsys.readouterr().out
+    assert (
+        "score 5.00, benchmark 6.30 - below the benchmark; the revised paper "
+        "was not re-reviewed (lsar_scoring_failed: simulated)"
+    ) in out
+
+
 def test_a_paper_pdf_is_pointed_to(
     env: dict[str, Path], stub: type[_StubOrchestrator],
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],

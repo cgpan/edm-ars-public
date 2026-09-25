@@ -190,13 +190,22 @@ class TestEnvExample:
         "CROSSREF_MAILTO",
         "LSAR_HOME",
         "EDM_ARS_RSCRIPT",
+        # Read by the pipeline (or by LSAR inside the gate) and missing
+        # from the file until the public-release review.
+        "MINIMAX_API_KEY",
+        "TAVILY_API_KEY",
+        "DEEPSEEK_BASE_URL",
+        "MINIMAX_BASE_URL",
+        "EDM_ARS_DEBUG",
     }
     #: python-dotenv loads ``NAME=`` as an empty string. For these an empty
     #: string is harmful, not neutral: openai.OpenAI() takes "" from
     #: OPENAI_BASE_URL as its base URL, and "" in LSAR_HOME defeats
     #: src/config.py's os.environ.setdefault default. They must stay
     #: commented out until the user gives a value.
-    MUST_BE_COMMENTED = {"OPENAI_BASE_URL", "LSAR_HOME"}
+    MUST_BE_COMMENTED = {
+        "OPENAI_BASE_URL", "DEEPSEEK_BASE_URL", "MINIMAX_BASE_URL", "LSAR_HOME",
+    }
 
     def test_every_variable_is_listed(self) -> None:
         active, commented = _env_lines()

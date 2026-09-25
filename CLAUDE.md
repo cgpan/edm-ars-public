@@ -68,7 +68,7 @@ historical: `config.yaml` and the code are current where they differ.
 - SPEC.md — original implementation spec (schemas, agent designs)
 - DISCLAIMER.md, PRIVACY.md — user-facing disclaimer and data-handling notice; keep them true to the code
 - config.yaml — central configuration (providers, model IDs, paths, pipeline params)
-- .env.example — every environment variable the pipeline reads, with empty values
+- .env.example — the environment variables a user may set: keys with empty values, addresses and settings commented out
 - requirements.txt (runtime), requirements-dev.txt (tests, lint, types), requirements-lsar.txt (review gate), requirements-sandbox.txt (Docker image)
 - data/raw/ — dataset files (gitignored; see README "Data setup" for exact names)
 - data_registry/datasets/ — YAML variable registries (Tier 1 curated, Tier 2 auto)
@@ -149,7 +149,7 @@ caps and context), never a bare `match()`.
 - When requirements-sandbox.txt changes, rebuild the image: `docker build -t edm-ars-sandbox:latest .`
 - Running generated code happens only in src/sandbox.py; subprocess calls stay in src/sandbox.py, apart from the existing R bridge (src/r_bridge.py) and LaTeX/review-gate paths — never add one in agent or base code
 - The Writer fills templates/paper_template_v2.tex (conference) or templates/paper_template_journal.tex (journal, `writer.venue_format: journal`) — NEVER generates a LaTeX preamble from scratch
-- Paper authors are fixed (EDM-ARS, AI_Name, Human_Author_Name) — never modified by agents. The two placeholder names are yours to fill in; the Writer asserts the block is still present, not what it says.
+- Agents never modify paper authors. A conference paper prints the author block in templates/paper_template_v2.tex: EDM-ARS, plus commented-out AI and human author blocks a user may fill in. A journal paper's byline comes from config `paper.authors` (default EDM-ARS). The Writer only checks that EDM-ARS is still credited.
 - When behaviour changes what leaves the user's computer or what runs on it, update PRIVACY.md / DISCLAIMER.md in the same change
 
 ## IMPORTANT

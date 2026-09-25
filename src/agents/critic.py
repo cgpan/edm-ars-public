@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from src.agents.base import BaseAgent, parse_llm_json
+from src.agents.base import BaseAgent, literature_for_prompt, parse_llm_json
 
 _VALID_VERDICTS = {"PASS", "REVISE", "ABORT"}
 # Default valid agents for revision targeting (overridden by TaskTemplate at runtime)
@@ -244,7 +244,7 @@ class Critic(BaseAgent):
             "",
             "## literature_context.json",
             "```json",
-            json.dumps(literature_context or {}, indent=2),
+            json.dumps(literature_for_prompt(literature_context or {}), indent=2),
             "```",
             "",
             "## data_report.json",

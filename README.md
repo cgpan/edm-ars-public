@@ -11,9 +11,10 @@ next — **no model decides control flow** — and a layer of checks verifies th
 output before anything is called finished.
 
 > **Version 5.** Five study types, ten certified estimators, four curated
-> datasets, 70 composable skill units, ~2,500 automated tests. A complete gated
+> datasets, 70 composable skill units, ~3,000 automated tests. A complete gated
 > paper takes 18–46 minutes and costs about **$0.15** in API spend at DeepSeek
-> rates (measured, not estimated — see [Cost](#cost)).
+> rates (token counts measured on one instrumented run, priced at the rates in
+> `config.yaml`, one of which is not yet verified — see [Cost](#cost)).
 
 ## Disclaimer and privacy
 
@@ -425,8 +426,9 @@ To keep a variable for future terminals, add the `export` line to `~/.zshrc` or
 `~/.bashrc`, or on Windows run `setx DEEPSEEK_API_KEY "..."` once (it applies to
 terminals opened afterwards). A variable set in the terminal wins over the same
 name in `.env`. The AI-written analysis code runs with API keys removed from its
-environment, but it could still read a `.env` file on disk; see
-[PRIVACY.md](PRIVACY.md).
+own environment, so they do not show up in what it prints. That is not a
+barrier: code running as your user can still reach keys kept either way, so
+use a separate key with a spending limit; see [PRIVACY.md](PRIVACY.md).
 
 Choose the provider in `config.yaml` with `llm_provider`. Each provider has a
 block naming the model for every agent (`deepseek.models`, `minimax.models`,
@@ -577,9 +579,12 @@ reports `null`, never `$0`** — and because raw counts are stored, changing a r
 re-prices historical runs without re-running them.
 
 Verify the rates against your provider's current price list before quoting a
-figure; they are operator input, not a measurement. `pipeline.cost_budget_usd`
-only logs a warning; it never stops a run, so set a spending limit with your
-provider.
+figure; they are operator input, not a measurement. One shipped rate,
+`deepseek-flash` (the outline and verifier stages), is marked `verified: false`;
+a run that uses a model whose rate is unverified never has its cost labelled
+`measured` in `run_cost.json`: it says `estimated`, or `partial` when some
+model has no rate at all. `pipeline.cost_budget_usd` only logs a warning; it
+never stops a run, so set a spending limit with your provider.
 
 ---
 
@@ -602,7 +607,7 @@ templates/              LaTeX templates (ACM sigconf, APA 7 journal)
 r_helpers/              certified R scripts for psychometrics
 runs/                   example research specs (fixtures/) and run configs (configs/)
 scripts/                onboarding, synthetic-DGP gates, diagnostics
-tests/                  ~2,500 tests
+tests/                  ~3,000 tests
 ```
 
 `SPEC.md` is the original design specification; where it and `config.yaml`
@@ -676,10 +681,14 @@ For the methodology and system design, see the technical report:
 }
 ```
 
-Papers produced by this system carry a fixed author line (EDM-ARS, AI_Name,
-Human_Author_Name) and a Methods sentence disclosing automated generation. Replace the
-two placeholder names with your own in `templates/paper_template_v2.tex` and
-`templates/paper_template_journal.tex`. Please keep the automated-generation
+Papers produced by this system name EDM-ARS as an author and carry a Methods
+sentence disclosing automated generation. By default EDM-ARS is the only author.
+To add people to a conference paper (the default format), uncomment the AI and
+human author blocks in `templates/paper_template_v2.tex` and fill them in. A
+journal paper (`writer.venue_format: journal`) takes its byline from
+`paper: authors: [...]` in `config.yaml` (there is a commented example); leave
+the byline in `templates/paper_template_journal.tex` as it is, because the
+Writer fills it. Please keep EDM-ARS in the byline and the automated-generation
 disclosure in anything you publish from it.
 
 ## License

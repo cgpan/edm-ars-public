@@ -1322,6 +1322,11 @@ def _gate_line(status: dict | None) -> str | None:
     elif isinstance(threshold, (int, float)):
         verdict = "passed" if gate.get("passed") else "below the benchmark"
         text += f", benchmark {threshold:.2f} - {verdict}"
+    if gate.get("final_manuscript_reviewed") is False:
+        failure = gate.get("last_cycle_failure")
+        text += "; the revised paper was not re-reviewed" + (
+            f" ({failure})" if failure else ""
+        )
     return text
 
 

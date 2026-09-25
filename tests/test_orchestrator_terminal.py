@@ -433,6 +433,42 @@ def test_completed_run_stays_terminal_on_resume(tmp_path: Path) -> None:
     assert _status(tmp_path)["written_at"] == before["written_at"]
 
 
+def test_resuming_at_a_completed_verifying_verifies_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checkpoint can name VERIFYING as the stage to run while also
+    listing it complete (Ctrl-C between the two, or a hand edit to re-run
+    it). The resume deleted the held-back verdict and then declared the
+    run COMPLETED without checking, rebuilding a status with
+    ``released: true`` -- a paper with no PDF reported as released."""
+    monkeypatch.setattr("src.orchestrator.compile_latex", _fake_compile_no_pdflatex)
+    cfg = _config(tmp_path)
+    first = _orch(tmp_path, cfg)
+    _wire(first)
+    assert first.run().current_state == PipelineState.INCOMPLETE
+    assert _status(tmp_path)["released"] is False
+
+    cp_path = tmp_path / "checkpoint.json"
+    cp = json.loads(cp_path.read_text(encoding="utf-8"))
+    assert "VERIFYING" in cp["completed_stages"]
+    cp["current_state"] = "VERIFYING"
+    cp_path.write_text(json.dumps(cp), encoding="utf-8")
+
+    second = _orch(tmp_path, cfg)
+    calls = _wire(second)
+    assert second.run().current_state == PipelineState.INCOMPLETE
+    assert sum(calls.values()) == 0
+    status = _status(tmp_path)
+    assert status["state"] == "INCOMPLETE"
+    assert status["released"] is False
+    assert status["reason_code"] == "BLOCKING_FINDINGS"
+    assert status["blocking_findings"] == ["INV_LATEX_NO_PDF"]
+    assert (tmp_path / "invariants.json").exists()
+    assert second.ctx.completed_stages.count("VERIFYING") == 1
+    ends = [e for e in _events(tmp_path) if e["type"] == "run.end"]
+    assert ends[-1]["data"]["exit_code"] == 2
+
+
 # ---------------------------------------------------------------------------
 # Interrupts and crashes (finalize_interrupted)
 # ---------------------------------------------------------------------------
@@ -552,6 +588,36 @@ def test_gate_outcomes_are_distinguishable(
     assert status["released"] is True  # the gate is advisory either way
     if not ran:
         assert status["review_gate_score"] is None
+
+
+def test_a_gate_whose_last_cycle_failed_says_the_paper_was_not_re_reviewed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cycle 1 was scored, the paper was revised, and cycle 2 reviewed
+    nothing. The score is cycle 1's; the delivered paper is not the one
+    it belongs to, and run_status must say so."""
+    _no_invariants(monkeypatch)
+    orch = _orch(tmp_path, _config(tmp_path, review_gate__enabled=True))
+    orch.ctx.review_gate_result = {
+        "ran": True, "skip_reason": None, "passed": False, "cycles_used": 1,
+        "final_score": 5.0, "threshold_used": 9.0,
+        "final_manuscript_reviewed": False,
+        "last_cycle_failure": "lsar_scoring_failed: simulated",
+    }
+    orch.ctx.current_state = PipelineState.VERIFYING
+
+    orch._run_verifying()
+
+    status = _status(tmp_path)
+    gate = status["gate"]
+    assert gate["ran"] is True and gate["score"] == 5.0
+    assert gate["final_manuscript_reviewed"] is False
+    assert gate["last_cycle_failure"] == "lsar_scoring_failed: simulated"
+    assert status["reason_code"] == "GATE_FAILED"
+    assert (
+        "the revised paper was not re-reviewed (lsar_scoring_failed: simulated)"
+        in status["reason"]
+    )
 
 
 def test_an_unverified_paper_outranks_a_gate_that_did_not_run(
@@ -774,6 +840,55 @@ def test_event_sink_failure_never_breaks_a_run(
 
     monkeypatch.setattr(orch.ctx.event_sink, "_update_status", explode)
     assert orch.run().current_state == PipelineState.COMPLETED
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        {"best_model": ["XGBoost"]},
+        {"best_model": {"name": "XGBoost"}},
+    ],
+)
+def test_a_malformed_results_headline_does_not_abort_the_analysis(
+    tmp_path: Path, shape: dict
+) -> None:
+    """results.json is model-written. The informational metric event read
+    ``all_models.get(best_model)`` unguarded, so an unhashable best_model
+    raised TypeError after ANALYZING had completed and the run aborted."""
+    from tests.test_end_to_end import _RESULTS
+
+    orch = _orch(tmp_path, _config(tmp_path))
+    _wire(orch)
+    out = orch.ctx.output_dir
+    bad = {**copy.deepcopy(_RESULTS), **shape}
+
+    def analyst(**_kw: Any) -> dict:
+        with open(os.path.join(out, "results.json"), "w", encoding="utf-8") as f:
+            json.dump(bad, f)
+        return bad
+
+    orch.analyst.run = analyst
+    ctx = orch.run()
+    assert ctx.current_state != PipelineState.ABORTED, ctx.abort_info
+    assert "CRITIQUING" in ctx.completed_stages
+    metrics = [
+        e for e in _events(tmp_path)
+        if e["type"] == "metric" and e.get("stage") == "ANALYZING"
+    ]
+    assert metrics and metrics[-1]["data"]["value"] == bad["best_metric_value"]
+
+
+def test_the_metric_helpers_never_raise(tmp_path: Path) -> None:
+    from src.orchestrator import _emit_results_metric, _emit_sample_metric
+
+    ctx = _ctx(tmp_path)
+    for results in (
+        {"best_metric_value": 0.7, "best_model": ["XGBoost"]},
+        {"best_metric_value": 0.7, "best_model": "XGBoost", "all_models": [1, 2]},
+        {"best_metric_value": 0.7, "best_model": "XGBoost", "all_models": {"XGBoost": 5}},
+    ):
+        _emit_results_metric(ctx, results)
+    _emit_sample_metric(ctx, {"analytic_n": object()})
 
 
 # ---------------------------------------------------------------------------

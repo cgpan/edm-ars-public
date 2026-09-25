@@ -342,48 +342,67 @@ def _exception_code(ctx: Any, exc: BaseException, default: str = "UNKNOWN") -> s
 
 
 def _emit_sample_metric(ctx: Any, report: Any, stage: str = "ENGINEERING") -> None:
-    """One ``metric`` event for the analytic sample size, best effort."""
+    """One ``metric`` event for the analytic sample size, best effort.
+    Never raises (see _emit_results_metric)."""
     if not isinstance(report, dict):
         return
-    n = report.get("analytic_n")
-    events.emit(
-        ctx,
-        "metric",
-        stage=stage,
-        plain=f"{n} students in the analytic sample",
-        key="analytic_n",
-        value=n,
-        ci=None,
-        label="Students in the analytic sample",
-    )
+    try:
+        n = report.get("analytic_n")
+        events.emit(
+            ctx,
+            "metric",
+            stage=stage,
+            plain=f"{n} students in the analytic sample",
+            key="analytic_n",
+            value=n,
+            ci=None,
+            label="Students in the analytic sample",
+        )
+    except Exception:  # noqa: BLE001
+        return
 
 
 def _emit_results_metric(ctx: Any, results: Any, stage: str = "ANALYZING") -> None:
-    """One ``metric`` event for the analysis headline, best effort."""
+    """One ``metric`` event for the analysis headline, best effort.
+
+    Never raises. It runs inside the ANALYZING and REVISING stages after
+    the stage's work is done, and results.json is model-written: a
+    ``best_model`` that is a list or a dict, or an ``all_models`` that is
+    not a mapping, used to raise here and turn a finished analysis into
+    an abort (or a REVISING failure into an UNVERIFIED paper).
+    """
     if not isinstance(results, dict):
         return
-    value = results.get("best_metric_value")
-    if not isinstance(value, (int, float)):
+    try:
+        value = results.get("best_metric_value")
+        if not isinstance(value, (int, float)):
+            return
+        metric = str(results.get("primary_metric") or "metric")
+        best = results.get("best_model")
+        ci = None
+        all_models = results.get("all_models")
+        row = (
+            all_models.get(best)
+            if isinstance(best, str) and isinstance(all_models, dict)
+            else None
+        )
+        if isinstance(row, dict):
+            lo = row.get(f"{metric.lower()}_ci_lower")
+            hi = row.get(f"{metric.lower()}_ci_upper")
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+                ci = [lo, hi]
+        events.emit(
+            ctx,
+            "metric",
+            stage=stage,
+            plain=f"Best model {best}: {metric} = {value}",
+            key=metric,
+            value=value,
+            ci=ci,
+            label=f"{metric} of the best model ({best})",
+        )
+    except Exception:  # noqa: BLE001
         return
-    metric = str(results.get("primary_metric") or "metric")
-    best = results.get("best_model")
-    ci = None
-    row = (results.get("all_models") or {}).get(best) if best else None
-    if isinstance(row, dict):
-        lo = row.get(f"{metric.lower()}_ci_lower")
-        hi = row.get(f"{metric.lower()}_ci_upper")
-        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
-            ci = [lo, hi]
-    events.emit(
-        ctx,
-        "metric",
-        stage=stage,
-        plain=f"Best model {best}: {metric} = {value}",
-        key=metric,
-        value=value,
-        ci=ci,
-        label=f"{metric} of the best model ({best})",
-    )
 
 
 def _critic_abort_message(review: Any) -> str:
@@ -1065,6 +1084,11 @@ class Orchestrator:
         A gate that never ran (disabled, LSAR missing, no PDF, an
         exception) reports ``ran: false`` with ``score: null`` -- never a
         failed review scored 0.0, which is what the old record said (B2).
+
+        A gate that ran also carries ``final_manuscript_reviewed`` (False
+        when paper.tex was revised after the review ``score`` comes from)
+        and ``last_cycle_failure`` (why the next cycle reviewed nothing),
+        both None when the summary does not say.
         """
         rg_cfg = self.config.get("review_gate", {}) or {}
         enabled = bool(rg_cfg.get("enabled", False))
@@ -1102,6 +1126,14 @@ class Orchestrator:
                 float(score)
                 if isinstance(score, (int, float)) and not isinstance(score, bool)
                 else None
+            )
+            reviewed = res.get("final_manuscript_reviewed")
+            block["final_manuscript_reviewed"] = (
+                reviewed if isinstance(reviewed, bool) else None
+            )
+            failure = res.get("last_cycle_failure")
+            block["last_cycle_failure"] = (
+                _one_line(failure, 200) if failure else None
             )
         else:
             skip = res.get("skip_reason")
@@ -2284,8 +2316,22 @@ class Orchestrator:
         Promote checks to blocking individually, on evidence.
         """
         if "VERIFYING" in self.ctx.completed_stages:
-            self.ctx.current_state = PipelineState.COMPLETED
-            return
+            # The stage finishes by moving to COMPLETED or INCOMPLETE, so a
+            # run only gets here from a checkpoint that names VERIFYING as
+            # the stage to run although it is recorded complete: an
+            # interrupt between the two, or a hand edit to re-run it.
+            # _prepare_resume has removed the verdict files, so declaring
+            # the run COMPLETED here released a paper nothing had checked
+            # (the rebuilt status said so). The battery is deterministic
+            # and cheap: run it again.
+            self._log(
+                "Orchestrator",
+                "VERIFYING is recorded complete but is the stage to run; "
+                "running the invariant battery again",
+            )
+            self.ctx.completed_stages = [
+                s for s in self.ctx.completed_stages if s != "VERIFYING"
+            ]
         self._log("Orchestrator", "Starting VERIFYING stage (invariant battery)")
 
         cfg = self.config.get("verification", {}) or {}
@@ -2432,6 +2478,16 @@ class Orchestrator:
             (
                 f"review gate did not run ({gate['skip_reason']})"
                 if gate_not_run
+                else ""
+            ),
+            (
+                "the revised paper was not re-reviewed"
+                + (
+                    f" ({gate['last_cycle_failure']})"
+                    if gate.get("last_cycle_failure")
+                    else ""
+                )
+                if gate.get("final_manuscript_reviewed") is False
                 else ""
             ),
             "critic verdict was not PASS" if unverified else "",

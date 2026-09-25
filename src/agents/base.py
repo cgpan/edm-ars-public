@@ -46,6 +46,20 @@ def parse_llm_json(text: str) -> dict:
     return json.loads(text)
 
 
+def literature_for_prompt(literature_context: Any) -> Any:
+    """The literature context as a model should see it.
+
+    ``retrieval_status`` (CONTRACT section 6) is run bookkeeping that the
+    orchestrator reads for pipeline.log, the event stream and
+    run_status.json. It is not literature, so every agent prompt that
+    pastes the context leaves it out and reads exactly what it read
+    before the status was recorded.
+    """
+    if not isinstance(literature_context, dict):
+        return literature_context
+    return {k: v for k, v in literature_context.items() if k != "retrieval_status"}
+
+
 def load_prompt(
     agent_name: str,
     config: dict,

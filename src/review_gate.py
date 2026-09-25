@@ -189,7 +189,7 @@ def _leading_title(text: str) -> Optional[str]:
     return None
 
 
-def _route_lsar_logging(log_file: Path) -> Optional[Path]:
+def _route_lsar_logging(log_file: Path) -> list[logging.Handler]:
     """Keep LSAR's INFO chatter in ``log_file``, not on the run's console.
 
     LSAR logs every stage at INFO from a couple of dozen loggers, several
@@ -198,15 +198,25 @@ def _route_lsar_logging(log_file: Path) -> Optional[Path]:
     fix/released-issues and later) gets a per-cycle ``lsar.log`` with the
     full record, and its console handler is limited to warnings. An
     operator who set LSAR_LOG_LEVEL or LSAR_QUIET keeps their choice for
-    the console. An older LSAR is left as it is. Returns the file that was
-    attached (for :func:`_detach_lsar_log_file`), or None. Never raises.
+    the console. An older LSAR is left as it is. Returns the file handlers
+    this call added (for :func:`_detach_lsar_log_file`), possibly none.
+    Never raises.
+
+    The handlers are found by comparing the logger's handlers before and
+    after the call, not by path: LSAR opens ``log_file`` after
+    ``Path.resolve()``, which can differ from ``os.path.abspath`` in case
+    (a Windows folder whose on-disk case differs from the path given) or
+    through a symlink (macOS /tmp -> /private/tmp). A path comparison then
+    never matched, every later cycle and median sample was appended to
+    every earlier cycle's lsar.log, and the files stayed open.
     """
     try:
         from lsar.utils import logger as lsar_logger  # type: ignore[import-not-found]
 
         configure = getattr(lsar_logger, "configure_logging", None)
         if not callable(configure):
-            return None
+            return []
+        before = list(logging.getLogger("lsar").handlers)
         root = configure(log_file=log_file)
         operator_level = (
             os.environ.get("LSAR_LOG_LEVEL", "").strip()
@@ -220,28 +230,41 @@ def _route_lsar_logging(log_file: Path) -> Optional[Path]:
                     and handler.level < logging.WARNING
                 ):
                     handler.setLevel(logging.WARNING)
-        return log_file
+        return [
+            h
+            for h in getattr(root, "handlers", [])
+            if isinstance(h, logging.FileHandler) and h not in before
+        ]
     except Exception:  # noqa: BLE001 - logging must never stop a review
-        return None
+        return []
 
 
-def _detach_lsar_log_file(log_file: Optional[Path]) -> None:
-    """Remove the file handler :func:`_route_lsar_logging` attached, so a
-    later cycle's records do not also land in this cycle's lsar.log."""
-    if log_file is None:
+def _detach_lsar_log_file(handlers: Optional[list[logging.Handler]]) -> None:
+    """Remove the file handlers :func:`_route_lsar_logging` attached, so a
+    later cycle's records do not also land in this cycle's lsar.log.
+
+    LSAR also remembers each attached path and ignores a second request
+    for it; the path is forgotten here too, so a later review writing to
+    the same file (a re-run in the same process) gets its handler back.
+    Never raises.
+    """
+    if not handlers:
         return
-    target = os.path.abspath(str(log_file))
     lsar_root_logger = logging.getLogger("lsar")
-    for handler in list(lsar_root_logger.handlers):
-        if (
-            isinstance(handler, logging.FileHandler)
-            and os.path.abspath(handler.baseFilename) == target
-        ):
-            lsar_root_logger.removeHandler(handler)
-            try:
-                handler.close()
-            except Exception:  # noqa: BLE001
-                pass
+    try:
+        from lsar.utils import logger as lsar_logger  # type: ignore[import-not-found]
+
+        remembered = (getattr(lsar_logger, "_state", None) or {}).get("file_paths")
+    except Exception:  # noqa: BLE001
+        remembered = None
+    for handler in handlers:
+        lsar_root_logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:  # noqa: BLE001
+            pass
+        if isinstance(remembered, set) and isinstance(handler, logging.FileHandler):
+            remembered.discard(Path(handler.baseFilename))
 
 
 class ReviewGate:
@@ -601,8 +624,15 @@ class ReviewGate:
     ) -> bool:
         """Compile *tex_file*: pdflatex x2, with a biber pass for
         biblatex (journal apa7) documents so references render in the
-        review copy (F-W2-GATE-BIBER). Returns True on success."""
-        cmd = ["pdflatex", "-interaction=nonstopmode", tex_file]
+        review copy (F-W2-GATE-BIBER). Returns True on success.
+
+        The reviser's LaTeX is model output: it is compiled without shell
+        escape and without the API keys in its environment, as
+        ``compile_latex`` does (see ``src.sandbox.pdflatex_argv``)."""
+        from src.sandbox import latex_env, pdflatex_argv
+
+        cmd = pdflatex_argv(tex_file)
+        env = latex_env()
         try:
             _src = (cwd / tex_file).read_text(encoding="utf-8")
         except OSError:
@@ -611,7 +641,7 @@ class ReviewGate:
             base = tex_file.replace(".tex", "")
             for c in ([*cmd], ["biber", base], [*cmd], [*cmd]):
                 try:
-                    proc = subprocess.run(c, cwd=str(cwd),
+                    proc = subprocess.run(c, cwd=str(cwd), env=env,
                                           capture_output=True, text=True,
                                           encoding="utf-8", errors="replace",
                                           timeout=timeout_s)
@@ -623,6 +653,7 @@ class ReviewGate:
                 proc = subprocess.run(
                     cmd,
                     cwd=str(cwd),
+                    env=env,
                     capture_output=True,
                     text=True,
                     # pdflatex writes UTF-8 or raw 8-bit bytes; the locale
@@ -675,7 +706,7 @@ class ReviewGate:
             sys.path.insert(0, lsar_root)
             added_to_path = True
 
-        lsar_log_file: Optional[Path] = None
+        lsar_log_file: list[logging.Handler] = []
         try:
             from lsar.pipeline import LSARPipeline  # type: ignore[import-not-found]
 
@@ -1722,6 +1753,13 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         gate that never ran -- LSAR missing, a dependency missing, no PDF
         -- as ``passed: false, final_score: 0.0``, indistinguishable from
         a paper reviewed and judged worthless.
+
+        A later cycle can fail after an earlier one was scored (LSAR now
+        raises instead of inventing a score, or the revised paper does not
+        compile). The summary then still reports the last scored cycle,
+        and says so: ``last_cycle_failure`` names why the next review did
+        not happen, and ``final_manuscript_reviewed`` is False when
+        paper.tex was revised after the score it reports.
         """
         self._log(
             f"Starting review gate (max_cycles={self.max_cycles}, "
@@ -1734,6 +1772,10 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         final_recommendation: str = "Unknown"
         final_review_path: Optional[str] = None
         skip_reason: Optional[str] = None
+        # Why a cycle after a scored one reviewed nothing, and whether
+        # paper.tex changed after the last score.
+        last_cycle_failure: Optional[str] = None
+        revised_since_last_review = False
 
         for cycle in range(1, self.max_cycles + 1):
             self._log(f"--- Review gate cycle {cycle}/{self.max_cycles} ---")
@@ -1747,8 +1789,14 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             # 1. Prepare PDF
             pdf_path = self.prepare_pdf(self.output_dir, cycle=cycle)
             if pdf_path is None:
-                self._log("Cannot prepare PDF; skipping review gate")
                 skip_reason = "no_pdf"
+                if per_cycle_scores:
+                    last_cycle_failure = skip_reason
+                    self._cycle_not_reviewed(
+                        cycle, skip_reason, revised_since_last_review
+                    )
+                else:
+                    self._log("Cannot prepare PDF; skipping review gate")
                 break
 
             # 2. Run LSAR (with borderline-triggered median sampling —
@@ -1759,10 +1807,16 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             # median-score report.)
             report_json = self.run_lsar(pdf_path, cycle)
             if report_json is None:
-                self._log("LSAR returned no result; skipping review gate")
                 skip_reason = (
                     getattr(self, "_last_lsar_failure", None) or "lsar_no_result"
                 )
+                if per_cycle_scores:
+                    last_cycle_failure = skip_reason
+                    self._cycle_not_reviewed(
+                        cycle, skip_reason, revised_since_last_review
+                    )
+                else:
+                    self._log("LSAR returned no result; skipping review gate")
                 break
             report_json = self._maybe_median_sample(report_json, pdf_path, cycle)
 
@@ -1811,6 +1865,7 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                     "honesty_blockers": honesty,
                 }
             )
+            revised_since_last_review = False
             self._event(
                 "gate.review",
                 cycle=cycle,
@@ -1947,6 +2002,7 @@ Overall: {diagnosis.get('overall_score', '?')}/10
 
                 # Write revised paper.tex and recompile
                 tex_path.write_text(revised_tex, encoding="utf-8")
+                revised_since_last_review = True
                 self._log("Revised paper.tex written; recompiling LaTeX")
                 self._compile_full_latex(self.output_dir)
 
@@ -1987,6 +2043,13 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 self, "revision_unavailable_reason", None
             ),
             "revision_failures": list(getattr(self, "revision_failures", []) or []),
+            # False when paper.tex was revised after the review whose
+            # score is final_score, i.e. the delivered manuscript was
+            # never scored; None when no review ran.
+            "final_manuscript_reviewed": (
+                (not revised_since_last_review) if ran else None
+            ),
+            "last_cycle_failure": last_cycle_failure if ran else None,
         }
 
         # Persist summary
@@ -1999,6 +2062,12 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             self._log(
                 f"Review gate finished: passed={final_passed}, "
                 f"cycles={len(per_cycle_scores)}, final_score={final_score:.2f}"
+                + (
+                    f" (from cycle {len(per_cycle_scores)}; the revised "
+                    "paper.tex was not re-reviewed)"
+                    if revised_since_last_review
+                    else ""
+                )
             )
         else:
             self._log(
@@ -2006,6 +2075,28 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 "reviewed and no score exists."
             )
         return summary
+
+    def _cycle_not_reviewed(self, cycle: int, reason: str, revised: bool) -> None:
+        """Log and announce a cycle that reviewed nothing after an earlier
+        cycle was scored. The gate ends with the earlier score."""
+        message = (
+            f"Review gate cycle {cycle} could not review the paper ({reason}); "
+            f"the gate ends with cycle {cycle - 1}'s score"
+            + (
+                ", which was given before paper.tex was revised: the revised "
+                "paper was not re-reviewed"
+                if revised
+                else ""
+            )
+        )
+        self._log(message)
+        self._event(
+            "warning",
+            cycle=cycle,
+            plain=message,
+            code="GATE_CYCLE_NOT_REVIEWED",
+            message=message,
+        )
 
     def _compile_full_latex(self, run_dir: Path) -> None:
         """Run the standard pdflatex → bibtex → pdflatex → pdflatex sequence."""

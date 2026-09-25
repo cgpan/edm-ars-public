@@ -232,3 +232,68 @@ def test_privacy_states_the_real_size_of_error_excerpts() -> None:
     assert stated <= actual * 1.2, (
         f"PRIVACY.md says {stated}, far above the real {actual}"
     )
+
+
+def test_privacy_does_not_sell_the_key_scrub_as_isolation() -> None:
+    """The scrub keeps keys out of the generated code's own environment
+    (and so out of its printed output). Code running as the user can still
+    read them from the parent process, the shell profile, the registry or
+    .env, so the docs must not promise more, and must not advise moving
+    keys out of .env as if that protected them."""
+    from src.sandbox import child_env
+
+    assert "DEEPSEEK_API_KEY" not in child_env({"DEEPSEEK_API_KEY": "x", "PATH": "p"})
+    privacy = " ".join(PRIVACY.read_text(encoding="utf-8").split())
+    assert "not a security barrier" in privacy
+    assert "cannot read your keys" not in privacy
+    assert "instead of keeping them in" not in privacy
+    readme = " ".join(_readme().split())
+    assert "could still read a `.env` file on disk" not in readme
+    assert "That is not a barrier" in readme
+
+
+def test_author_instructions_match_the_templates_and_writer() -> None:
+    """The README told users to replace two placeholder names in both
+    templates. The conference template's extra authors are commented out,
+    so renaming them changes nothing; the journal template holds only the
+    %%PLACEHOLDER:AUTHORS%% marker the Writer fills from ``paper.authors``,
+    and overwriting it fails test_writer_scaffolding."""
+    import yaml
+
+    from src.agents.writer import Writer
+
+    readme = " ".join(_readme().split())
+    assert "AI_Name" not in readme and "Human_Author_Name" not in readme
+    assert "`paper: authors: [...]`" in readme
+    journal = (ROOT / "templates" / "paper_template_journal.tex").read_text(encoding="utf-8")
+    assert r"\authorsnames{%%PLACEHOLDER:AUTHORS%%}" in journal
+
+    lines = (ROOT / "config.yaml").read_text(encoding="utf-8").splitlines()
+    start = lines.index("# paper:")
+    example = "\n".join(line[2:] for line in lines[start:start + 2])
+    config = yaml.safe_load(example)
+    writer = object.__new__(Writer)
+    writer.config = config
+    assert writer._author_line() == "EDM-ARS, Your Name"
+
+
+def test_readme_cost_headline_matches_how_run_cost_labels_it() -> None:
+    """The headline called the $0.15 figure "measured, not estimated",
+    while src/cost.py labels a run priced with an unverified rate
+    ``estimated`` and the shipped config routes the outline stage to one."""
+    from src.config import load_config
+    from src.cost import TokenUsage, load_pricing, summarize
+
+    readme = " ".join(_readme().split())
+    assert "measured, not estimated" not in readme
+    config = load_config(str(ROOT / "config.yaml"))
+    models = config["deepseek"]["models"]
+    calls = [
+        TokenUsage(agent=agent, model=models[agent], provider="deepseek",
+                   prompt_tokens=1000, completion_tokens=100)
+        for agent in ("writer", "outline_agent")
+    ]
+    status = summarize(calls, load_pricing(config)).cost_status
+    if status != "measured":
+        assert status == "estimated"
+        assert "not yet verified" in readme
