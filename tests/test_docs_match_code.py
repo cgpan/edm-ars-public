@@ -182,6 +182,10 @@ def test_every_third_party_import_in_src_is_declared() -> None:
 def test_dev_and_lsar_requirements_exist_and_cover_their_purpose() -> None:
     dev = _requirement_names(ROOT / "requirements-dev.txt")
     assert {"pytest", "ruff", "mypy"} <= dev
+    # tests/cli imports typer, rich, keyring and the rest: the README's
+    # "pip install -r requirements-dev.txt" must bring them in.
+    dev_lines = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8").splitlines()
+    assert "-r requirements-cli.txt" in [line.strip() for line in dev_lines]
     lsar = _requirement_names(ROOT / "requirements-lsar.txt")
     # Not in EDM-ARS's own dependency closure; without tenacity the in-process
     # `from lsar.pipeline import LSARPipeline` fails and the gate cannot run.

@@ -11,7 +11,7 @@ next — **no model decides control flow** — and a layer of checks verifies th
 output before anything is called finished.
 
 > **Version 5.** Five study types, ten certified estimators, four curated
-> datasets, 70 composable skill units, ~3,000 automated tests. A complete gated
+> datasets, 70 composable skill units, ~3,800 automated tests. A complete gated
 > paper takes 18–46 minutes and costs about **$0.15** in API spend at DeepSeek
 > rates (token counts measured on one instrumented run, priced at the rates in
 > `config.yaml`, one of which is not yet verified — see [Cost](#cost)).
@@ -607,7 +607,9 @@ templates/              LaTeX templates (ACM sigconf, APA 7 journal)
 r_helpers/              certified R scripts for psychometrics
 runs/                   example research specs (fixtures/) and run configs (configs/)
 scripts/                onboarding, synthetic-DGP gates, diagnostics
-tests/                  ~3,000 tests
+edmars/                 the `edmars` command: setup wizard, new-study flow, live view, results
+install/                one-command installers (install.ps1, install.sh) and their README
+tests/                  ~3,800 tests (tests/cli/ covers the `edmars` command)
 ```
 
 `SPEC.md` is the original design specification; where it and `config.yaml`
@@ -619,9 +621,10 @@ are current. `CLAUDE.md` records the working rules the project holds itself to.
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements-dev.txt              # also installs requirements-cli.txt
 python -m pytest tests/ -q                       # full suite, offline, about 15 minutes
 python -m pytest tests/ -q -k "not integration"  # skip integration-marked tests
+python -m pytest tests/cli -q                    # the edmars command only, under a minute
 ruff check src/ tests/                           # lint (reports known findings; not yet a gate)
 mypy src/                                        # type check (not yet clean)
 ```
