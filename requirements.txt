@@ -21,5 +21,6 @@ imbalanced-learn>=0.12  # SMOTE for class imbalance handling
 docker>=7.0           # Docker SDK; used only when sandbox.enabled: true (experimental, off by default)
 dowhy>=0.11,<0.13     # G5 sensitivity refuters (random_common_cause, placebo_treatment_refuter)
 openai>=1.30           # OpenAI-compatible endpoints (DeepSeek is the default provider)
+httpx>=0.23            # explicit request timeouts for the provider clients (openai and anthropic depend on it too)
 scipy>=1.11            # bootstrap CIs, distributional tests in analysis_helpers
 pymupdf>=1.24          # PDF text extraction for the review gate (imported as `fitz`)
