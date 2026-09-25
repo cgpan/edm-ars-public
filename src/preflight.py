@@ -12,9 +12,9 @@ far enough to be worth starting, so ``src.main`` stops before any LLM
 call. ``warn`` means the run can finish but something the user probably
 wants (a PDF, the review gate) will be missing.
 
-No subprocess is started here. The R package probe goes through
-``src.r_bridge.run_r_script`` -- the same ``Rscript --vanilla`` call the
-certified helpers use -- with ``r_helpers/preflight_packages.R``.
+No subprocess is started here: the R package check is
+``src.r_bridge.missing_r_packages``, the bridge that owns every Rscript
+launch.
 """
 from __future__ import annotations
 
@@ -325,7 +325,7 @@ def required_r_packages(locked_spec: dict | None) -> tuple[list[str], list[str]]
 def _check_r(
     config: dict, locked_spec: dict | None, probe: bool
 ) -> list[Finding]:
-    from src.r_bridge import RBridgeError, find_rscript, run_r_script
+    from src import r_bridge
 
     required, optional = required_r_packages(locked_spec)
     if not required:
@@ -342,8 +342,8 @@ def _check_r(
 
     explicit = (config.get("r_bridge") or {}).get("rscript_path") or None
     try:
-        rscript = find_rscript(explicit)
-    except RBridgeError as exc:
+        rscript = r_bridge.find_rscript(explicit)
+    except r_bridge.RBridgeError as exc:
         findings.append(Finding(
             "R_MISSING", FAIL,
             "Rscript was not found; psychometrics methods run in R. "
@@ -356,19 +356,30 @@ def _check_r(
     if not probe:
         return findings
 
+    # The package check lives in the R bridge, which owns every Rscript
+    # launch; it asks R with base R only, so a missing jsonlite is found.
+    missing_r_packages = getattr(r_bridge, "missing_r_packages", None)
+    if missing_r_packages is None:
+        findings.append(Finding(
+            "R_PROBE_UNAVAILABLE", WARN,
+            f"R was found ({rscript}), but this version cannot check which "
+            "R packages it has.",
+            "Make sure jsonlite, lavaan, mirt, CDM and MASS are installed "
+            "in that R.",
+        ))
+        return findings
     try:
-        result = run_r_script(
-            "preflight_packages.R", {}, timeout_s=180, rscript_path=rscript
-        )
+        missing = set(missing_r_packages(
+            required + optional, rscript_path=rscript, timeout_s=180
+        ))
     except Exception as exc:  # noqa: BLE001 - any probe failure is reported
         findings.append(Finding(
             "R_PROBE_FAILED", FAIL,
             f"Could not ask R ({rscript}) which packages are installed: {exc}",
-            "Check that this Rscript runs: Rscript --vanilla -e \"1\"",
+            f"Check that this R starts: \"{rscript}\" --vanilla -e \"1\"",
         ))
         return findings
 
-    missing = set(result.get("missing") or []) if isinstance(result, dict) else set()
     missing_required = [p for p in required if p in missing]
     missing_optional = [p for p in optional if p in missing]
     if missing_required:

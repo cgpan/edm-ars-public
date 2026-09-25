@@ -206,22 +206,69 @@ def test_missing_r_packages_split_by_need(
     calls: list[tuple] = []
     monkeypatch.setattr(rb, "find_rscript", lambda explicit=None: "/usr/bin/Rscript")
 
-    def _probe(name: str, payload: dict, timeout_s: int = 600,
-               rscript_path: str | None = None) -> dict:
-        calls.append((name, rscript_path))
-        return {"installed": ["jsonlite", "MASS"],
-                "missing": ["lavaan", "mirt", "CDM"], "r_version": "4.4.1"}
+    def _probe(packages: list[str], rscript_path: str | None = None,
+               timeout_s: int = 120) -> list[str]:
+        calls.append((tuple(packages), rscript_path))
+        return ["lavaan", "mirt", "CDM"]
 
-    monkeypatch.setattr(rb, "run_r_script", _probe)
+    monkeypatch.setattr(rb, "missing_r_packages", _probe, raising=False)
     findings = check_run_prerequisites(
         config, "psychometrics", "hsls09_public", data_file, False,
         locked_spec={"method_battery": ["P3", "P5"]},
     )
-    assert calls == [("preflight_packages.R", "/usr/bin/Rscript")]
+    assert calls == [(("jsonlite", "lavaan", "MASS", "mirt", "CDM"), "/usr/bin/Rscript")]
     by_sev = {f.severity: f for f in findings if f.code == "R_PACKAGES_MISSING"}
     assert "lavaan" in by_sev[FAIL].message and "mirt" not in by_sev[FAIL].message
     assert "mirt" in by_sev[WARN].message and "CDM" in by_sev[WARN].message
     assert "install.packages" in by_sev[FAIL].fix
+
+
+def test_a_failed_r_probe_fails(
+    config: dict, data_file: str, all_tools: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.r_bridge as rb
+
+    monkeypatch.setattr(rb, "find_rscript", lambda explicit=None: "/usr/bin/Rscript")
+
+    def _broken(*a: object, **k: object) -> list[str]:
+        raise rb.RBridgeError("R package check did not complete (exit 1)")
+
+    monkeypatch.setattr(rb, "missing_r_packages", _broken, raising=False)
+    findings = check_run_prerequisites(
+        config, "psychometrics", "hsls09_public", data_file, False,
+    )
+    [probe] = [f for f in findings if f.code == "R_PROBE_FAILED"]
+    assert probe.severity == FAIL and "did not complete" in probe.message
+
+
+def test_the_configured_rscript_path_is_used(
+    config: dict, data_file: str, all_tools: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.r_bridge as rb
+
+    seen: list[str | None] = []
+
+    def _find(explicit: str | None = None) -> str:
+        seen.append(explicit)
+        raise rb.RBridgeError("not there")
+
+    monkeypatch.setattr(rb, "find_rscript", _find)
+    config["r_bridge"] = {"rscript_path": "/opt/R/bin/Rscript"}
+    check_run_prerequisites(config, "psychometrics", "hsls09_public", data_file, False)
+    assert seen == ["/opt/R/bin/Rscript"]
+
+
+def test_without_a_package_check_it_only_warns(
+    config: dict, data_file: str, all_tools: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.r_bridge as rb
+
+    monkeypatch.setattr(rb, "find_rscript", lambda explicit=None: "/usr/bin/Rscript")
+    monkeypatch.delattr(rb, "missing_r_packages", raising=False)
+    findings = check_run_prerequisites(
+        config, "psychometrics", "hsls09_public", data_file, False,
+    )
+    assert [(f.code, f.severity) for f in findings] == [("R_PROBE_UNAVAILABLE", WARN)]
 
 
 def test_r_is_not_probed_for_other_task_types(
@@ -236,17 +283,19 @@ def test_r_is_not_probed_for_other_task_types(
 def test_r_probe_against_a_real_r_when_present(
     config: dict, data_file: str, all_tools: None
 ) -> None:
-    from src.r_bridge import RBridgeError, find_rscript, run_r_script
+    import src.r_bridge as rb
 
+    if not hasattr(rb, "missing_r_packages"):
+        pytest.skip("this r_bridge has no package check yet")
     try:
-        rscript = find_rscript()
-    except RBridgeError:
+        rb.find_rscript()
+    except rb.RBridgeError:
         pytest.skip("R is not installed on this machine")
-    result = run_r_script("preflight_packages.R", {}, timeout_s=180,
-                          rscript_path=rscript)
-    assert set(result) >= {"installed", "missing", "r_version"}
-    assert set(result["installed"]) | set(result["missing"]) == {
-        "jsonlite", "lavaan", "mirt", "CDM", "MASS"}
+    findings = check_run_prerequisites(
+        config, "psychometrics", "hsls09_public", data_file, False,
+    )
+    codes = {f.code for f in findings}
+    assert "R_PROBE_FAILED" not in codes and "R_MISSING" not in codes
 
 
 # ---------------------------------------------------------------------------
