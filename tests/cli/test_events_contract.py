@@ -1,0 +1,89 @@
+"""The reader against the real writer: src/events.py EventSink -> RunState.
+
+The pipeline side of the event stream is built on another branch; this
+test pins the seam. Anything the sink writes must fold into a sensible
+state, including a run that is resumed after an abort.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from tests.cli import _run_support  # noqa: F401 -- installs stand-ins
+
+from src.context import PipelineState
+from src.events import EventSink
+
+from edmars.endstates import classify
+from edmars.runstate import load_state
+
+
+def _emit_prefix(sink: EventSink) -> None:
+    sink.emit("run.start", plain="Starting the study", task_type="prediction",
+              dataset="hsls09_public", provider="deepseek", resumed=False)
+    sink.emit("stage.start", stage=PipelineState.FORMULATING, cycle=0, plain="Framing the question")
+    sink.emit("lit.progress", stage="FORMULATING", source="semantic_scholar", query_index=1,
+              n_queries=3, papers_found=41, status="ok")
+    sink.emit("llm.start", agent="ProblemFormulator", model="deepseek-v4-pro", provider="deepseek")
+    sink.emit("llm.end", agent="ProblemFormulator", model="deepseek-v4-pro", prompt_tokens=9000,
+              completion_tokens=800, cached_tokens=4000, cost_usd=0.0021, duration_s=12.5)
+    sink.emit("stage.end", stage=PipelineState.FORMULATING, outcome="ok", duration_s=70)
+    sink.emit("stage.start", stage=PipelineState.ENGINEERING, cycle=0, plain="Preparing the data")
+    sink.emit("attempt.start", stage="ENGINEERING", attempt=1, max_attempts=4, timeout_s=600)
+
+
+def test_live_run_from_the_real_sink(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    sink = EventSink(str(run))
+    _emit_prefix(sink)
+    state = load_state(run)  # pid comes from live_status.json: this test process
+    assert state.source == "events"
+    assert not state.finished
+    stages = {s.key: s.status for s in state.stages}
+    assert stages["FORMULATING"] == "done" and stages["ENGINEERING"] == "running"
+    assert state.metrics["papers_found"] == 41
+    assert state.llm_calls == 1 and state.cost_usd == pytest.approx(0.0021)
+    assert state.code_running and "attempt 1 of 4" in state.now_text
+    assert classify(run).kind == "running"
+
+
+def test_aborted_then_resumed_run_from_the_real_sink(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    sink = EventSink(str(run))
+    _emit_prefix(sink)
+    sink.emit("attempt.end", stage="ENGINEERING", attempt=1, returncode=0)
+    sink.emit("error", stage="ENGINEERING", plain="The AI account is out of credit",
+              code="NO_CREDIT", message="Insufficient Balance")
+    sink.emit("stage.end", stage="ENGINEERING", outcome="failed")
+    sink.emit("run.end", state="ABORTED", released=False, reason_code="ABORTED", exit_code=3,
+              cost_usd=0.0021)
+    state = load_state(run)
+    assert state.finished and state.final_state == "ABORTED"
+    out = classify(run)
+    assert out.kind == "stopped" and out.code == "NO_CREDIT"
+
+    # A resume appends to the same file; numbering continues.
+    sink2 = EventSink(str(run))
+    sink2.emit("run.start", plain="Resuming", resumed=True, task_type="prediction")
+    sink2.emit("stage.start", stage="ENGINEERING", cycle=0)
+    state = load_state(run)
+    assert not state.finished and state.resumed == 1
+    assert {s.key: s.status for s in state.stages}["ENGINEERING"] == "running"
+    sink2.emit("stage.end", stage="ENGINEERING", outcome="ok")
+    for stage in ("ANALYZING", "CRITIQUING", "WRITING", "VERIFYING"):
+        sink2.emit("stage.start", stage=stage)
+        if stage == "CRITIQUING":
+            sink2.emit("verdict", stage=stage, critic_score=8, verdict="PASS", unverified=False, cycle=0)
+        if stage == "WRITING":
+            sink2.emit("compile.end", stage=stage, pdf_exists=True, missing_tool=None, failed_step=None)
+        sink2.emit("stage.end", stage=stage, outcome="ok")
+    sink2.emit("verify.end", released=True, reason_code="CLEAN", counts={"critical": 0, "major": 0, "minor": 0})
+    sink2.emit("run.end", state="COMPLETED", released=True, reason_code="CLEAN", exit_code=0, cost_usd=0.05)
+    (run / "paper.pdf").write_bytes(b"%PDF")
+    state = load_state(run)
+    assert state.finished and state.final_state == "COMPLETED"
+    assert state.cost_usd == pytest.approx(0.05)
+    assert {s.key: s.status for s in state.stages}["REVISING"] == "skipped"
+    out = classify(run)
+    assert out.kind in ("ready", "ready_with_issues")  # no run_status/invariants.json written here
