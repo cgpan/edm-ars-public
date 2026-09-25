@@ -351,6 +351,11 @@ ideation:
 
 writer:
   outline_first: true
+  # conference: ACM sigconf paper (templates/paper_template_v2.tex;
+  #   LaTeX needs the acmart class and bibtex).
+  # journal: APA 7 manuscript, written section by section, ~8,000 words
+  #   (templates/paper_template_journal.tex; needs apa7, biblatex-apa, biber).
+  venue_format: conference
 
 paths:
   data_registry: data_registry/
