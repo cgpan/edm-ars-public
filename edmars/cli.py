@@ -284,6 +284,28 @@ def _require_ack(settings: dict[str, Any], accept: bool) -> None:
     raise typer.Exit(1)
 
 
+def _require_ai_key(settings: dict[str, Any]) -> None:
+    """Stop `edmars new` before the first question when no AI key is saved.
+
+    The pipeline's own start-up check would find it too, but only after
+    every question and the Start button, and the answers would be lost.
+    """
+    from edmars import providers
+    from edmars import secrets as edsecrets
+    from edmars import settings as settings_mod
+
+    provider = str(settings_mod.get(settings, "provider", "deepseek") or "deepseek")
+    info = providers.PROVIDERS.get(provider)
+    if provider == "local" or info is None:
+        return  # a local server needs no key; an unknown one is setup's to explain
+    if edsecrets.secret_source(info.env_var):
+        return
+    name = info.label.split(" (")[0].split(" - ")[0]
+    ui.fail(f"There is no {name} key saved on this computer, so a study cannot start yet.")
+    ui.info("Add it with `edmars setup ai`, then run `edmars new` again. Nothing was spent.")
+    raise typer.Exit(1)
+
+
 def _find_run(settings: dict[str, Any], text: str) -> Path:
     """Resolve a RUN argument: a path, a folder name, or part of one."""
     from edmars import settings as settings_mod
@@ -691,6 +713,7 @@ def new_cmd(
         raise typer.Exit(1)
     settings = _settings()
     _require_ack(settings, accept_disclosure)
+    _require_ai_key(settings)
     study = _module("study")
     # new_study_interactive runs the feasibility check, the options and the
     # confirmation card itself (R4-R6); it returns a plan only after the
