@@ -11,7 +11,7 @@ next — **no model decides control flow** — and a layer of checks verifies th
 output before anything is called finished.
 
 > **Version 5.** Five study types, ten certified estimators, four curated
-> datasets, 70 composable skill units, ~2,500 automated tests. A complete gated
+> datasets, 70 composable skill units, ~3,000 automated tests. A complete gated
 > paper takes 18–46 minutes and costs about **$0.15** in API spend at DeepSeek
 > rates (measured, not estimated — see [Cost](#cost)).
 
@@ -549,7 +549,7 @@ templates/              LaTeX templates (ACM sigconf, APA 7 journal)
 r_helpers/              certified R scripts for psychometrics
 runs/                   example research specs (fixtures/) and run configs (configs/)
 scripts/                onboarding, synthetic-DGP gates, diagnostics
-tests/                  ~2,500 tests
+tests/                  ~3,000 tests
 ```
 
 `SPEC.md` is the original design specification; where it and `config.yaml`
