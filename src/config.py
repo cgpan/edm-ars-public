@@ -1,6 +1,18 @@
 import os
+from pathlib import Path
 
 import yaml
+
+
+#: The repository root: the directory that contains ``src/``. Relative
+#: paths in config.yaml name files in the repository, so they are resolved
+#: here when they do not exist from the current directory (C5). Before,
+#: every one of them was read relative to wherever the user happened to
+#: start Python: from another directory the default ``--config`` raised
+#: FileNotFoundError, and with an explicit --config the run went ahead
+#: with no skills, one-line agent prompts and a raw-data path under the
+#: wrong folder.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 _REQUIRED_TOP_KEYS = {"models", "pipeline", "semantic_scholar", "paths"}
@@ -23,10 +35,74 @@ def _validate_sandbox_config(config: dict) -> None:
         config["sandbox"].setdefault(key, val)
 
 
-#: Where LSAR (the separate review-gate repository) lives when the
-#: operator has not said. A sibling checkout is the conventional layout;
-#: set LSAR_HOME to point anywhere else.
-DEFAULT_LSAR_HOME = "../LSAR"
+def default_lsar_home() -> str:
+    """Where LSAR (the separate review-gate repository) lives by default.
+
+    A sibling checkout of this repository is the conventional layout, and
+    ``git clone https://github.com/cgpan/LSAR-public`` names that
+    directory ``LSAR-public``, not ``LSAR``. The first of the two that
+    exists wins; when neither does, the ``LSAR`` sibling is returned so a
+    gate that cannot find it names a concrete place. The old default was
+    the literal ``../LSAR``, which also depended on the current directory.
+    Set LSAR_HOME to point anywhere else.
+    """
+    parent = PROJECT_ROOT.parent
+    for name in ("LSAR", "LSAR-public"):
+        candidate = parent / name
+        if candidate.is_dir():
+            return str(candidate)
+    return str(parent / "LSAR")
+
+
+#: Kept for callers that import the name; computed once at import.
+DEFAULT_LSAR_HOME = default_lsar_home()
+
+
+def resolve_repo_path(path: str) -> str:
+    """Return an absolute path for a path written in config or on the CLI.
+
+    An absolute path is returned unchanged. A relative path that exists
+    from the current directory keeps meaning that, so running from the
+    repository root resolves every path exactly as before. Any other
+    relative path is taken to name something in the repository and is
+    resolved under PROJECT_ROOT, whether or not it exists yet (``output/``
+    and ``data/raw/`` are created later). A trailing separator survives,
+    because some callers build paths by string concatenation.
+    """
+    expanded = os.path.expanduser(path)
+    if os.path.isabs(expanded):
+        return expanded
+    trailing = expanded.endswith(("/", "\\"))
+    if os.path.exists(expanded):
+        resolved = os.path.abspath(expanded)
+    else:
+        resolved = os.path.normpath(str(PROJECT_ROOT / expanded))
+    if trailing and not resolved.endswith(os.sep):
+        resolved += os.sep
+    return resolved
+
+
+def resolve_config_path(path: str | None = None) -> str:
+    """Resolve ``--config``: the repository's config.yaml by default."""
+    if not path:
+        return str(PROJECT_ROOT / "config.yaml")
+    return resolve_repo_path(path)
+
+
+def _anchor_config_paths(config: dict) -> None:
+    """Make every relative ``paths.*`` entry and the findings memory path
+    absolute (see :func:`resolve_repo_path`). Other relative strings in the
+    config are left as written."""
+    paths = config.get("paths")
+    if isinstance(paths, dict):
+        for key, value in list(paths.items()):
+            if isinstance(value, str) and value:
+                paths[key] = resolve_repo_path(value)
+    memory = config.get("findings_memory")
+    if isinstance(memory, dict):
+        value = memory.get("path")
+        if isinstance(value, str) and value:
+            memory["path"] = resolve_repo_path(value)
 
 
 def _expand_env(value):
@@ -46,11 +122,22 @@ def _expand_env(value):
     return value
 
 
-def load_config(path: str = "config.yaml") -> dict:
+def load_config(path: str | None = "config.yaml") -> dict:
+    """Load, validate and complete a pipeline config.
+
+    ``path`` is resolved with :func:`resolve_config_path`, so the default
+    finds the repository's config.yaml from any working directory.
+    """
+    path = resolve_config_path(path)
     with open(path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"config file {path} is empty or not a YAML mapping"
+        )
 
-    os.environ.setdefault("LSAR_HOME", DEFAULT_LSAR_HOME)
+    if not os.environ.get("LSAR_HOME"):
+        os.environ["LSAR_HOME"] = default_lsar_home()
     config = _expand_env(config)
 
     missing_top = _REQUIRED_TOP_KEYS - set(config.keys())
@@ -71,6 +158,7 @@ def load_config(path: str = "config.yaml") -> dict:
     config["findings_memory"].setdefault("enabled", False)
     config["findings_memory"].setdefault("path", "findings_memory/memory.yaml")
     config["findings_memory"].setdefault("n_candidate_specs", 1)
+    _anchor_config_paths(config)
 
     # LLM provider defaults
     config.setdefault("llm_provider", "anthropic")

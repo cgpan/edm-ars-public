@@ -73,6 +73,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from src.config import default_lsar_home
 from src.ideation import feasibility as _feas
 from src.ideation.cards import IdeaCard
 
@@ -93,7 +94,7 @@ AGENT_KEY = "idea_priorart"
 #: ``ideation:`` block landed in config.yaml (H5, 2026-07-11); the config
 #: value wins whenever present, this constant is the offline fallback.
 DEFAULT_ANCHOR_CORPUS = os.path.expandvars(
-    os.environ.get("LSAR_HOME", "../LSAR") + "/outputs"
+    (os.environ.get("LSAR_HOME") or default_lsar_home()) + "/outputs"
 )
 
 # --------------------------------------------------------------------------
