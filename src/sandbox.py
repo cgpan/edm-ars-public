@@ -595,6 +595,27 @@ _LATEX_TOOL_HINTS: dict[str, str] = {
 }
 
 
+def pdflatex_argv(tex_file: str) -> list[str]:
+    """The pdflatex command line for a manuscript the model wrote.
+
+    ``-no-shell-escape`` turns off even the *restricted* \\write18 that
+    TeX Live, TinyTeX and MiKTeX enable by default. Restricted mode still
+    runs an allow-list of programs, kpsewhich among them, so a paper.tex
+    holding ``\\input|"kpsewhich -var-value=SOME_API_KEY"`` typeset the
+    key into the PDF. No template or package the pipeline uses needs
+    shell escape.
+    """
+    return ["pdflatex", "-no-shell-escape", "-interaction=nonstopmode", tex_file]
+
+
+def latex_env() -> dict[str, str]:
+    """Environment for pdflatex / bibtex / biber: the host's, minus the
+    credential-named variables (``scrub_secrets``). The manuscript is
+    model output, compiled like the generated code is run: without the
+    keys."""
+    return scrub_secrets(os.environ)
+
+
 def _file_stamp(path: str) -> tuple[int, int] | None:
     """(mtime_ns, size) of *path*, or None when it does not exist."""
     try:
@@ -643,11 +664,14 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
     steps_results: list[dict[str, Any]] = []
     missing: list[str] = []
 
+    env = latex_env()
+
     def _run(cmd: list[str]) -> dict[str, Any]:
         try:
             proc = subprocess.run(
                 cmd,
                 cwd=output_dir,
+                env=env,
                 capture_output=True,
                 # TeX and biber write UTF-8 (or raw 8-bit) bytes; the locale
                 # codec lost the whole stream on the first undecodable one.
@@ -685,7 +709,7 @@ def compile_latex(output_dir: str, tex_file: str = "paper.tex", timeout_s: int =
                 "stderr": f"Timed out after {timeout_s}s",
             }
 
-    pdflatex_cmd = ["pdflatex", "-interaction=nonstopmode", tex_file]
+    pdflatex_cmd = pdflatex_argv(tex_file)
 
     # V4 wave-2: apa7 journal manuscripts use biblatex/biber
     # (\addbibresource + \printbibliography); ACM conference papers use

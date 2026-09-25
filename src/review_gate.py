@@ -601,8 +601,15 @@ class ReviewGate:
     ) -> bool:
         """Compile *tex_file*: pdflatex x2, with a biber pass for
         biblatex (journal apa7) documents so references render in the
-        review copy (F-W2-GATE-BIBER). Returns True on success."""
-        cmd = ["pdflatex", "-interaction=nonstopmode", tex_file]
+        review copy (F-W2-GATE-BIBER). Returns True on success.
+
+        The reviser's LaTeX is model output: it is compiled without shell
+        escape and without the API keys in its environment, as
+        ``compile_latex`` does (see ``src.sandbox.pdflatex_argv``)."""
+        from src.sandbox import latex_env, pdflatex_argv
+
+        cmd = pdflatex_argv(tex_file)
+        env = latex_env()
         try:
             _src = (cwd / tex_file).read_text(encoding="utf-8")
         except OSError:
@@ -611,7 +618,7 @@ class ReviewGate:
             base = tex_file.replace(".tex", "")
             for c in ([*cmd], ["biber", base], [*cmd], [*cmd]):
                 try:
-                    proc = subprocess.run(c, cwd=str(cwd),
+                    proc = subprocess.run(c, cwd=str(cwd), env=env,
                                           capture_output=True, text=True,
                                           encoding="utf-8", errors="replace",
                                           timeout=timeout_s)
@@ -623,6 +630,7 @@ class ReviewGate:
                 proc = subprocess.run(
                     cmd,
                     cwd=str(cwd),
+                    env=env,
                     capture_output=True,
                     text=True,
                     # pdflatex writes UTF-8 or raw 8-bit bytes; the locale
