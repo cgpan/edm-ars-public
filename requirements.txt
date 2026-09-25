@@ -1,3 +1,11 @@
+# EDM-ARS runtime dependencies:  pip install -r requirements.txt
+#
+# Python 3.11 or 3.12 only. dowhy<0.13 (below) declares
+# Requires-Python <3.13, so pip cannot install this file on 3.13 or newer.
+#
+# Optional extras, installed into the same environment:
+#   requirements-dev.txt   tests, lint and type checks
+#   requirements-lsar.txt  the optional LSAR review gate
 anthropic>=0.40.0
 pandas>=2.0
 numpy>=1.25
@@ -7,10 +15,10 @@ shap>=0.45
 matplotlib>=3.7
 seaborn>=0.13
 PyYAML>=6.0
-requests>=2.31        # Semantic Scholar API calls
+requests>=2.31        # Semantic Scholar, arXiv and Crossref requests
 python-dotenv>=1.0    # load .env file for API keys
 imbalanced-learn>=0.12  # SMOTE for class imbalance handling
-docker>=7.0           # Docker SDK for Python (sandbox mode); optional at runtime
+docker>=7.0           # Docker SDK; used only when sandbox.enabled: true (experimental, off by default)
 dowhy>=0.11,<0.13     # G5 sensitivity refuters (random_common_cause, placebo_treatment_refuter)
 openai>=1.30           # OpenAI-compatible endpoints (DeepSeek is the default provider)
 scipy>=1.11            # bootstrap CIs, distributional tests in analysis_helpers

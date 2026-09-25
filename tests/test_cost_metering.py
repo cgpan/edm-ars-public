@@ -30,6 +30,9 @@ from src.cost import (
     write_summary,
 )
 
+# Synthetic rates keyed by arbitrary model ids. "deepseek-v4-flash" is
+# the retired flash id, used here only as a name for a cheaper tier;
+# the shipped config prices and routes to "deepseek-flash".
 PRICING = {
     "deepseek-v4-pro": {"input": 0.28, "cached_input": 0.028, "output": 0.42},
     "deepseek-v4-flash": {"input": 0.07, "cached_input": 0.007, "output": 0.28},

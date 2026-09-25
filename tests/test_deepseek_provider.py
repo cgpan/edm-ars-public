@@ -8,7 +8,7 @@ DeepSeek's API is OpenAI-compatible at https://api.deepseek.com.
 Key facts the integration relies on:
   - Env var: DEEPSEEK_API_KEY
   - Base URL: https://api.deepseek.com (OpenAI format)
-  - Model: deepseek-v4-pro (current; deepseek-v4-flash also available)
+  - Model: deepseek-v4-pro (current; the cheap tier is deepseek-flash)
   - Thinking mode: ENABLED by default in the API; DISABLED by the
     project's BaseAgent path via extra_body={"thinking": {"type":
     "disabled"}}. Avoids the F-3b9 thinking-block-overhead recurrence.
