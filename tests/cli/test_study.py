@@ -537,6 +537,34 @@ def test_suggest_study_type(text: str, task_type: str) -> None:
     assert study.suggest_study_type(text).task_type == task_type
 
 
+@pytest.mark.parametrize(
+    ("text", "task_type"),
+    [
+        # Everyday cause-and-effect wording the pipeline keywords miss.
+        ("Does taking algebra in 8th grade cause higher college enrollment?",
+         "causal_soo"),
+        ("Does math self-efficacy affect college attendance?", "causal_soo"),
+        ("Does taking calculus lead to higher GPA?", "causal_soo"),
+        ("Does taking calculus influence college enrollment?", "causal_soo"),
+        # The family menu's own words: "does one thing change another?"
+        ("Does tutoring change math scores?", "causal_soo"),
+        ("Does tutoring improve math scores?", "causal_soo"),
+        # The causal-kind menu's own words: "who would benefit most from X?"
+        ("Who would benefit most from tutoring?", "causal_itr"),
+        ("Which students benefit most from taking advanced math?", "causal_itr"),
+        # Forecasting wording stays a prediction even with a change verb.
+        ("Can 9th-grade scores predict whether GPA will increase?", "prediction"),
+        ("Which students are likely to reduce their course load?", "prediction"),
+        # "because" is not "cause".
+        ("Which students drop out because of low grades, and can we predict it?",
+         "prediction"),
+    ],
+)
+def test_suggest_study_type_plain_causal_wording(text: str, task_type: str) -> None:
+    suggestion = study.suggest_study_type(text)
+    assert suggestion.task_type == task_type
+
+
 # --------------------------------------------------------------------------
 # Menus: datasets and causal kinds
 # --------------------------------------------------------------------------

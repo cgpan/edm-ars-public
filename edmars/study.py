@@ -696,6 +696,47 @@ _DID_TIME = re.compile(
     r"\bcohorts?\b|\bbetween (19|20)\d\d and (19|20)\d\d\b|\bover (time|the years)\b"
 )
 
+# Plain-English wording the pipeline's keyword list does not cover. The
+# CLI's own menus ask "who would benefit most from X?" and "does one thing
+# change another?", so a novice who picks "Not sure" writes exactly these.
+_TARGETING_WORDS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p)
+    for p in (
+        r"\bbenefits?\s+(the\s+)?most\b",
+        r"\bgains?\s+(the\s+)?most\b",
+        r"\bwho\s+(would|will|might|could|should|does|do)\s+benefit\b",
+        r"\bwhich\s+students\s+(would|will|might|could)\s+benefit\b",
+    )
+)
+_CAUSAL_WORDS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p)
+    for p in (
+        r"\bcaus(e|es|ed|ing)\b",
+        r"\baffect(s|ed|ing)?\b",
+        r"\binfluenc(e|es|ed|ing)\b",
+        r"\b(lead|leads|led|leading)\s+to\b",
+        r"\beffects?\s+(of|on)\b",
+    )
+)
+# "Does tutoring change / improve math scores?" is an effect question too,
+# unless the sentence is plainly about forecasting.
+_CAUSAL_CHANGE = re.compile(
+    r"\b(does|do|did|would|will|can)\b[^?.!]*\b(change|improve|increase|raise|"
+    r"reduce|lower|boost|benefit)(s|d|ed)?\b"
+)
+_PREDICTIVE_WORDS = re.compile(r"\bpredict\w*|\bforecast\w*|\blikely\b|\brisk\b")
+
+
+def _plain_intent(lowered: str) -> str | None:
+    """The CLI-side intent for wording the pipeline's keywords miss."""
+    if any(p.search(lowered) for p in _TARGETING_WORDS):
+        return "targeting"
+    if any(p.search(lowered) for p in _CAUSAL_WORDS):
+        return "causal"
+    if _CAUSAL_CHANGE.search(lowered) and not _PREDICTIVE_WORDS.search(lowered):
+        return "causal"
+    return None
+
 _WHY: dict[str, str] = {
     "prediction": "It asks which students are likely to reach an outcome, or "
     "how well an outcome can be forecast.",
@@ -714,8 +755,9 @@ def suggest_study_type(text: str, dataset: str = DEFAULT_DATASET) -> Suggestion:
     """Guess a task type from an English description.
 
     Uses ``src.design_selector.classify_intent`` + ``select_design`` (the
-    same deterministic layer the pipeline uses) plus two keyword groups
-    the selector does not cover: measurement and cross-cohort gap change.
+    same deterministic layer the pipeline uses) plus keyword groups the
+    selector does not cover: measurement, cross-cohort gap change, and
+    everyday cause-and-effect or "who benefits most" wording.
     """
     lowered = " ".join(str(text or "").lower().split())
     if any(p.search(lowered) for p in _MEASUREMENT_PATTERNS):
@@ -726,6 +768,8 @@ def suggest_study_type(text: str, dataset: str = DEFAULT_DATASET) -> Suggestion:
     from src.design_selector import classify_intent, select_design
 
     intent = classify_intent(text)
+    if intent == "prediction":
+        intent = _plain_intent(lowered) or intent
     try:
         report = select_design(_registry(dataset), question=text, intent=intent)
         recommended = str(report.get("recommended_task_type") or "")
