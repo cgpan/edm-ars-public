@@ -86,7 +86,7 @@ MAX_UNPACKED_BYTES = 300_000_000
 INSTALL_RECORD = ".edmars-install.json"
 
 
-class LsarInstallError(RuntimeError):
+class LsarInstallError(fetch.UserFacingError):
     """LSAR could not be installed; ``plan`` says what pip would change."""
 
     def __init__(self, message: str, plan: "RequirementPlan | None" = None) -> None:
@@ -687,7 +687,7 @@ REVIEW_SECRETS: tuple[str, ...] = ("DEEPSEEK_API_KEY", "TAVILY_API_KEY",
                                    "SEMANTIC_SCHOLAR_API_KEY")
 
 
-class LsarReviewError(RuntimeError):
+class LsarReviewError(fetch.UserFacingError):
     """A manual review could not run or did not produce a report."""
 
 

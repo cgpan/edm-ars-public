@@ -116,3 +116,12 @@ def test_human_bytes() -> None:
     assert fetch.human_bytes(512) == "512 bytes"
     assert fetch.human_bytes(2_147_483_648) == "2.1 GB"
     assert fetch.human_bytes(297_000_000) == "297.0 MB"
+
+
+def test_expected_errors_share_one_user_facing_base() -> None:
+    from edmars import datasets, lsar
+
+    for cls in (fetch.DownloadError, datasets.DatasetError, lsar.LsarInstallError,
+                lsar.LsarReviewError):
+        assert issubclass(cls, fetch.UserFacingError)
+        assert cls.user_facing is True

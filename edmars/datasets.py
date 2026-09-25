@@ -176,7 +176,7 @@ _SIDECAR_SUFFIX = ".edmars.json"
 _SECRET_ENV_HINTS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
 
 
-class DatasetError(RuntimeError):
+class DatasetError(fetch.UserFacingError):
     """A dataset could not be downloaded, imported or built."""
 
 

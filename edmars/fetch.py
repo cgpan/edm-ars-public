@@ -39,7 +39,19 @@ DEFAULT_ATTEMPTS = 4
 _sleep: Callable[[float], None] = time.sleep
 
 
-class DownloadError(RuntimeError):
+class UserFacingError(RuntimeError):
+    """An error whose message is already written for the user.
+
+    Raised by the dataset, download and LSAR helpers for expected problems
+    (no disk space, a wrong file, a refused download). A command should
+    print ``str(exc)`` and exit 1 -- not show a crash report. ``user_facing``
+    lets callers test for it without importing this module.
+    """
+
+    user_facing = True
+
+
+class DownloadError(UserFacingError):
     """A download failed in a way a retry did not fix."""
 
 
