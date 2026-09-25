@@ -109,7 +109,7 @@ NONINTERACTIVE_OPTIONS: dict[str, tuple[str, str]] = {
     "semantic_scholar_key_env": ("EDMARS_S2_KEY_ENV", "NAME of the variable holding a Semantic Scholar key"),
     "check_keys": ("EDMARS_CHECK_KEYS", "false to skip the live key checks (no network)"),
     "base_url": ("EDMARS_BASE_URL", "server address for provider=local, e.g. http://localhost:11434/v1"),
-    "model": ("EDMARS_MODEL", "model name for provider=local"),
+    "model": ("EDMARS_MODEL", "model name for provider=local or openai (used for every step)"),
     "dataset": ("EDMARS_DATASET", "dataset for dataset_action (default hsls09_public)"),
     "dataset_action": ("EDMARS_DATASET_ACTION", "download | import | skip (default: keep what is there)"),
     "dataset_path": ("EDMARS_DATASET_PATH", "file to import when dataset_action=import"),
@@ -346,6 +346,7 @@ class _Wizard:
         self.allow_back = False
         self.in_flow = False
         self.start_study = False
+        self.last_models: list[str] | None = None
 
     # -- modules (imported lazily so a missing optional piece never breaks import)
     @property
@@ -759,6 +760,8 @@ class _Wizard:
                 continue
             self._set_provider(provider_id)
             label = _doctor.provider_meta(provider_id)["label"]
+            if ready and self._needs_model_choice(provider_id):
+                ready = self._choose_one_model(provider_id)
             if ready:
                 self.ok(f"EDM-ARS will use {label}.")
             else:
@@ -769,12 +772,47 @@ class _Wizard:
                           "counts only, because EDM-ARS has no price list for its models.")
             return
 
+    def _needs_model_choice(self, provider_id: str) -> bool:
+        """True when neither the shipped config nor the settings name a
+        model for this service (OpenAI: config.yaml ships no model list,
+        and the pipeline refuses to guess one -- defect E1)."""
+        if provider_id == "local" or self.get("models", None):
+            return False
+        try:
+            from edmars import providers
+
+            return not providers.default_models(provider_id)
+        except Exception:
+            return False
+
+    def _choose_one_model(self, provider_id: str) -> bool:
+        """Ask for the model every step will use; False when none was chosen."""
+        label = _doctor.provider_meta(provider_id)["label"]
+        self.info(f"EDM-ARS has no recommended {label} models, so choose the one every step will use. Pick "
+                  "the strongest model your account offers: the steps that write analysis code depend on it. "
+                  "You can choose a model per step later in `edmars setup advanced`.")
+        available = sorted(self.last_models or [])
+        if available:
+            shown = [(m, m) for m in available[:40]] + [("__type__", "Type a model name")]
+            pick = self.choose(f"Which {label} model should EDM-ARS use?", shown, default=shown[0][0], back=False)
+            model = pick if pick != "__type__" else self.ask_text("Model name")
+        else:
+            model = self.ask_text(f"Model name (as {label} lists it)")
+        if not model:
+            self.warn("No model chosen; studies can't start until one is. Run `edmars setup ai` again.")
+            return False
+        self.set("models", {stage: model for stage in self._stage_keys()})
+        self.save()
+        self.ok(f"Every step will use {model}.")
+        return True
+
     def _set_provider(self, provider_id: str) -> None:
         previous = self.get("provider", None)
         # A local server's per-step models were just written by _local_flow.
         if provider_id != "local" and previous and previous != provider_id and self.get("models", None):
             self.set("models", {})
-            self.info("Your model choices were reset to the recommended ones for the new service.")
+            if not self._needs_model_choice(provider_id):
+                self.info("Your model choices were reset to the recommended ones for the new service.")
         self.set("provider", provider_id)
         if provider_id != "local":
             self.set("provider_base_url", None)
@@ -790,6 +828,14 @@ class _Wizard:
             return
         if self._key_noninteractive(provider_id, self.opt("key_env")):
             self._set_provider(provider_id)
+            if self._needs_model_choice(provider_id):
+                model = str(self.opt("model", "") or "")
+                if not model:
+                    self.error(f"provider={provider_id} needs a model name, because EDM-ARS has no recommended "
+                               f"models for it: add --option model=<model id> (or set EDMARS_MODEL).")
+                    return
+                self.set("models", {stage: model for stage in self._stage_keys()})
+                self.ok(f"Every step will use {model}.")
             self.ok(f"EDM-ARS will use {_doctor.provider_meta(provider_id)['label']}.")
 
     # -- key handling -------------------------------------------------------------
@@ -822,12 +868,14 @@ class _Wizard:
             result = providers.check_key(provider_id, key, base_url=base_url)
         except Exception as exc:  # noqa: BLE001 - a crash is reported, never shown raw
             return _KeyResult("UNKNOWN", _doctor.redact(str(exc), [key]))
-        return _KeyResult(
+        checked = _KeyResult(
             status=str(getattr(result, "status", "UNKNOWN") or "UNKNOWN").upper(),
             message=_doctor.redact(str(getattr(result, "message", "") or ""), [key]),
             balance=getattr(result, "balance", None),
             models=list(getattr(result, "models", None) or []) or None,
         )
+        self.last_models = checked.models
+        return checked
 
     def _explain_result(self, provider_id: str, result: _KeyResult) -> None:
         meta = _doctor.provider_meta(provider_id)
@@ -1332,7 +1380,9 @@ class _Wizard:
                   "continues where it left off.")
         progress = _DownloadProgress(self)
         try:
-            path = Path(datasets.download(name, dest, progress=progress))
+            # install() passes settings through, so the file's SHA-256 is
+            # recorded on first download (trust on first use).
+            path = Path(datasets.install(name, self.s, progress=progress))
         except KeyboardInterrupt:
             progress.close()
             self.warn("Download paused. Run `edmars setup datasets` to continue it.")
@@ -1489,10 +1539,12 @@ class _Wizard:
     # S7 PDF typesetting
     # =========================================================================
     def screen_s7(self) -> None:
-        from edmars import proc
+        from edmars import toolchain
 
-        pdflatex = proc.which("pdflatex")
-        miktex = bool(proc.which("initexmf"))
+        # toolchain also looks next to a saved pdflatex and in TinyTeX's own
+        # folder, which is not on PATH until a new terminal is opened.
+        pdflatex = toolchain.find_tex_tool("pdflatex", self.s)
+        miktex = bool(toolchain.find_tex_tool("initexmf", self.s))
         mode_now = str(self.get("latex.mode", "") or "")
         if self.ni:
             self._s7_noninteractive(pdflatex)
@@ -1539,18 +1591,30 @@ class _Wizard:
                 return
 
     def _set_latex(self, mode: str) -> None:
-        from edmars import proc
-
         self.set("latex.mode", mode)
-        self.set("latex.pdflatex", proc.which("pdflatex") if mode != "none" else None)
+        self.set("latex.pdflatex", self._find_pdflatex(mode) if mode != "none" else None)
         self.save()
+
+    def _find_pdflatex(self, mode: str) -> str | None:
+        """The pdflatex that ``mode`` means: TinyTeX's own for "tinytex"
+        (right after an install it is not on PATH yet), else the one PATH
+        or the saved setting finds."""
+        from edmars import toolchain
+
+        if mode == "tinytex":
+            for folder in toolchain.tinytex_bin_dirs():
+                for name in ("pdflatex.exe", "pdflatex"):
+                    candidate = Path(folder) / name
+                    if candidate.is_file():
+                        return str(candidate)
+        return toolchain.find_tex_tool("pdflatex", self.s)
 
     def _install_tinytex(self) -> bool:
         from edmars import toolchain
 
         self.info("Installing TinyTeX. Messages from the installer may appear below.")
         try:
-            chk = toolchain.install_tinytex()
+            chk = toolchain.install_tinytex(settings=self.s, on_step=self.info)
         except Exception as exc:  # noqa: BLE001
             self._report(f"TinyTeX could not be installed: {_doctor.redact(str(exc))}")
             return False
@@ -1564,10 +1628,10 @@ class _Wizard:
     def _latex_verify(self, *, compile_test: bool) -> bool:
         from edmars import toolchain
 
-        checks = list(toolchain.latex_checks())
+        checks = list(toolchain.latex_checks(self.s))
         if compile_test:
             self.info("Making two small test PDFs to confirm everything works (up to 4 minutes the first time)\u2026")
-            checks += list(toolchain.test_compile(timeout_s=120))
+            checks += list(toolchain.test_compile(timeout_s=120, settings=self.s))
         self.show_checks(checks)
         return not any(str(getattr(c, "status", "")) == "fail" for c in checks)
 
@@ -1825,7 +1889,9 @@ class _Wizard:
             self._report("LSAR was downloaded but is not usable: " + "; ".join(_nb(p) for p in problems))
             return False
         self.set("lsar.home", str(home))
-        if ref:
+        if ref and not self.get("lsar.ref", None):
+            # install() saves the exact commit it unpacked; the constant is
+            # only a branch name ("master"), so it must not replace that.
             self.set("lsar.ref", ref)
         self.save()
         self.ok(f"LSAR is installed in {home}.")
@@ -2059,15 +2125,28 @@ class _DownloadProgress:
         self._task: Any = None
         self._last_decile = -1
         self._last_mb = 0
+        self._phase = "download"
+
+    _PHASES = {"download": "Downloading", "extract": "Unpacking", "verify": "Checking"}
 
     def __call__(self, *args: Any, **kwargs: Any) -> None:
         try:
             done = args[0] if args else kwargs.get("done", kwargs.get("downloaded", 0))
             total = args[1] if len(args) > 1 else kwargs.get("total")
+            phase = str(args[2] if len(args) > 2 else kwargs.get("phase", "download"))
             done_i = int(done or 0)
             total_i = int(total) if total else None
         except (TypeError, ValueError):
             return
+        if phase != self._phase:
+            # datasets reports download, then extract (the 2 GB unzip), then
+            # verify: each gets its own bar or its own 10% lines.
+            self.close()
+            self._last_decile = -1
+            self._last_mb = 0
+            self._phase = phase
+            if self.plain:
+                self.wizard.say(f"  {self._PHASES.get(phase, phase.capitalize())}:")
         if self.plain:
             if total_i:
                 decile = min(10, done_i * 10 // max(total_i, 1))
@@ -2085,8 +2164,10 @@ class _DownloadProgress:
 
                 from edmars import ui
 
-                self._bar = Progress("Downloading", BarColumn(), DownloadColumn(), TransferSpeedColumn(),
-                                     TimeRemainingColumn(), console=ui.console, transient=False)
+                label = self._PHASES.get(self._phase, "Working")
+                # A rich Progress needs the real Console, not ui.console's proxy.
+                self._bar = Progress(label, BarColumn(), DownloadColumn(), TransferSpeedColumn(),
+                                     TimeRemainingColumn(), console=ui.get_console(), transient=False)
                 self._bar.start()
                 self._task = self._bar.add_task("download", total=total_i)
             self._bar.update(self._task, completed=done_i, total=total_i)

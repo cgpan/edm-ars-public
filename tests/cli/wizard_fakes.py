@@ -321,7 +321,7 @@ class FakeProc:
     def which(self, name: str) -> str | None:
         return self.tools.get(name)
 
-    def pid_alive(self, pid: int) -> bool:
+    def pid_alive(self, pid: int | None, *, started_at: float | None = None) -> bool:
         return pid in self.alive
 
     def run(self, *a: Any, **k: Any) -> Any:  # pragma: no cover - must never be called
@@ -392,8 +392,11 @@ class FakeProviders:
                     "analyst": "deepseek-v4-pro", "critic": "deepseek-v4-pro", "writer": "deepseek-v4-pro",
                     "revision_writer": "deepseek-v4-pro", "outline_agent": "deepseek-flash",
                     "verifier": "deepseek-flash"}
-        if provider_id in ("openai", "anthropic"):
-            return {"problem_formulator": f"{provider_id}-model", "writer": f"{provider_id}-model"}
+        if provider_id == "anthropic":
+            # The real module reads the shipped top-level ``models`` block.
+            return {"problem_formulator": "anthropic-model", "writer": "anthropic-model"}
+        # openai: the shipped config.yaml has no openai block, so the real
+        # default_models("openai") is empty and setup must ask for a model.
         return {}
 
     def missing_models(self, provider_id: str, key: str, models: Iterable[str],
@@ -429,7 +432,7 @@ class FakeDatasets:
         self.progress_calls: list[tuple[Any, ...]] = []
         self.imported: list[Path] = []
 
-    def raw_data_dir(self, settings: dict[str, Any]) -> Path:
+    def raw_data_dir(self, settings: dict[str, Any] | None = None) -> Path:
         return self.data_root
 
     def status(self, name: str, settings: dict[str, Any]) -> Check:
@@ -448,18 +451,31 @@ class FakeDatasets:
                          "Download the labeled CSV from NCES, or choose Download now.")
         return Check("Dataset file", "ok", "labeled HSLS:09 student file")
 
-    def download(self, name: str, dest_dir: Path, progress: Callable[..., None] | None = None) -> Path:
+    def download(self, name: str, dest_dir: Path, progress: Callable[..., None] | None = None, *,
+                 settings: dict[str, Any] | None = None, session: Any | None = None,
+                 force: bool = False) -> Path:
         if self.download_error is not None:
             raise self.download_error
         Path(dest_dir).mkdir(parents=True, exist_ok=True)
         target = Path(dest_dir) / self.CATALOG[name].filename
         target.write_text(LABELED_HEADER + "1,Male,White,3.1,Yes\n", encoding="utf-8")
         if progress is not None:
-            for done in (0, 50, 100):
-                progress(done, 100)
-                self.progress_calls.append((done, 100))
+            # The real module reports (done, total, phase): download, then extract.
+            for phase in ("download", "extract"):
+                for done in (0, 50, 100):
+                    progress(done, 100, phase)
+                    self.progress_calls.append((done, 100, phase))
         self.ready.add(name)
+        if settings is not None:
+            settings.setdefault("datasets", {}).setdefault(name, {})["sha256"] = "0" * 64
         return target
+
+    def install(self, name: str, settings: dict[str, Any], progress: Callable[..., None] | None = None, *,
+                session: Any | None = None, force: bool = False) -> Path:
+        if name == "did_els_hsls_panel":
+            return self.build_did_panel(settings)
+        return self.download(name, self.raw_data_dir(settings), progress, settings=settings,
+                             session=session, force=force)
 
     def import_file(self, name: str, path: Path, settings: dict[str, Any]) -> Path:
         chk = self.validate_file(name, path)
@@ -472,13 +488,15 @@ class FakeDatasets:
         self.ready.add(name)
         return target
 
-    def build_did_panel(self, settings: dict[str, Any]) -> Path:
+    def build_did_panel(self, settings: dict[str, Any], *, timeout_s: int = 3600) -> Path:
         self.ready.add("did_els_hsls_panel")
         return self.data_root / "panel.csv"
 
 
 class FakeToolchain:
-    def __init__(self) -> None:
+    def __init__(self, proc: "FakeProc", tinytex_dir: Path) -> None:
+        self.proc = proc
+        self.tinytex_dir = tinytex_dir
         self.latex: list[Check] = [Check("LaTeX", "ok", "pdflatex found")]
         self.compile: list[Check] = [Check("Test PDF", "ok", "both test documents compiled")]
         self.rscript: str | None = None
@@ -487,30 +505,52 @@ class FakeToolchain:
         self.latex_error: BaseException | None = None
         self.compile_calls = 0
 
-    def latex_checks(self) -> list[Check]:
+    def latex_checks(self, settings: dict[str, Any] | None = None) -> list[Check]:
         if self.latex_error is not None:
             raise self.latex_error
         return list(self.latex)
 
-    def test_compile(self, timeout_s: int = 120) -> list[Check]:
+    def test_compile(self, timeout_s: float = 120, settings: dict[str, Any] | None = None) -> list[Check]:
         self.compile_calls += 1
         return list(self.compile)
 
-    def install_tinytex(self) -> Check:
+    def tinytex_bin_dirs(self) -> list[Path]:
+        return [self.tinytex_dir]
+
+    def find_tex_tool(self, name: str, settings: dict[str, Any] | None = None) -> str | None:
+        saved = ((settings or {}).get("latex") or {}).get("pdflatex")
+        if name == "pdflatex" and saved:
+            return str(saved)
+        found = self.proc.which(name)
+        if found:
+            return found
+        candidate = self.tinytex_dir / name
+        return str(candidate) if candidate.exists() else None
+
+    def install_tinytex(self, *, settings: dict[str, Any] | None = None, session: Any | None = None,
+                        timeout_s: float = 1800, max_rounds: int = 30,
+                        on_step: Callable[[str], None] | None = None) -> Check:
         self.tinytex_installed = True
+        # Like the real installer: pdflatex lands in TinyTeX's own folder,
+        # which is NOT on PATH in the running process.
+        self.tinytex_dir.mkdir(parents=True, exist_ok=True)
+        (self.tinytex_dir / "pdflatex").write_text("", encoding="utf-8")
+        if on_step is not None:
+            on_step("Installing the LaTeX packages the templates need")
         return Check("TinyTeX", "ok", "installed")
 
-    def find_rscript(self, settings: dict[str, Any]) -> str | None:
+    def find_rscript(self, settings: dict[str, Any] | None = None, **kwargs: Any) -> str | None:
         configured = (settings.get("r") or {}).get("rscript")
         return configured or self.rscript
 
-    def r_checks(self, settings: dict[str, Any]) -> list[Check]:
+    def r_checks(self, settings: dict[str, Any] | None = None) -> list[Check]:
         if self.packages_missing:
             return [Check("R", "ok", "R 4.5.1"), Check("R packages", "fail", "missing: lavaan, mirt",
                                                        "Run `edmars setup r`.")]
         return [Check("R", "ok", "R 4.5.1"), Check("R packages", "ok", "all installed")]
 
-    def install_r_packages(self, rscript: str) -> Check:
+    def install_r_packages(self, rscript: str, packages: Any = None, *, repo: str = "",
+                           timeout_s: float = 1800) -> Check:
         self.packages_missing = False
         return Check("R packages", "ok", "installed")
 
@@ -526,16 +566,20 @@ class FakeLsar:
         self.home = home
         self.installed = False
         self.install_calls = 0
+        self.commit = "0123abc4567def"
 
-    def checks(self, settings: dict[str, Any]) -> list[Check]:
+    def checks(self, settings: dict[str, Any], *, deep: bool = False) -> list[Check]:
         if self.installed:
             return [Check("Automated reviewer", "ok", f"LSAR installed at {self.home}")]
         return [Check("Automated reviewer", "fail", "LSAR is not installed", "Run `edmars setup reviewer`.")]
 
-    def install(self, settings: dict[str, Any]) -> Path:
+    def install(self, settings: dict[str, Any], *, ref: str | None = None, allow_changes: bool = False,
+                session: Any | None = None, on_step: Callable[[str], None] | None = None) -> Path:
         self.install_calls += 1
         self.installed = True
         self.home.mkdir(parents=True, exist_ok=True)
+        # Like the real install(): it records the exact commit it unpacked.
+        settings.setdefault("lsar", {}).update({"home": str(self.home), "ref": self.commit})
         return self.home
 
     def verify(self, home: Path) -> list[str]:
@@ -617,9 +661,10 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fakes:
     fakes = Fakes(
         home=home, app=app, ui=ui, paths=paths, settings=FakeSettings(paths), disclosure=FakeDisclosure(),
         secrets=FakeSecrets(), proc=FakeProc(), providers=FakeProviders(),
-        datasets=FakeDatasets(home / "data" / "raw"), toolchain=FakeToolchain(), lsar=FakeLsar(home / "lsar"),
+        datasets=FakeDatasets(home / "data" / "raw"), toolchain=None, lsar=FakeLsar(home / "lsar"),
         runner=FakeRunner(), cli=FakeCli(),
     )
+    fakes.toolchain = FakeToolchain(fakes.proc, home / "TinyTeX" / "bin")
     model = types.ModuleType("edmars.model")
     model.Check = Check  # type: ignore[attr-defined]
     fakes.modules = {
@@ -637,8 +682,10 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fakes:
                                                              "check_semantic_scholar", "default_models",
                                                              "missing_models")),
         "datasets": _module("datasets", fakes.datasets, ("CATALOG", "status", "validate_file", "download",
-                                                          "import_file", "build_did_panel", "raw_data_dir")),
+                                                          "install", "import_file", "build_did_panel",
+                                                          "raw_data_dir")),
         "toolchain": _module("toolchain", fakes.toolchain, ("latex_checks", "test_compile", "install_tinytex",
+                                                             "tinytex_bin_dirs", "find_tex_tool",
                                                              "find_rscript", "r_checks", "install_r_packages",
                                                              "docker_info")),
         "lsar": _module("lsar", fakes.lsar, ("LSAR_REPO", "LSAR_REF", "checks", "install", "verify")),

@@ -330,7 +330,10 @@ def test_dataset_download_records_terms_and_shows_progress(fx: Fakes) -> None:
     saved = fx.saved()["datasets"]["hsls09_public"]
     assert saved["terms_accepted_at"] and saved["verified_at"] and saved["path"]
     assert fx.datasets.progress_calls
+    assert saved["sha256"]  # the fingerprint install() records on first download
     assert "Cite NCES" in fx.ui.output
+    # Plain mode: the unzip after the download gets its own lines.
+    assert "Unpacking:" in fx.ui.output
 
 
 def test_dataset_download_failure_is_explained(fx: Fakes) -> None:
@@ -371,6 +374,9 @@ def test_tinytex_install_needs_consent(fx: Fakes) -> None:
     assert run("pdf") == 0
     assert fx.toolchain.tinytex_installed
     assert fx.saved()["latex"]["mode"] == "tinytex"
+    # TinyTeX's pdflatex is not on PATH in this process; setup still saves
+    # it, so the runner can put its folder on the study's PATH.
+    assert fx.saved()["latex"]["pdflatex"] == str(fx.toolchain.tinytex_dir / "pdflatex")
 
 
 def test_r_folder_path_is_normalized_and_packages_installed(fx: Fakes, tmp_path: Path) -> None:
@@ -393,7 +399,8 @@ def test_reviewer_asks_for_a_deepseek_key_even_with_another_service(fx: Fakes) -
     assert run("reviewer") == 0
     saved = fx.saved()["lsar"]
     assert saved["enabled"] is True and saved["auto_review"] is True
-    assert saved["home"] == str(fx.lsar.home) and saved["ref"] == fx.lsar.LSAR_REF
+    # The exact commit install() recorded, not the LSAR_REF branch name.
+    assert saved["home"] == str(fx.lsar.home) and saved["ref"] == fx.lsar.commit
     assert fx.secrets.store["DEEPSEEK_API_KEY"] == GOOD_KEY
     assert "Your studies still use OpenAI" in fx.ui.output
     assert "differ by about 2 points" in fx.ui.output
@@ -456,9 +463,29 @@ def test_noninteractive_full_setup_with_the_standard_key_variable(
 def test_noninteractive_reads_options_from_the_environment(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EDMARS_ACCEPT_DISCLOSURE", "yes")
     monkeypatch.setenv("EDMARS_PROVIDER", "openai")
+    monkeypatch.setenv("EDMARS_MODEL", "gpt-test-large")
     monkeypatch.setenv("OPENAI_API_KEY", OTHER_KEY)
     assert run(non_interactive=True) == 0
     assert fx.saved()["provider"] == "openai"
+    assert set(fx.saved()["models"].values()) == {"gpt-test-large"}
+
+
+def test_openai_needs_a_model_because_none_is_shipped(fx: Fakes) -> None:
+    fx.providers.results[OTHER_KEY] = KeyCheck("OK", "key accepted", models=["gpt-b", "gpt-a"])
+    fx.ui.script = ["openai", "paste", OTHER_KEY, "gpt-a"]
+    assert run("ai") == 0
+    models = fx.saved()["models"]
+    # One model for every step the pipeline calls, including the reviser.
+    assert set(models.values()) == {"gpt-a"}
+    assert {"critic", "writer", "revision_writer", "outline_agent"} <= set(models)
+    assert "EDM-ARS will use OpenAI" in fx.ui.output
+
+
+def test_noninteractive_openai_without_a_model_fails(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", OTHER_KEY)
+    code = run(non_interactive=True, options={"accept_disclosure": True, "provider": "openai"})
+    assert code == 1
+    assert "needs a model name" in fx.ui.output
 
 
 def test_noninteractive_custom_key_variable_is_copied_to_secure_storage(
@@ -489,7 +516,7 @@ def test_noninteractive_can_skip_the_live_key_check(fx: Fakes, monkeypatch: pyte
 def test_noninteractive_reviewer_needs_a_deepseek_key(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", OTHER_KEY)
     code = run(non_interactive=True, options={"accept_disclosure": True, "provider": "openai",
-                                              "lsar_action": "auto"})
+                                              "model": "gpt-test-large", "lsar_action": "auto"})
     assert code == 1
     assert fx.saved()["lsar"]["enabled"] is False
     assert "needs a DeepSeek key" in fx.ui.output

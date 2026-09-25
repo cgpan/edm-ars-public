@@ -532,6 +532,10 @@ def check_provider_key(settings: dict[str, Any], *, deep: bool = False) -> list[
         return [make_check("AI service key", "fail", f"No {label} key found ({env_var})",
                            "Run `edmars setup ai`" + (f"; get a key at {meta['key_page']}" if meta["key_page"] else "") + ".")]
     out.append(make_check("AI service key", "ok", f"{label} key found in {store_label(source, env_var)}"))
+    if not configured_models(settings, provider_id):
+        # OpenAI ships no model list and the pipeline refuses to guess one.
+        out.append(make_check("AI models", "fail", f"No {label} model is chosen, so studies can't start",
+                              "Run `edmars setup ai` and choose a model."))
     if not deep:
         return out
 
@@ -635,7 +639,7 @@ def check_latex(settings: dict[str, Any], *, deep: bool = False) -> list["Check"
     from edmars import toolchain
 
     mode = str(cfg(settings, "latex.mode", "") or "")
-    checks = list(toolchain.latex_checks())
+    checks = list(toolchain.latex_checks(settings))
     if mode == "none":
         checks = _downgrade(checks)
         checks.insert(0, make_check("PDF typesetting", "warn",
@@ -644,7 +648,7 @@ def check_latex(settings: dict[str, Any], *, deep: bool = False) -> list["Check"
                                     "Run `edmars setup pdf` to turn it on."))
         return checks
     if deep:
-        checks.extend(toolchain.test_compile(timeout_s=120))
+        checks.extend(toolchain.test_compile(timeout_s=120, settings=settings))
     return checks
 
 
@@ -790,8 +794,12 @@ def check_active_run() -> list["Check"]:
     from edmars import proc
 
     alive = False
+    started = data.get("create_time") if isinstance(data, dict) else None
     try:
-        alive = isinstance(pid, int) and proc.pid_alive(pid)
+        # The runner records the process's start time, so a pid Windows has
+        # since handed to another program does not look like the study.
+        alive = isinstance(pid, int) and proc.pid_alive(
+            pid, started_at=started if isinstance(started, (int, float)) else None)
     except Exception:
         alive = False
     if alive:
@@ -844,12 +852,13 @@ def check_old_dotenv() -> list["Check"]:
     return []
 
 
-def check_latex_quick() -> list["Check"]:
-    from edmars import proc
+def check_latex_quick(settings: dict[str, Any] | None = None) -> list["Check"]:
+    from edmars import toolchain
 
-    pdflatex = proc.which("pdflatex")
+    # toolchain also finds a TinyTeX that is not on PATH yet.
+    pdflatex = toolchain.find_tex_tool("pdflatex", settings)
     if pdflatex:
-        flavor = "MiKTeX" if proc.which("initexmf") else "LaTeX"
+        flavor = "MiKTeX" if toolchain.find_tex_tool("initexmf", settings) else "LaTeX"
         return [make_check("PDF typesetting", "ok", f"{flavor} found ({pdflatex})")]
     return [make_check("PDF typesetting", "info", "LaTeX not found. You can add it in a later step")]
 
@@ -874,7 +883,7 @@ def system_checks(settings: dict[str, Any]) -> list["Check"]:
         ("Disk space", lambda: check_disk(settings)),
         ("Memory", check_memory),
         ("Python", check_python),
-        ("PDF typesetting", check_latex_quick),
+        ("PDF typesetting", lambda: check_latex_quick(settings)),
         ("R", lambda: check_r_quick(settings)),
         ("Saved keys", check_keys_found),
         ("Cloud sync", lambda: check_sync_folders(settings)),

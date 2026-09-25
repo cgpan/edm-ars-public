@@ -75,6 +75,18 @@ def statuses(checks: list[Any], name: str) -> list[str]:
 # run_checks
 # ---------------------------------------------------------------------------
 
+def test_openai_without_a_model_fails_the_check(fx: Fakes) -> None:
+    from edmars.doctor import run_checks
+
+    settings = healthy(fx, provider="openai")
+    fx.secrets.store["OPENAI_API_KEY"] = GOOD_KEY
+    models = by_name(run_checks(settings)).get("AI models", [])
+    assert [c.status for c in models] == ["fail"]
+    assert "edmars setup ai" in (models[0].fix or "")
+    settings = healthy(fx, provider="openai", models={"writer": "gpt-test"})
+    assert "AI models" not in by_name(run_checks(settings))
+
+
 def test_healthy_setup_has_no_failures(fx: Fakes) -> None:
     from edmars.doctor import run_checks
 
