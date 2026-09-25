@@ -41,6 +41,7 @@ from src.config import (  # noqa: E402
 )
 from src.context import PipelineContext, PipelineState  # noqa: E402
 from src.dataset_adapter import _DATASET_REGISTRY, create_dataset_adapter  # noqa: E402
+from src import events  # noqa: E402
 from src.errors import is_resumable  # noqa: E402
 from src.orchestrator import Orchestrator  # noqa: E402
 from src.preflight import (  # noqa: E402
@@ -385,6 +386,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--debug",
         action="store_true",
         help="Show Python tracebacks for errors (also EDM_ARS_DEBUG=1).",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help=(
+            "Do not print a progress line per stage, wait, retry and "
+            "warning on stderr while the run works (pipeline.log and "
+            "events.jsonl in the run folder are written either way)."
+        ),
     )
     return parser
 
@@ -1506,7 +1516,8 @@ def _run(plan: _Plan, args: argparse.Namespace) -> int:
     invocation_start = datetime.now().timestamp()
     try:
         print(f"Run folder: {plan.output_dir}", file=_human_stream(args))
-        result_ctx = orchestrator.run(user_prompt=args.prompt)
+        with _console_progress(args):
+            result_ctx = orchestrator.run(user_prompt=args.prompt)
     except KeyboardInterrupt as exc:
         return _interrupted(plan, args, orchestrator, exc, invocation_start)
     except Exception as exc:  # noqa: BLE001 - every escape is reported
@@ -1519,6 +1530,87 @@ def _run(plan: _Plan, args: argparse.Namespace) -> int:
         errors=list(result_ctx.errors or []),
         abort_info=getattr(result_ctx, "abort_info", None),
     )
+
+
+# ---------------------------------------------------------------------------
+# Progress on the console while a run works (D8)
+#
+# A run takes 20-45 minutes, and the console used to show nothing between
+# "Run folder:" and the final summary: a rate-limit wait, a retried
+# script or a stage that simply takes long all looked like a hang. The
+# orchestrator and agents emit structured events (src/events.py); a short
+# selection of them is echoed here, one line each, on stderr so a
+# --json-summary stdout stays machine-readable.
+# ---------------------------------------------------------------------------
+
+
+def _progress_line(record: dict) -> str | None:
+    """One console line for an event worth showing, else None."""
+    etype = record.get("type")
+    data = record.get("data") or {}
+    plain = record.get("plain")
+    stage = record.get("stage") or ""
+    if etype == "stage.start":
+        cycle = record.get("cycle") or 0
+        return f"{plain or stage}" + (f" (revision cycle {cycle})" if cycle else "")
+    if etype == "stage.end":
+        outcome = data.get("outcome")
+        seconds = data.get("duration_s")
+        took = (
+            f" after {int(seconds) // 60} min {int(seconds) % 60:02d} s"
+            if isinstance(seconds, (int, float)) else ""
+        )
+        if outcome == "ok":
+            return f"  {stage.lower()} finished{took}"
+        return f"  {stage.lower()} ended: {outcome}{took}"
+    if etype in ("warning", "error"):
+        message = data.get("message") or plain or ""
+        code = data.get("code")
+        label = "warning" if etype == "warning" else "error"
+        return f"  {label}{f' [{code}]' if code else ''}: {_one_line(message)}"
+    if etype == "attempt.end":
+        rc = data.get("returncode")
+        attempt, total = data.get("attempt"), data.get("max_attempts")
+        if rc == 0:
+            return None
+        why = data.get("error_class") or (f"exit code {rc}" if rc is not None else "stopped")
+        more = (
+            "; asking the model to fix it"
+            if isinstance(attempt, int) and isinstance(total, int) and attempt < total
+            else ""
+        )
+        return f"  generated code attempt {attempt} of {total} failed ({why}){more}"
+    if etype == "verdict":
+        score = data.get("critic_score")
+        return (
+            f"  critic verdict: {data.get('verdict')}"
+            + (f", score {score}" if score is not None else "")
+            + (" (paper will be marked UNVERIFIED)" if data.get("unverified") else "")
+        )
+    if etype in ("llm.wait", "compile.end", "gate.cycle", "gate.review",
+                 "gate.skipped", "verify.end"):
+        return f"  {plain}" if plain else None
+    return None
+
+
+@contextlib.contextmanager
+def _console_progress(args: argparse.Namespace) -> Iterator[None]:
+    """Echo selected run events to stderr unless --quiet; always restores."""
+    if getattr(args, "quiet", False):
+        yield
+        return
+
+    def _echo(record: dict) -> None:
+        line = _progress_line(record)
+        if line:
+            stamp = datetime.now().strftime("%H:%M:%S")
+            print(f"[{stamp}] {line}", file=sys.stderr, flush=True)
+
+    previous = events.set_echo(_echo)
+    try:
+        yield
+    finally:
+        events.set_echo(previous)
 
 
 # ---------------------------------------------------------------------------

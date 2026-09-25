@@ -401,6 +401,11 @@ python -m src.main --research-spec runs/fixtures/spec_x1mtheff_x4college.json --
 python -m src.main --output-dir output/my_causal_run --resume
 ```
 
+While a run works it prints one short progress line per stage, wait, retry
+and warning (`--quiet` turns these off); `pipeline.log` in the run folder has
+the full record. `--debug` shows Python tracebacks for errors that are
+otherwise reported in one line.
+
 **Study types.** Prediction studies start from a free-text question (or none).
 The other four study types need a locked research spec, a JSON file that names
 its study type, dataset, variables and methods; the spec overrides
