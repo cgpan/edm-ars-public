@@ -679,6 +679,7 @@ class Orchestrator:
         self._last_status: Optional[dict] = None
         self._stage_clock: Optional[tuple[str, int, float]] = None
         self._resumed = False
+        self._budget_warned = False
         self._findings_memory_path: Optional[str] = None
 
         os.makedirs(ctx.output_dir, exist_ok=True)
@@ -2931,6 +2932,22 @@ class Orchestrator:
                 f"WARNING: measured cost ${summary.cost_usd:.4f} exceeds "
                 f"budget ${budget:.2f}{note}",
             )
+            # The line above reaches only pipeline.log (a "log" event is
+            # not shown). Say it once where people look: the console, and
+            # `edmars status` / the live view through the warning event.
+            if not getattr(self, "_budget_warned", False):
+                self._budget_warned = True
+                events.emit(
+                    self.ctx,
+                    "warning",
+                    stage=getattr(self.ctx, "current_state", None),
+                    code="COST_OVER_BUDGET",
+                    message=(
+                        f"This study has cost about US${summary.cost_usd:.2f} so "
+                        f"far, more than its spending warning of US${budget:.2f}. "
+                        "It keeps running: the warning does not stop it."
+                    ),
+                )
 
     def _update_findings_memory(self) -> None:
         """Persist this run's findings to the cross-run memory store (non-fatal)."""

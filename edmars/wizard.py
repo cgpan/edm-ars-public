@@ -2121,7 +2121,13 @@ class _Wizard:
                 self.warn("Please type an amount above zero.")
                 continue
             self.set("defaults.budget_usd", value)
-            self.info("EDM-ARS will warn you when a study passes this amount. It does not stop the study.")
+            self.info("When a study's measured cost passes this amount, a warning appears in the study's "
+                      "progress messages. It does not stop the study.")
+            provider_id = str(self.get("provider", "deepseek") or "deepseek")
+            if provider_id != "deepseek":
+                label = str(_doctor.provider_meta(provider_id).get("label") or provider_id)
+                self.warn(f"EDM-ARS has prices only for DeepSeek's models. With {label} it cannot measure "
+                          "what a study costs, so this warning will not appear.")
             return
 
     def _ask_models(self) -> None:

@@ -465,6 +465,20 @@ def test_advanced_options(fx: Fakes) -> None:
     assert not any("otif" in label for _, label in menu or [])
 
 
+def test_spending_warning_says_where_it_appears_and_when_it_cannot(fx: Fakes) -> None:
+    fx.ui.script = ["", "", "show", "budget", "3", "done"]
+    assert run("advanced") == 0
+    assert "a warning appears in the study's progress messages" in fx.ui.output
+    assert "prices only for DeepSeek" not in fx.ui.output
+
+    fx.write_settings(provider="openai")
+    fx.ui.lines.clear()
+    fx.ui.script = ["", "", "show", "budget", "3", "done"]
+    assert run("advanced") == 0
+    # Only DeepSeek's models have prices, so the warning can never fire here.
+    assert "prices only for DeepSeek's models" in fx.ui.output and "will not appear" in fx.ui.output
+
+
 def _venue_labels(fx: Fakes) -> dict[str, str]:
     menu = [choices for kind, message, choices in fx.ui.prompts if message == "Default venue"]
     assert menu, "the Default venue menu was not shown"
