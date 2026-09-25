@@ -572,6 +572,9 @@ main() {
         fi
         EXPECTED=$(tr -d '\r' <"$TMP_DIR/SHA256SUMS" \
             | awk -v n="$TAR_NAME" '$2 == n || $2 == "*" n {print tolower($1); exit}')
+        if [ -z "$EXPECTED" ] && [ "$SOURCE_KIND" = "local-archive" ] && [ -s "$TMP_DIR/SHA256SUMS" ]; then
+            warn "The SHA256SUMS next to $FROM_LOCAL does not list $TAR_NAME, so its fingerprint cannot be checked."
+        fi
         if [ -n "$EXPECTED" ]; then
             ACTUAL=$(sha256_of "$TARBALL")
             [ "$ACTUAL" = "$EXPECTED" ] \

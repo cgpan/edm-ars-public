@@ -660,6 +660,9 @@
             foreach ($line in (Get-Content -LiteralPath $sums)) {
                 if ($line -match '^([0-9a-fA-F]{64})[ *]{1,2}(\S+)\s*$' -and $Matches[2] -eq $tarName) { $expected = $Matches[1].ToLowerInvariant(); break }
             }
+            if ((-not $expected) -and ($sourceKind -eq 'local-archive') -and (Get-Content -LiteralPath $sums | Where-Object { $_.Trim() })) {
+                Warn "The SHA256SUMS next to $FromLocal does not list $tarName, so its fingerprint cannot be checked."
+            }
             if ($expected) {
                 $actual = Get-Sha256 $tarball
                 if ($actual -ne $expected) {
