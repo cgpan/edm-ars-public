@@ -466,17 +466,32 @@ def _resumable(code: str, status: dict[str, Any] | None) -> bool:
     return code not in _NOT_RESUMABLE
 
 
+def step_words(stage: str | None) -> str | None:
+    """A pipeline state name as the step's title in the step list, for use
+    mid-sentence: ENGINEERING -> "preparing the data"."""
+    if not stage:
+        return None
+    stages = messages().get("stages") or {}
+    entry = stages.get(str(stage).upper()) if isinstance(stages, dict) else None
+    title = entry.get("title") if isinstance(entry, dict) else None
+    if not title:
+        return str(stage).replace("_", " ").lower()
+    title = str(title)
+    return title[:1].lower() + title[1:]
+
+
 def _stopped(run_dir: Path, state: RunState, code: str, message: str,
              stage: str | None, final: str | None,
              status: dict[str, Any] | None = None) -> Outcome:
     entry = failure_entry(code)
-    ctx = _ctx(run_dir, state, reason=message or "no details recorded", stage=stage)
+    step = step_words(stage)
+    ctx = _ctx(run_dir, state, reason=message or "no details recorded", stage=step)
     title = fill(entry.get("title"), **ctx) or code
     labels = messages().get("outcomes") or {}
     resumable = _resumable(code, status)
     headline = title
-    if stage:
-        headline = f"{title} (during: {stage.lower()})"
+    if step:
+        headline = f"{title} (during: {step})"
     return Outcome(
         label=str(labels.get("stopped", "Stopped")),
         headline=headline,
@@ -777,5 +792,6 @@ __all__ = [
     "load_findings",
     "messages",
     "quote_path",
+    "step_words",
     "redact",
 ]

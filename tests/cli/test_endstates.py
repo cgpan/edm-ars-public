@@ -283,6 +283,8 @@ def test_aborted_with_code_from_run_status(run_home: Path, code: str) -> None:
     assert out.code == code
     entry = messages()["failures"][code]
     assert out.title == entry["title"]
+    # The step's title from the step list, not the pipeline's state name.
+    assert out.headline == f"{entry['title']} (during: preparing the data)"
     assert out.why and out.fix and out.commands
     assert "{run}" not in (out.command or "") and str(run.name) in (out.command or "") \
         or code in ("CRITIC_ABORT",)
