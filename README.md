@@ -13,7 +13,8 @@ output before anything is called finished.
 > **Version 5.** Five study types, ten certified estimators, four curated
 > datasets, 70 composable skill units, ~3,000 automated tests. A complete gated
 > paper takes 18–46 minutes and costs about **$0.15** in API spend at DeepSeek
-> rates (measured, not estimated — see [Cost](#cost)).
+> rates (token counts measured on one instrumented run, priced at the rates in
+> `config.yaml`, one of which is not yet verified — see [Cost](#cost)).
 
 ## Disclaimer and privacy
 
@@ -524,9 +525,12 @@ reports `null`, never `$0`** — and because raw counts are stored, changing a r
 re-prices historical runs without re-running them.
 
 Verify the rates against your provider's current price list before quoting a
-figure; they are operator input, not a measurement. `pipeline.cost_budget_usd`
-only logs a warning; it never stops a run, so set a spending limit with your
-provider.
+figure; they are operator input, not a measurement. One shipped rate,
+`deepseek-flash` (the outline and verifier stages), is marked `verified: false`;
+a run that uses a model whose rate is unverified never has its cost labelled
+`measured` in `run_cost.json`: it says `estimated`, or `partial` when some
+model has no rate at all. `pipeline.cost_budget_usd` only logs a warning; it
+never stops a run, so set a spending limit with your provider.
 
 ---
 

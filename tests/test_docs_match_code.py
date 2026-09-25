@@ -275,3 +275,25 @@ def test_author_instructions_match_the_templates_and_writer() -> None:
     writer = object.__new__(Writer)
     writer.config = config
     assert writer._author_line() == "EDM-ARS, Your Name"
+
+
+def test_readme_cost_headline_matches_how_run_cost_labels_it() -> None:
+    """The headline called the $0.15 figure "measured, not estimated",
+    while src/cost.py labels a run priced with an unverified rate
+    ``estimated`` and the shipped config routes the outline stage to one."""
+    from src.config import load_config
+    from src.cost import TokenUsage, load_pricing, summarize
+
+    readme = " ".join(_readme().split())
+    assert "measured, not estimated" not in readme
+    config = load_config(str(ROOT / "config.yaml"))
+    models = config["deepseek"]["models"]
+    calls = [
+        TokenUsage(agent=agent, model=models[agent], provider="deepseek",
+                   prompt_tokens=1000, completion_tokens=100)
+        for agent in ("writer", "outline_agent")
+    ]
+    status = summarize(calls, load_pricing(config)).cost_status
+    if status != "measured":
+        assert status == "estimated"
+        assert "not yet verified" in readme
