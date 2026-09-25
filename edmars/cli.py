@@ -824,8 +824,18 @@ def runs_cmd(
         question = pick(item, "question", "research_question")
         if len(question) > 60:
             question = question[:57] + "..."
-        rows.append([folder, pick(item, "started", "started_at"), pick(item, "label", "state", "status"), question])
+        started = _local_time(pick(item, "started", "started_at"))
+        rows.append([folder, started, pick(item, "label", "state", "status"), question])
     ui.table(["Study", "Started", "State", "Question"], rows)
+
+
+def _local_time(value: str) -> str:
+    """A UTC ISO time as local "YYYY-MM-DD HH:MM", the clock the live view
+    uses. ``--json`` keeps the UTC value."""
+    from edmars.runstate import parse_ts
+
+    ts = parse_ts(value) if value else None
+    return ts.astimezone().strftime("%Y-%m-%d %H:%M") if ts is not None else value
 
 
 @app.command("results")

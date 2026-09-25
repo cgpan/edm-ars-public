@@ -478,6 +478,21 @@ def test_runs_lists_and_prints_json(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert "No studies yet" in invoke("runs").output
 
 
+def test_runs_shows_start_times_in_local_time(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The live view shows local times; `edmars runs` used to print the raw
+    # UTC value (2026-09-25T21:02:01Z) for the same study.
+    from datetime import datetime, timezone
+
+    utc = "2026-09-25T21:02:01Z"
+    local = datetime(2026, 9, 25, 21, 2, 1, tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    items = [{"name": "2026-09-25_1702_gpa_ab12", "started_at": utc, "label": "Ready", "question": "Q?"}]
+    fake_module(monkeypatch, "runner", list_runs=lambda s: items)
+    result = invoke("runs")
+    assert result.exit_code == 0
+    assert local in result.output and utc not in result.output
+    assert json.loads(invoke("runs", "--json").stdout)[0]["started_at"] == utc
+
+
 # --- data ----------------------------------------------------------------------------------
 
 
