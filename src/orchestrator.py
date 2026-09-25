@@ -1343,13 +1343,20 @@ class Orchestrator:
         if not warning:
             return
         self._log("Orchestrator", f"WARNING: {warning}")
-        events.emit(
-            self.ctx,
-            "warning",
-            stage=self.ctx.current_state,
-            code="LITERATURE_DEGRADED",
-            message=warning,
-        )
+        lit = getattr(self.ctx, "literature_context", None)
+        if not isinstance((lit or {}).get("retrieval_status"), dict):
+            # The ProblemFormulator emits this warning event itself
+            # whenever it writes a degraded retrieval_status; announcing
+            # it here as well would put it in the event stream twice.
+            # Only a context without that block (an older checkpoint, a
+            # path that skipped the search) is announced from here.
+            events.emit(
+                self.ctx,
+                "warning",
+                stage=self.ctx.current_state,
+                code="LITERATURE_DEGRADED",
+                message=warning,
+            )
         if warning not in self.ctx.errors:
             self.ctx.errors.append(warning)
 
