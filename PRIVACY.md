@@ -27,7 +27,8 @@ occasionally small excerpts inside error messages or printed output.
 
 Apart from the Docker case above, EDM-ARS downloads nothing by itself. You
 download the datasets, LSAR, LaTeX and R packages yourself, and those sites
-see ordinary download requests.
+see ordinary download requests. (If MiKTeX is set to install missing packages
+on the fly, compiling a paper can make MiKTeX download LaTeX packages.)
 
 Each AI service handles what it receives under its own terms and privacy
 policy, including where it is processed, how long it is kept, and whether it
