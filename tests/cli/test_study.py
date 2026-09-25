@@ -448,6 +448,103 @@ def test_preflight_adds_a_language_note() -> None:
     assert notes and notes[0].status == "info" and "English" in notes[0].detail
 
 
+def _late_treatment_plan() -> StudyPlan:
+    """A causal plan whose cause (11th grade) comes after its outcome (9th)."""
+    spec = study.build_menu_spec(
+        {}, "causal_soo", "hsls09_public",
+        {"treatment": "X1MTHEFF", "outcome": "X4EVRATNDCLG"},
+    )
+    spec["treatment"]["variable"] = "X2MTHEFF"
+    spec["outcome"]["variable"] = "X1TXMTSCOR"
+    return StudyPlan("causal_soo", "hsls09_public", spec["research_question"],
+                     spec=spec, experimental=True)
+
+
+_DEVELOPER_WORDS = ("Why:", "temporal_order", "registry wave", "role=", "['",
+                    "Tier-", "predicate", "dispatch", ".yaml")
+
+
+def test_preflight_explains_a_blocking_check_in_plain_words() -> None:
+    checks = study.preflight(_late_treatment_plan(), {}, run_probes=False)
+    order = next(c for c in checks if c.name == "Earlier measures come before the outcome")
+    assert order.status == "fail"
+    assert "X2MTHEFF is measured in 2012 (11th grade), after the outcome" in order.detail
+    assert "The outcome X1TXMTSCOR is measured in 2009 (9th grade)" in order.detail
+    assert order.fix == "Choose an outcome measured after the other variables."
+    for check in checks:
+        for word in _DEVELOPER_WORDS:
+            assert word not in check.detail, (check.name, check.detail)
+
+
+def test_preflight_technical_detail_only_in_debug_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EDMARS_DEBUG", "1")
+    checks = study.preflight(_late_treatment_plan(), {}, run_probes=False)
+    order = next(c for c in checks if c.name == "Earlier measures come before the outcome")
+    assert "[Technical detail: F-TEMPORAL-ORDER:" in order.detail
+
+
+def test_passing_screen_checks_carry_no_developer_text(raw_dir: Path) -> None:
+    install_data(
+        raw_dir, "hsls09_public",
+        "X1MTHEFF,X4EVRATNDCLG,X1SEX\n0.5,Yes,Male\n-0.2,No,Female\n",
+    )
+    plan = study.plan_from_flags({}, example="x1mtheff_x4college")
+    for check in study.preflight(plan, {}):
+        for word in _DEVELOPER_WORDS + ("Analytic n", "Minority class"):
+            assert word not in check.detail, (check.name, check.detail)
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "fragment"),
+    [
+        ("F-VAR-ABSENT", "Variable(s) do not exist in this dataset: FOO, BAR.",
+         "These variables are not in HSLS:09: FOO, BAR."),
+        ("F-TIER3-EXCLUDED", "Tier-3 excluded name(s) used as study variables: "
+         "W1STUDENT. These are weights, sampling/administrative IDs, or "
+         "processing flags.", "not measures of students: W1STUDENT."),
+        ("F-DEAD-VARIABLE", "Variable(s) carry no usable data: X1ASIAN "
+         "(100.0% missing).", "suppressed or empty): X1ASIAN (100.0% missing)."),
+        ("F-ESTIMATOR-UNCERTIFIED", "Estimator(s) RD are certified on synthetic "
+         "DGPs but shelved: no executable task type implements them.",
+         "cannot run these methods for this kind of study yet: RD."),
+        ("F-SPEC-INCOMPLETE", "Spec cannot be dispatched as causal_soo: missing "
+         "treatment, outcome.", "missing parts the pipeline needs: treatment, outcome."),
+    ],
+)
+def test_blocking_checks_name_the_offending_parts(
+    code: str, message: str, fragment: str
+) -> None:
+    from src.ideation.feasibility import KILL, CheckResult, FeasibilityReport
+
+    report = FeasibilityReport(
+        "t", KILL, [CheckResult(code, KILL, message, "evidence ['x']")],
+        dataset="hsls09_public", task_type="causal_soo",
+    )
+    (check,) = study._map_report(report)
+    assert check.status == "fail"
+    assert fragment in check.detail
+    assert "evidence" not in check.detail
+
+
+def test_run_shows_only_names_for_passing_checks(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from edmars import cli, ui
+
+    ui.set_plain(True)
+    cli._show_study_checks([
+        Check("Enough students with usable data", "ok", "Passed."),
+        Check("Earlier measures come before the outcome", "fail", "X is too late.",
+              "Choose an outcome measured after the other variables."),
+    ])
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "Enough students with usable data" in out and "Passed." not in out
+    assert "X is too late." in out and "Choose an outcome" in out
+
+
 # --------------------------------------------------------------------------
 # Out of scope, language, "Not sure"
 # --------------------------------------------------------------------------

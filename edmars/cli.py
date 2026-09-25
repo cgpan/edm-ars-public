@@ -390,6 +390,16 @@ def _launch(settings: dict[str, Any], plan: Any, *, watch: bool) -> None:
     _after_start(run_dir, watch)
 
 
+def _show_study_checks(checks: list[Any]) -> None:
+    """The free check's list: only the name of a check that passed, as
+    ``edmars new`` shows it; problems keep their sentence and their fix."""
+    for check in checks:
+        if check.status == "ok":
+            ui.ok(check.name)
+        else:
+            ui.show_checks([check])
+
+
 def _preflight_confirm_launch(settings: dict[str, Any], plan: Any, *, yes: bool, watch: bool) -> None:
     """``edmars run``: check the plan, show the confirmation card, start it."""
     study = _module("study")
@@ -398,7 +408,7 @@ def _preflight_confirm_launch(settings: dict[str, Any], plan: Any, *, yes: bool,
         "can take a few minutes)"
     ):
         checks = study.preflight(plan, settings)
-    ui.show_checks(checks)
+    _show_study_checks(checks)
     if study.blocking(checks):
         ui.fail("This study cannot start until the problems above are fixed.")
         raise typer.Exit(1)

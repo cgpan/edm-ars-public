@@ -1649,8 +1649,238 @@ def _check_title(code: str) -> str:
     return _CHECK_TITLES.get(code, code)
 
 
+def _after_colon(message: str) -> str:
+    """The list at the end of a check message ("...: A, B." -> "A, B")."""
+    match = re.search(r":\s*([^:]+?)\.?\s*$", str(message or ""))
+    return match.group(1).strip() if match else ""
+
+
+def _wave_phrase(registry: dict, wave: str) -> str:
+    """ "first_follow_up" -> "2012 (11th grade)", read from the registry."""
+    info = ((registry or {}).get("waves") or {}).get(wave) or {}
+    year, label = info.get("year"), info.get("label")
+    if year and label:
+        return f"{year} ({label})"
+    return str(label or year or wave.replace("_", " "))
+
+
+def _plain_temporal(message: str, registry: dict) -> str | None:
+    """ "X2MTHEFF is measured in 2012 (11th grade), after the outcome ..."."""
+    outcome = re.search(r"outcome '([^']+)' \(wave=(\w+)\)", message)
+    late = re.findall(r"(\w+) \(registry wave=(\w+), role=\w+\)", message)
+    if not outcome or not late:
+        return None
+    name, outcome_wave = outcome.groups()
+    by_wave: dict[str, list[str]] = {}
+    for var, wave in late:
+        by_wave.setdefault(wave, [])
+        if var not in by_wave[wave]:
+            by_wave[wave].append(var)
+    parts: list[str] = []
+    for wave, names in by_wave.items():
+        when = "at the same time as" if wave == outcome_wave else "after"
+        verb = "is" if len(names) == 1 else "are"
+        parts.append(
+            f"{', '.join(names)} {verb} measured in {_wave_phrase(registry, wave)}, "
+            f"{when} the outcome"
+        )
+    return (
+        "; ".join(parts)
+        + f". The outcome {name} is measured in {_wave_phrase(registry, outcome_wave)}. "
+        "A cause or predictor has to be measured before the outcome."
+    )
+
+
+_PITFALL_PLAIN: dict[str, str] = {
+    "protected_attribute_misuse": "the plan uses sex, race or family income as "
+    "an input but does not compare results across those groups",
+    "school_level_misinterpretation": "the plan mentions a school-level "
+    "(multilevel) model, but the public data file hides which school each "
+    "student attends",
+    "public_use_suppression": "some variables hold only 'data suppressed' codes "
+    "in the public file",
+    "non_equated_tests": "the plan talks about test scores rising, but the two "
+    "cohorts took different tests, so only changes in rank can be compared",
+}
+
+
+def _plain_fail(result: Any, report: Any, registry: dict) -> str:
+    """One plain sentence for a check that blocks the study."""
+    code, message = str(result.code), str(result.message)
+    names = _after_colon(message)
+    dataset = str(getattr(report, "dataset", "") or "")
+    task_type = str(getattr(report, "task_type", "") or "")
+    short = _dataset_short(dataset) if dataset else "this dataset"
+    if code == "F-TASK-INCOMPATIBLE":
+        return unsupported_reason(dataset, task_type) or (
+            f"{short} cannot support this kind of study."
+        )
+    if code == "F-VAR-ABSENT" and names:
+        return f"These variables are not in {short}: {names}."
+    if code == "F-COL-ABSENT" and names:
+        return f"These variables are not in the data file on this computer: {names}."
+    if code == "F-TEMPORAL-ORDER":
+        plain = _plain_temporal(message, registry)
+        if plain:
+            return plain
+    if code == "F-TIER3-EXCLUDED":
+        match = re.search(r"study variables: (.+?)\. These are", message)
+        if match:
+            return (
+                "These are survey weights, ID numbers or processing flags, not "
+                f"measures of students: {match.group(1)}."
+            )
+    if code == "F-DEAD-VARIABLE" and names:
+        return (
+            "These variables have no usable data in the public file (they are "
+            f"suppressed or empty): {names}."
+        )
+    if code == "F-ESTIMATOR-UNCERTIFIED":
+        shelved = re.search(r"Estimator\(s\) (.+?) are certified", message)
+        listed = shelved.group(1) if shelved else names
+        if listed:
+            return (
+                "EDM-ARS cannot run these methods for this kind of study yet: "
+                f"{listed}."
+            )
+    if code == "F-DESIGN-INFEASIBLE":
+        return (
+            f"This study design cannot be carried out with {short}, so the "
+            f"{TASK_LABELS.get(task_type, 'study')} would not be trustworthy."
+        )
+    if code == "F-SPEC-INCOMPLETE":
+        match = re.search(r"missing (.+?)\.?\s*$", message)
+        if match:
+            return (
+                "The study plan is missing parts the pipeline needs: "
+                f"{match.group(1)}."
+            )
+    if code == "F-NO-PROTECTED-ATTRS":
+        return (
+            "The question compares groups of students, but this dataset has no "
+            "group variables (such as sex, race or family income) to compare."
+        )
+    if code == "F-ITEM-BANK-TOO-FEW" and names:
+        return (
+            "A scale needs at least 3 survey items to be modelled, and these "
+            f"have fewer: {names}."
+        )
+    return message
+
+
+def _plain_warn(result: Any, report: Any) -> str:
+    """One plain sentence for a check that does not block the study."""
+    code, message = str(result.code), str(result.message)
+    names = _after_colon(message)
+    if code.startswith("F-CHECK-ERROR"):
+        return "This automatic check could not run. It does not stop the study."
+    if code == "F-VAR-ABSENT" and names:
+        if "not curated" in message:
+            return (
+                "These variables are in the data, but EDM-ARS has no notes on "
+                "them, so when they were measured and how much is missing was "
+                f"not checked: {names}."
+            )
+        return (
+            "These variables could not be checked because the data file is not "
+            f"on this computer: {names}."
+        )
+    if code == "F-METADATA-UNVERIFIED":
+        return (
+            "Some variables have no notes in EDM-ARS, so when they were "
+            "measured and how much is missing could not be checked."
+        )
+    if code == "F-SUBGROUP-VAR-UNKNOWN" and names:
+        return f"These group variables were not found in the dataset: {names}."
+    if code == "F-PITFALL-TOUCHED":
+        fired = [
+            _PITFALL_PLAIN.get(part.split(":", 1)[0].strip())
+            for part in message.partition(":")[2].split(";")
+        ]
+        plain = [p for p in fired if p]
+        if plain:
+            return "Known problem with this dataset: " + "; ".join(plain) + "."
+        return "The plan touches a known problem with this dataset."
+    if code == "F-NO-PROTECTED-ATTRS":
+        return (
+            "The question sounds like it compares groups of students, but this "
+            "dataset has no group variables (such as sex or race), so that part "
+            "cannot be supported."
+        )
+    if code == "F-SPEC-INCOMPLETE":
+        return (
+            "The pipeline's study-plan check noted small issues. They do not "
+            "stop the study."
+        )
+    if code in ("F-TASK-INCOMPATIBLE", "F-DESIGN-INFEASIBLE", "F-TIER3-EXCLUDED"):
+        return "This could not be checked for this dataset. It does not stop the study."
+    if code == "P-ANALYTIC-N":
+        match = re.search(r"Analytic n = ([\d,]+) of ([\d,]+) rows", message)
+        if match:
+            usable, total = match.groups()
+            if "abort floor" in message:
+                return (
+                    f"Only about {usable} of {total} students have usable data. "
+                    "The pipeline stops when fewer than 1,000 students are usable."
+                )
+            return (
+                f"About {usable} of {total} students have usable data. A "
+                "prediction study works best with at least 10,000."
+            )
+    if code == "P-CLASS-BALANCE":
+        match = re.search(r"minority class = ([\d.]+%)", message)
+        if match:
+            return (
+                f"Only {match.group(1)} of students are in the smaller outcome "
+                "group, so the outcome is hard to predict well."
+            )
+    if code == "P-POSITIVITY":
+        match = re.search(r"probe: ([\d.]+%)", message)
+        if match:
+            return (
+                f"For {match.group(1)} of students, the data almost decide "
+                "whether they got the treatment, so treated and untreated "
+                "students may be too different to compare fairly."
+            )
+    if code == "P-DID-CELLS":
+        cells = re.search(r"only (\d+) populated cell", message)
+        if cells:
+            return (
+                f"Only {cells.group(1)} of the four group-by-cohort cells have "
+                "students; the comparison needs all four."
+            )
+        smallest = re.search(r"has (\d+) rows", message)
+        if smallest:
+            return (
+                f"The smallest group-by-cohort cell has only {smallest.group(1)} "
+                "students."
+            )
+    if code == "P-CDM-SCOPE":
+        match = re.search(r"Only (\d+) item", message)
+        if match:
+            return (
+                f"Only {match.group(1)} problems were answered by at least 300 "
+                "students; skill models need more."
+            )
+    return message
+
+
+def _technical(result: Any) -> str:
+    """The check's own wording, shown only with EDMARS_DEBUG=1."""
+    if os.environ.get("EDMARS_DEBUG", "").strip() in ("", "0"):
+        return ""
+    return f" [Technical detail: {result.code}: {result.message} {result.evidence}]"
+
+
 def _map_report(report: Any) -> list[Check]:
     from src.ideation.feasibility import KILL, WARN
+
+    registry: dict = {}
+    if getattr(report, "dataset", None):
+        try:
+            registry = _registry(str(report.dataset))
+        except Exception:
+            registry = {}
 
     out: list[Check] = []
     skipped: list[str] = []
@@ -1661,25 +1891,23 @@ def _map_report(report: Any) -> list[Check]:
                 Check(
                     title,
                     "fail",
-                    f"{result.message} Why: {result.evidence}",
+                    _plain_fail(result, report, registry) + _technical(result),
                     _KILL_FIXES.get(result.code, _DEFAULT_KILL_FIX),
                 )
             )
         elif result.status == WARN:
-            out.append(Check(title, "warn", result.message))
+            out.append(
+                Check(title, "warn", _plain_warn(result, report) + _technical(result))
+            )
         elif str(result.message).startswith("Skipped"):
             skipped.append(re.sub(r"^Skipped:\s*", "", result.message).rstrip("."))
         else:
-            out.append(Check(title, "ok", result.message))
+            out.append(Check(title, "ok", "Passed." + _technical(result)))
     if skipped:
-        shown = "; ".join(skipped[:3]) + ("; ..." if len(skipped) > 3 else "")
-        out.append(
-            Check(
-                "Checks that did not apply",
-                "info",
-                f"{len(skipped)} automatic check(s) were skipped ({shown}).",
-            )
-        )
+        detail = f"{len(skipped)} automatic check(s) did not apply to this study."
+        if os.environ.get("EDMARS_DEBUG", "").strip() not in ("", "0"):
+            detail += f" [Technical detail: {'; '.join(skipped)}]"
+        out.append(Check("Checks that did not apply", "info", detail))
     return out
 
 

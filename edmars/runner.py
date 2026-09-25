@@ -560,6 +560,47 @@ _FINDING_FIXES = {
 }
 
 
+#: Provider ids as people know them.
+_PROVIDER_NAMES = {
+    "deepseek": "DeepSeek",
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "minimax": "MiniMax",
+}
+
+
+def _plain_finding(code: str, message: str) -> str:
+    """The pipeline's finding in words for a non-programmer.
+
+    The pipeline names its internal step ids ("problem_formulator,
+    data_engineer, ...") and environment variables; the user only needs
+    to know which service's key or setting is missing.
+    """
+    from edmars.wizard import STAGE_LABELS
+
+    if code == "KEY_MISSING":
+        match = re.search(r"the (\w+) provider needs it for: (.+?)\.?\s*$", message)
+        if match:
+            provider = _PROVIDER_NAMES.get(match.group(1), match.group(1))
+            steps = [s.strip() for s in match.group(2).split(",") if s.strip()]
+            labels = [STAGE_LABELS.get(s, s.replace("_", " ")) for s in steps]
+            return (
+                f"No {provider} key is saved on this computer, and the study "
+                f"needs one for {len(labels)} step(s): {', '.join(labels)}."
+            )
+    if code == "LSAR_KEY_MISSING":
+        return (
+            "No DeepSeek key is saved on this computer. The automated reviewer "
+            "always uses DeepSeek, so the review would fail."
+        )
+    if code == "PROVIDER_CONFIG_INVALID":
+        match = re.search(r"setting for (\w+) is not valid: (.+)$", message)
+        if match:
+            step = STAGE_LABELS.get(match.group(1), match.group(1).replace("_", " "))
+            return f"The AI model setting for the step '{step}' is not valid: {match.group(2)}"
+    return message
+
+
 def pipeline_check(settings: dict[str, Any], plan: "StudyPlan", *,
                    timeout_s: float = 300) -> list[Any]:
     """Run the pipeline's own ``--dry-run`` with exactly the config, spec and
@@ -634,7 +675,7 @@ def pipeline_check(settings: dict[str, Any], plan: "StudyPlan", *,
         checks.append(Check(
             _FINDING_TITLES.get(code, code.replace("_", " ").capitalize() or "Pipeline check"),
             severity,
-            edsecrets.redact(str(item.get("message") or code)),
+            edsecrets.redact(_plain_finding(code, str(item.get("message") or code))),
             edsecrets.redact(fix) or None,
         ))
     if not checks:

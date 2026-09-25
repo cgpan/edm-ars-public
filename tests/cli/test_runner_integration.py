@@ -124,6 +124,26 @@ def test_pipeline_check_reports_the_pipelines_findings_in_edmars_words(
     assert not any(Path(settings["studies_dir"]).glob("*"))
 
 
+def test_pipeline_check_names_the_service_not_the_agent_ids(
+        settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    # The pipeline's own wording (src/preflight.py), step ids and all.
+    summary = {"checks": [
+        {"code": "KEY_MISSING", "severity": "fail",
+         "message": "DEEPSEEK_API_KEY is not set; the deepseek provider needs it for: "
+                    "problem_formulator, data_engineer, analyst, critic, writer, outline_agent."},
+        {"code": "LSAR_KEY_MISSING", "severity": "warn",
+         "message": "DEEPSEEK_API_KEY is not set; LSAR's review and scoring stages "
+                    "are pinned to DeepSeek, so the review gate will fail."},
+    ]}
+    monkeypatch.setattr(proc, "run", DryRun(json.dumps(summary) + "\n"))
+    key, reviewer = runner.pipeline_check(settings, _plan())
+    assert "No DeepSeek key is saved" in key.detail
+    assert "framing the question" in key.detail and "writing the paper" in key.detail
+    for word in ("problem_formulator", "data_engineer", "outline_agent", "provider"):
+        assert word not in key.detail
+    assert "LSAR" not in reviewer.detail and "automated reviewer" in reviewer.detail
+
+
 def test_pipeline_check_passes_and_explains_a_crash(settings: dict[str, Any],
                                                     monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc, "run", DryRun(json.dumps({"checks": []}), returncode=0))
