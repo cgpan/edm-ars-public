@@ -664,3 +664,21 @@ class TestRoutingTable:
         rows = {r["stage"]: r for r in describe_routing(cfg, ("critic", "outline_agent"))}
         assert rows["critic"]["error"] is None
         assert "models.outline_agent" in rows["outline_agent"]["error"]
+
+    def test_shipped_config_switched_to_anthropic_passes_routing(self) -> None:
+        """config.yaml documents `llm_provider: anthropic` as a one-line
+        switch that "uses the `models:` block". Outline-first is on by
+        default, so that block must name the outline stage too, or the
+        pre-flight refuses the documented setup."""
+        from src.agents.llm_client import describe_routing
+        from src.config import load_config
+        from src.preflight import llm_stages
+
+        cfg = load_config(str(ROOT / "config.yaml"))
+        cfg["llm_provider"] = "anthropic"
+        stages = llm_stages(cfg)
+        assert "outline_agent" in stages
+        rows = {r["stage"]: r for r in describe_routing(cfg, tuple(stages))}
+        assert {s: r["error"] for s, r in rows.items() if r["error"]} == {}
+        assert rows["critic"]["model"] == "claude-opus-4-6"
+        assert rows["outline_agent"]["model"] == "claude-sonnet-4-6"

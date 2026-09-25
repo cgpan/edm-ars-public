@@ -19,13 +19,18 @@ llm_provider: deepseek   # deepseek | openai | anthropic | minimax
 
 # Model per agent for llm_provider: anthropic. The loader requires this
 # block to exist whichever provider is active; with any other provider
-# it is not used.
+# it is not used. Anthropic has no built-in fallback model, so every
+# stage a run calls needs a line here (the pre-flight refuses a run
+# that is missing one).
 models:
   problem_formulator: claude-sonnet-4-6
   data_engineer: claude-sonnet-4-6
   analyst: claude-sonnet-4-6
   critic: claude-opus-4-6
   writer: claude-sonnet-4-6
+  outline_agent: claude-sonnet-4-6    # called while writer.outline_first is true
+  # revision_writer: claude-sonnet-4-6  # review gate revisions; defaults to writer
+  # verifier: claude-sonnet-4-6         # only with verification.judge_enabled; must accept images
 
 # DeepSeek model config (used when llm_provider: deepseek)
 # Requires DEEPSEEK_API_KEY (an environment variable, or a line in the
