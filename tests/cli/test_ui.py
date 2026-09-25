@@ -37,7 +37,8 @@ def fancy_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- modes -----------------------------------------------------------------------
 
 
-def test_output_that_is_not_a_terminal_is_plain() -> None:
+def test_output_that_is_not_a_terminal_is_plain(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ui, "_isatty", lambda stream: False)
     assert ui.is_plain()
     assert ui.plain_reason() == "output is not a terminal"
 
@@ -79,6 +80,7 @@ def test_glyphs_fall_back_when_the_terminal_cannot_encode_them(monkeypatch: pyte
 
 
 def test_messages_carry_glyphs_and_go_to_the_right_stream(capsys: pytest.CaptureFixture[str]) -> None:
+    ui.set_plain(True)
     ui.ok("all good")
     ui.info("a fact")
     ui.warn("careful")
@@ -90,6 +92,7 @@ def test_messages_carry_glyphs_and_go_to_the_right_stream(capsys: pytest.Capture
 
 
 def test_machine_output_moves_everything_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    ui.set_plain(True)
     ui.set_machine_output(True)
     ui.ok("done")
     ui.say("plain line")
@@ -99,6 +102,7 @@ def test_machine_output_moves_everything_to_stderr(capsys: pytest.CaptureFixture
 
 
 def test_show_checks_prints_fixes_for_problems(capsys: pytest.CaptureFixture[str]) -> None:
+    ui.set_plain(True)
     ui.show_checks(
         [
             Check("Python", "ok", "3.11"),
@@ -113,6 +117,7 @@ def test_show_checks_prints_fixes_for_problems(capsys: pytest.CaptureFixture[str
 
 
 def test_panel_and_table_are_plain_ascii(capsys: pytest.CaptureFixture[str]) -> None:
+    ui.set_plain(True)
     ui.panel("Ready to start", "Question: does X predict Y?\nType: prediction\n")
     ui.table(["Study", "State"], [["2026-09-25_1402_gpa_ab12", "Ready"], ["x", None]])
     out = capsys.readouterr().out
@@ -122,6 +127,7 @@ def test_panel_and_table_are_plain_ascii(capsys: pytest.CaptureFixture[str]) -> 
 
 
 def test_status_in_plain_mode_prints_one_line(capsys: pytest.CaptureFixture[str]) -> None:
+    ui.set_plain(True)
     with ui.status("Checking the data"):
         pass
     assert capsys.readouterr().out.strip() == "[i] Checking the data"
