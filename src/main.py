@@ -13,15 +13,17 @@ Exit codes, for a batch harness or the ``edmars`` front end:
 """
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
+import signal
 import sys
 import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Iterator, NoReturn
 
 import yaml
 from dotenv import load_dotenv
@@ -1230,7 +1232,12 @@ def _run(plan: _Plan, args: argparse.Namespace) -> int:
 
     print(f"Run folder: {plan.output_dir}", file=_human_stream(args))
     invocation_start = datetime.now().timestamp()
-    result_ctx = orchestrator.run(user_prompt=args.prompt)
+    try:
+        result_ctx = orchestrator.run(user_prompt=args.prompt)
+    except KeyboardInterrupt as exc:
+        return _interrupted(plan, args, orchestrator, exc, invocation_start)
+    except Exception as exc:  # noqa: BLE001 - every escape is reported
+        return _crashed(plan, args, orchestrator, exc, invocation_start)
 
     state = _state_name(result_ctx.current_state)
     path, status = _current_status(
@@ -1242,6 +1249,184 @@ def _run(plan: _Plan, args: argparse.Namespace) -> int:
         plan, args, state, path, status,
         errors=list(result_ctx.errors or []),
         abort_info=getattr(result_ctx, "abort_info", None),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ctrl-C, termination signals and crashes (D4)
+#
+# Before this, Ctrl-C or an exception escaping a stage ended the process
+# with a raw traceback, no run_cost.json, no line in pipeline.log saying
+# the run had stopped, and -- for a default run -- no mention of the
+# folder the README's resume command needs. The orchestrator's
+# finalize_interrupted() (orchestrator package) now saves a resumable
+# checkpoint and writes run_status.json / run_cost.json; this side turns
+# the event into an exit code, a readable message and, for a crash,
+# <run>/crash.log with the traceback.
+# ---------------------------------------------------------------------------
+
+
+class _StopRequested(KeyboardInterrupt):
+    """A termination signal, raised where Ctrl-C would be.
+
+    A KeyboardInterrupt subclass on purpose: every stage runner catches
+    ``Exception``, which lets both pass through to the same handling.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"signal {signum}")
+        self.signum = signum
+
+
+#: Signals treated like Ctrl-C when present on this platform. SIGBREAK is
+#: what Windows delivers to a process group on Ctrl-Break, the graceful
+#: stop available to a parent that started the run detached.
+_STOP_SIGNALS = ("SIGTERM", "SIGBREAK", "SIGHUP")
+
+
+@contextlib.contextmanager
+def _stop_signals_interrupt() -> Iterator[None]:
+    """Turn the first termination signal into a _StopRequested; ignore
+    repeats while the run is being wound down. Restores the previous
+    handlers on exit (main() is also called in-process by tests)."""
+    fired: list[int] = []
+
+    def _handler(signum: int, frame: Any) -> None:
+        if fired:
+            return
+        fired.append(signum)
+        raise _StopRequested(signum)
+
+    previous: dict[int, Any] = {}
+    for name in _STOP_SIGNALS:
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            previous[sig] = signal.signal(sig, _handler)
+        except (ValueError, OSError):  # not the main thread, or unsupported
+            continue
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
+
+
+def _stop_reason(exc: BaseException) -> str:
+    if isinstance(exc, _StopRequested):
+        try:
+            name = signal.Signals(exc.signum).name
+        except ValueError:
+            name = f"signal {exc.signum}"
+        return f"a termination signal ({name})"
+    return "Ctrl-C"
+
+
+def _finalize(orchestrator: Any, code: str, message: str) -> None:
+    """Leave the resumable record; never raises (a second Ctrl-C included)."""
+    try:
+        finalize = getattr(orchestrator, "finalize_interrupted", None)
+        if callable(finalize):
+            finalize(code, message)
+            return
+        # An orchestrator without finalize_interrupted: the last stage-end
+        # checkpoint is still the resume point; add the cost record and a
+        # log line saying what happened.
+        log = getattr(orchestrator, "_log", None)
+        if callable(log):
+            stage = _state_name(getattr(orchestrator.ctx, "current_state", ""))
+            log("Orchestrator", f"{code} during {stage}: {message}. "
+                "The last completed step is saved; resume with --resume.")
+        write_cost = getattr(orchestrator, "_write_cost_summary", None)
+        if callable(write_cost):
+            write_cost()
+    except KeyboardInterrupt:
+        print("Stopped again while saving; the last completed step is still "
+              "saved.", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001
+        print(f"warning: could not record the stop: {_one_line(exc)}", file=sys.stderr)
+
+
+def _stop_abort_info(orchestrator: Any, code: str, message: str) -> dict:
+    """The abort record to report: the orchestrator's, else one built here."""
+    info = getattr(orchestrator.ctx, "abort_info", None)
+    if isinstance(info, dict) and info.get("stage"):
+        return info
+    stage = _state_name(getattr(orchestrator.ctx, "current_state", ""))
+    return {
+        "stage": "FORMULATING" if stage == "INITIALIZED" else stage,
+        "code": code,
+        "message": message,
+        "resumable": True,
+    }
+
+
+def _interrupted(
+    plan: _Plan,
+    args: argparse.Namespace,
+    orchestrator: Any,
+    exc: KeyboardInterrupt,
+    invocation_start: float,
+) -> int:
+    message = f"Stopped by {_stop_reason(exc)}"
+    _finalize(orchestrator, "INTERRUPTED", message)
+    path, status = _current_status(
+        plan.output_dir, str(getattr(orchestrator.ctx, "run_start_time", "") or ""),
+        invocation_start,
+    )
+    return _report(
+        plan, args, "INTERRUPTED", path, status,
+        abort_info=_stop_abort_info(orchestrator, "INTERRUPTED", message),
+    )
+
+
+def _write_crash_log(output_dir: str, stage: str, text: str) -> str | None:
+    path = os.path.join(output_dir, "crash.log")
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(
+                f"=== EDM-ARS crash at {datetime.now(timezone.utc).isoformat()} "
+                f"during {stage} ===\n"
+                f"python {sys.version.split()[0]} on {sys.platform}\n"
+                f"{text}\n"
+            )
+    except OSError:
+        return None
+    return path
+
+
+def _crashed(
+    plan: _Plan,
+    args: argparse.Namespace,
+    orchestrator: Any,
+    exc: Exception,
+    invocation_start: float,
+) -> int:
+    text = traceback.format_exc()
+    stage = _state_name(getattr(orchestrator.ctx, "current_state", ""))
+    log_path = _write_crash_log(plan.output_dir, stage, text)
+    detail = f"{type(exc).__name__}: {_one_line(exc)}"
+    _finalize(orchestrator, "CRASHED", detail)
+    if _debug(args):
+        print(text, file=sys.stderr)
+    print(
+        f"error: the run stopped because of an unexpected error: {detail}"
+        + (f" (full traceback in {log_path})" if log_path else ""),
+        file=sys.stderr,
+    )
+    path, status = _current_status(
+        plan.output_dir, str(getattr(orchestrator.ctx, "run_start_time", "") or ""),
+        invocation_start,
+    )
+    return _report(
+        plan, args, "CRASHED", path, status,
+        abort_info=_stop_abort_info(orchestrator, "CRASHED", detail),
+        detail=detail,
     )
 
 
@@ -1258,10 +1443,19 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _build_parser().parse_args(argv)
     try:
-        plan = _plan_run(args)
-        if args.dry_run:
-            return _dry_run(plan, args)
-        return _run(plan, args)
+        with _stop_signals_interrupt():
+            plan = _plan_run(args)
+            if args.dry_run:
+                return _dry_run(plan, args)
+            return _run(plan, args)
+    except KeyboardInterrupt as exc:
+        # Stopped before a run existed (during the checks or set-up).
+        print(f"Stopped by {_stop_reason(exc)} before the run started; "
+              "nothing was run.", file=sys.stderr)
+        if args.json_summary:
+            _print_json({"state": "INTERRUPTED", "exit_code": EXIT_INTERRUPTED,
+                         "started": False})
+        return EXIT_INTERRUPTED
     except UsageError as exc:
         # One readable line (or a short list) instead of a traceback: an
         # unknown dataset, a malformed spec, a missing config or key read

@@ -793,3 +793,135 @@ def test_a_real_orchestrator_run_is_summarised_from_its_own_status(
     assert ("Released: yes" if status["released"] else "Released: no") in out
     assert "PipelineState." not in out
     assert f"Run folder: {run_dir}" in out
+
+
+# ---------------------------------------------------------------------------
+# D4: Ctrl-C, termination signals and crashes
+# ---------------------------------------------------------------------------
+
+
+class _StoppingOrchestrator(_StubOrchestrator):
+    """run() raises ``raise_in_run``; records finalize_interrupted calls."""
+
+    raise_in_run: BaseException | None = None
+    finalized: list[tuple[str, str]] = []
+
+    def run(self, user_prompt: str | None = None) -> Any:
+        self.ctx.current_state = PipelineState.ANALYZING
+        exc = type(self).__dict__.get("raise_in_run")  # a function stays unbound
+        if callable(exc) and not isinstance(exc, BaseException):
+            exc()
+        assert exc is not None
+        raise exc
+
+    def finalize_interrupted(self, code: str, message: str) -> None:
+        _StoppingOrchestrator.finalized.append((code, message))
+
+
+@pytest.fixture
+def stopping(monkeypatch: pytest.MonkeyPatch) -> type[_StoppingOrchestrator]:
+    _StoppingOrchestrator.instances = []
+    _StoppingOrchestrator.finalized = []
+    monkeypatch.setattr(main_mod, "Orchestrator", _StoppingOrchestrator)
+    monkeypatch.setattr(main_mod, "check_run_prerequisites", lambda *a, **k: [])
+    return _StoppingOrchestrator
+
+
+def test_ctrl_c_during_a_run_exits_4_with_the_resume_command(
+    env: dict[str, Path], stopping: type[_StoppingOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stopping.raise_in_run = KeyboardInterrupt()
+    assert _run(env) == 4
+    out, err = capsys.readouterr()
+    assert stopping.finalized == [("INTERRUPTED", "Stopped by Ctrl-C")]
+    assert "Run interrupted during ANALYZING" in out
+    assert "--resume" in out and "Traceback" not in out + err
+
+
+def test_a_crash_writes_crash_log_and_exits_5(
+    env: dict[str, Path], stopping: type[_StoppingOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stopping.raise_in_run = RuntimeError("boom in the analyst")
+    assert _run(env) == 5
+    out, err = capsys.readouterr()
+    log = (env["root"] / "run" / "crash.log").read_text(encoding="utf-8")
+    assert "Traceback" in log and "RuntimeError: boom in the analyst" in log
+    assert "during ANALYZING" in log
+    assert stopping.finalized == [("CRASHED", "RuntimeError: boom in the analyst")]
+    assert err.count("\n") >= 1 and "Traceback" not in err
+    assert "crash.log" in err and "boom in the analyst" in err
+    assert "--resume" in out
+
+
+def test_debug_prints_the_crash_traceback(
+    env: dict[str, Path], stopping: type[_StoppingOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stopping.raise_in_run = RuntimeError("boom")
+    assert _run(env, "--debug") == 5
+    assert "Traceback" in capsys.readouterr().err
+
+
+def test_sigterm_is_handled_like_ctrl_c_and_handlers_are_restored(
+    env: dict[str, Path], stopping: type[_StoppingOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import signal
+
+    before = signal.getsignal(signal.SIGTERM)
+    stopping.raise_in_run = lambda: signal.raise_signal(signal.SIGTERM)  # type: ignore[assignment]
+    assert _run(env) == 4
+    assert stopping.finalized[0][0] == "INTERRUPTED"
+    assert "SIGTERM" in stopping.finalized[0][1]
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
+def test_an_orchestrator_without_finalize_still_exits_4(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+
+    class _Old(_StubOrchestrator):
+        def run(self, user_prompt: str | None = None) -> Any:
+            self.ctx.current_state = PipelineState.WRITING
+            raise KeyboardInterrupt
+
+        def _log(self, agent: str, message: str) -> None:
+            calls.append(message)
+
+        def _write_cost_summary(self) -> None:
+            calls.append("cost")
+
+    monkeypatch.setattr(main_mod, "Orchestrator", _Old)
+    monkeypatch.setattr(main_mod, "check_run_prerequisites", lambda *a, **k: [])
+    assert _run(env) == 4
+    assert calls[-1] == "cost" and "INTERRUPTED during WRITING" in calls[0]
+    assert "Run interrupted during WRITING" in capsys.readouterr().out
+
+
+def test_a_second_ctrl_c_while_saving_still_exits_4(
+    env: dict[str, Path], stopping: type[_StoppingOrchestrator],
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _finalize(self: Any, code: str, message: str) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_StoppingOrchestrator, "finalize_interrupted", _finalize)
+    stopping.raise_in_run = KeyboardInterrupt()
+    assert _run(env) == 4
+    assert "Stopped again while saving" in capsys.readouterr().err
+
+
+def test_ctrl_c_before_the_run_starts(
+    env: dict[str, Path], no_orchestrator: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def _stop(*a: Any, **k: Any) -> list:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(main_mod, "check_run_prerequisites", _stop)
+    assert _run(env) == 4
+    assert "before the run started" in capsys.readouterr().err
