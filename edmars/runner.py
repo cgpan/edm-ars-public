@@ -550,7 +550,7 @@ _FINDING_FIXES = {
     "PROVIDER_CONFIG_INVALID": "Run `edmars setup ai` (and `edmars setup advanced` for per-step models).",
     "SDK_MISSING": "Reinstall EDM-ARS, then run `edmars doctor`.",
     "INSTALL_INCOMPLETE": "Reinstall EDM-ARS, then run `edmars doctor`.",
-    "DATA_MISSING": "Run `edmars data install {dataset}` (or `edmars data import {dataset} FILE`).",
+    "DATA_MISSING": "Run `{get_data}`.",
     "LATEX_MISSING": "Run `edmars setup pdf`.",
     "R_MISSING": "Run `edmars setup r`.",
     "R_PACKAGES_MISSING": "Run `edmars setup r`.",
@@ -671,7 +671,13 @@ def pipeline_check(settings: dict[str, Any], plan: "StudyPlan", *,
         code = str(item.get("code") or "")
         severity: Literal["fail", "warn"] = "fail" if str(item.get("severity")) == "fail" else "warn"
         fix = _FINDING_FIXES.get(code)
-        fix = fix.format(dataset=_plan_dataset(plan)) if fix else str(item.get("fix") or "")
+        if fix:
+            from edmars.datasets import get_command
+
+            dataset = _plan_dataset(plan)
+            fix = fix.format(dataset=dataset, get_data=get_command(dataset))
+        else:
+            fix = str(item.get("fix") or "")
         checks.append(Check(
             _FINDING_TITLES.get(code, code.replace("_", " ").capitalize() or "Pipeline check"),
             severity,

@@ -144,6 +144,17 @@ def test_pipeline_check_names_the_service_not_the_agent_ids(
     assert "LSAR" not in reviewer.detail and "automated reviewer" in reviewer.detail
 
 
+def test_pipeline_check_data_fix_imports_a_dataset_that_cannot_be_downloaded(
+        settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    summary = {"checks": [{"code": "DATA_MISSING", "severity": "fail",
+                           "message": "The data file was not found"}]}
+    monkeypatch.setattr(proc, "run", DryRun(json.dumps(summary) + "\n"))
+    [check] = runner.pipeline_check(settings, _plan(dataset="assistments_0910"))
+    assert check.fix == "Run `edmars data import assistments_0910 <path to the .csv file>`."
+    [check] = runner.pipeline_check(settings, _plan())
+    assert check.fix == "Run `edmars data install hsls09_public`."
+
+
 def test_pipeline_check_passes_and_explains_a_crash(settings: dict[str, Any],
                                                     monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc, "run", DryRun(json.dumps({"checks": []}), returncode=0))

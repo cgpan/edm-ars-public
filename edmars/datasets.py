@@ -217,6 +217,19 @@ def _save(settings: dict[str, Any]) -> None:
     settings_mod.save(settings)
 
 
+def get_command(name: str) -> str:
+    """The command that puts dataset ``name`` on this computer.
+
+    ``edmars data install`` for what EDM-ARS can download or build; for a
+    dataset it cannot download yet (ASSISTments), ``install`` only says
+    "coming later", so the way in is ``edmars data import``.
+    """
+    info = CATALOG.get(name)
+    if info is not None and info.source == "manual":
+        return f"edmars data import {name} <path to the .csv file>"
+    return f"edmars data install {name}"
+
+
 def raw_data_dir(settings: dict[str, Any] | None = None) -> Path:
     """The one folder the pipeline reads raw data from (``paths.raw_data``).
 
@@ -383,7 +396,7 @@ def validate_file(name: str, path: str | Path) -> Check:
     path = Path(path)
     if not path.exists():
         return Check(title, "fail", f"No file at {path}.",
-                     fix=f"edmars data install {name}")
+                     fix=get_command(name))
     if not path.is_file():
         return Check(title, "fail", f"{path} is a folder, not a CSV file.",
                      fix=f"edmars data import {name} <path to the .csv file>")
@@ -403,7 +416,7 @@ def validate_file(name: str, path: str | Path) -> Check:
             title, "fail",
             f"{path.name} is missing columns this dataset must have: {shown}. "
             "It is probably a different file or a different release.",
-            fix=f"edmars data install {name}",
+            fix=get_command(name),
         )
     if not rows:
         return Check(title, "fail", f"{path.name} has a header but no data rows.")
@@ -425,14 +438,14 @@ def validate_file(name: str, path: str | Path) -> Check:
             "where EDM-ARS expects text labels such as 'Male'/'Female'. This is "
             "the numeric-code version of the file; EDM-ARS needs the labelled CSV "
             "from the NCES zip.",
-            fix=f"edmars data install {name}",
+            fix=get_command(name),
         )
     if info.value_format == "codes" and text:
         return Check(
             title, "fail",
             f"{path.name} stores text labels (for example {', '.join(text[:3])}) "
             "where EDM-ARS expects the numeric codes of the NCES export.",
-            fix=f"edmars data install {name}",
+            fix=get_command(name),
         )
 
     size = path.stat().st_size
@@ -442,7 +455,7 @@ def validate_file(name: str, path: str | Path) -> Check:
             title, "warn",
             f"The columns look right, but the file is only {human_bytes(size)}; the "
             f"real file is at least {human_bytes(info.min_bytes)}. It may be cut short.",
-            fix=f"edmars data install {name}",
+            fix=get_command(name),
         )
     return Check(title, "ok", detail)
 
@@ -475,11 +488,11 @@ def status(name: str, settings: dict[str, Any]) -> Check:
                 + " and ".join(CATALOG[n].label.split(" (")[0] for n in info.needs)
                 + " installed first."
             )
-            return Check(title, "info", detail, fix=f"edmars data install {name}")
+            return Check(title, "info", detail, fix=get_command(name))
         return Check(
             title, "warn" if info.recommended else "info",
             f"Not installed ({info.download_size}).",
-            fix=f"edmars data install {name}",
+            fix=get_command(name),
         )
 
     rec = _record(name, settings, path)
@@ -492,7 +505,7 @@ def status(name: str, settings: dict[str, Any]) -> Check:
             f"Installed at {path}, but the file is only {human_bytes(size)}; the "
             f"real file is at least {human_bytes(info.min_bytes)}. It looks "
             "incomplete, and a study on it would stop early.",
-            fix=f"edmars data install {name}",
+            fix=get_command(name),
         )
     if not rec.get("sha256"):
         return Check(
@@ -532,7 +545,7 @@ def verify(
             info.label, "fail",
             f"{path.name} does not match the published SHA-256. It may be "
             "damaged or a different release.",
-            fix=f"edmars data install {name}",
+            fix=get_command(name),
         )
     rec = _record(name, settings, path)
     if rec.get("sha256") and rec["sha256"] != digest and not pinned:
@@ -541,7 +554,7 @@ def verify(
             f"{path.name} changed since it was first verified on "
             f"{str(rec.get('verified_at') or '?')[:10]} (SHA-256 differs). If you "
             "replaced it on purpose, import it again; otherwise reinstall it.",
-            fix=f"edmars data install {name}",
+            fix=get_command(name),
         )
     _store_record(name, settings, path, digest, str(rec.get("source") or "verify"))
     note = " (first verification recorded)" if not rec.get("sha256") and not pinned else ""

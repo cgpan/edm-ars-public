@@ -1027,8 +1027,12 @@ def data_install_cmd(
     _modes(plain, yes)
     datasets = _module("datasets")
     settings = _settings()
-    _dataset_info(datasets, name)
+    info = _dataset_info(datasets, name)
 
+    if getattr(info, "source", "download") == "manual":
+        # Nothing to download (yet): install() explains how to import it,
+        # without a terms screen or a "Downloading" line first.
+        datasets.install(name, settings)
     if name == "did_els_hsls_panel":
         with ui.status("Building the combined ELS:2002 + HSLS:09 panel from your two datasets"):
             path = Path(datasets.install(name, settings))

@@ -551,6 +551,14 @@ def test_data_install_requires_accepting_the_terms(monkeypatch: pytest.MonkeyPat
     assert downloads == []
 
 
+def test_data_install_of_a_manual_dataset_points_to_import() -> None:
+    # The real catalog: ASSISTments has no automatic download yet.
+    result = invoke("data", "install", "assistments_0910", "--accept-terms")
+    assert result.exit_code == 1
+    assert "Downloading" not in result.output
+    assert "edmars data import assistments_0910" in " ".join(result.output.split())
+
+
 def test_data_install_records_the_dataset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     downloads = _dataset_fakes(monkeypatch, tmp_path)
     result = invoke("data", "install", "hsls09_public", "--accept-terms")
