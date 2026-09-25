@@ -196,6 +196,31 @@ def code_from_text(text: str) -> str | None:
     return None
 
 
+_KEY_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_*-]{8,}"),
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+    re.compile(r"(?i)(api[_ -]?key[\"':= ]+)[A-Za-z0-9._*-]{8,}"),
+)
+
+
+def redact(text: str) -> str:
+    """Remove anything key-shaped from text quoted out of a log.
+
+    Provider errors can echo part of the key ("Incorrect API key provided:
+    sk-proj-****abcd"). The shared redactor in edmars.secrets also knows
+    the exact stored values; the patterns here are the fallback.
+    """
+    try:
+        from edmars.secrets import redact as shared_redact
+
+        text = shared_redact(text)
+    except Exception:  # noqa: BLE001 -- the fallback below still runs
+        pass
+    for pattern in _KEY_PATTERNS:
+        text = pattern.sub(lambda m: (m.group(1) if m.lastindex else "") + "[redacted]", text)
+    return text
+
+
 def _tail(path: Path, max_bytes: int = 16_000) -> str:
     try:
         with open(path, "rb") as fh:
@@ -240,8 +265,8 @@ def _abort_details(run_dir: Path, state: RunState, status: dict[str, Any] | None
         code = abort.get("code")
         if isinstance(code, str) and code:
             if code == "CRITIC_ABORT" and _mentions_leakage(run_dir):
-                return "LEAKAGE_SUSPECTED", message, stage
-            return code, message, stage
+                return "LEAKAGE_SUSPECTED", redact(message), stage
+            return code, redact(message), stage
 
     checkpoint = load_json(run_dir / "checkpoint.json")
     errors = checkpoint.get("errors") if isinstance(checkpoint, dict) else None
@@ -273,7 +298,7 @@ def _abort_details(run_dir: Path, state: RunState, status: dict[str, Any] | None
         m = re.match(r"([A-Z]+) (?:failed|aborted)", message)
         if m:
             stage = m.group(1)
-    return code or "UNKNOWN", message, stage
+    return code or "UNKNOWN", redact(message), stage
 
 
 def _mentions_leakage(run_dir: Path) -> bool:
@@ -747,4 +772,5 @@ __all__ = [
     "load_findings",
     "messages",
     "quote_path",
+    "redact",
 ]

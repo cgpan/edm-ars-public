@@ -353,6 +353,17 @@ def test_process_that_died_at_import_names_the_missing_part(run_home: Path) -> N
     assert out.commands[0] == "edmars doctor"
 
 
+def test_quoted_errors_are_redacted(run_home: Path) -> None:
+    secret = "sk-proj-" + "A1b2C3d4" * 4
+    console = f"openai.AuthenticationError: Incorrect API key provided: {secret}. Bearer {secret}\n"
+    run = make_run(run_home, pid=dead_pid(), pdf=False, log=None, data_report=None,
+                   extra={"console.log": console})
+    out = classify(run)
+    blob = " ".join([out.headline, out.why, out.fix, out.command or ""])
+    assert secret not in blob and "A1b2C3d4" not in blob
+    assert endstates.redact(f"api_key={secret}") == "api_key=[redacted]"
+
+
 def test_last_error_line() -> None:
     from edmars.endstates import last_error_line
 
