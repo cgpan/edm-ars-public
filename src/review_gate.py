@@ -189,7 +189,7 @@ def _leading_title(text: str) -> Optional[str]:
     return None
 
 
-def _route_lsar_logging(log_file: Path) -> Optional[Path]:
+def _route_lsar_logging(log_file: Path) -> list[logging.Handler]:
     """Keep LSAR's INFO chatter in ``log_file``, not on the run's console.
 
     LSAR logs every stage at INFO from a couple of dozen loggers, several
@@ -198,15 +198,25 @@ def _route_lsar_logging(log_file: Path) -> Optional[Path]:
     fix/released-issues and later) gets a per-cycle ``lsar.log`` with the
     full record, and its console handler is limited to warnings. An
     operator who set LSAR_LOG_LEVEL or LSAR_QUIET keeps their choice for
-    the console. An older LSAR is left as it is. Returns the file that was
-    attached (for :func:`_detach_lsar_log_file`), or None. Never raises.
+    the console. An older LSAR is left as it is. Returns the file handlers
+    this call added (for :func:`_detach_lsar_log_file`), possibly none.
+    Never raises.
+
+    The handlers are found by comparing the logger's handlers before and
+    after the call, not by path: LSAR opens ``log_file`` after
+    ``Path.resolve()``, which can differ from ``os.path.abspath`` in case
+    (a Windows folder whose on-disk case differs from the path given) or
+    through a symlink (macOS /tmp -> /private/tmp). A path comparison then
+    never matched, every later cycle and median sample was appended to
+    every earlier cycle's lsar.log, and the files stayed open.
     """
     try:
         from lsar.utils import logger as lsar_logger  # type: ignore[import-not-found]
 
         configure = getattr(lsar_logger, "configure_logging", None)
         if not callable(configure):
-            return None
+            return []
+        before = list(logging.getLogger("lsar").handlers)
         root = configure(log_file=log_file)
         operator_level = (
             os.environ.get("LSAR_LOG_LEVEL", "").strip()
@@ -220,28 +230,41 @@ def _route_lsar_logging(log_file: Path) -> Optional[Path]:
                     and handler.level < logging.WARNING
                 ):
                     handler.setLevel(logging.WARNING)
-        return log_file
+        return [
+            h
+            for h in getattr(root, "handlers", [])
+            if isinstance(h, logging.FileHandler) and h not in before
+        ]
     except Exception:  # noqa: BLE001 - logging must never stop a review
-        return None
+        return []
 
 
-def _detach_lsar_log_file(log_file: Optional[Path]) -> None:
-    """Remove the file handler :func:`_route_lsar_logging` attached, so a
-    later cycle's records do not also land in this cycle's lsar.log."""
-    if log_file is None:
+def _detach_lsar_log_file(handlers: Optional[list[logging.Handler]]) -> None:
+    """Remove the file handlers :func:`_route_lsar_logging` attached, so a
+    later cycle's records do not also land in this cycle's lsar.log.
+
+    LSAR also remembers each attached path and ignores a second request
+    for it; the path is forgotten here too, so a later review writing to
+    the same file (a re-run in the same process) gets its handler back.
+    Never raises.
+    """
+    if not handlers:
         return
-    target = os.path.abspath(str(log_file))
     lsar_root_logger = logging.getLogger("lsar")
-    for handler in list(lsar_root_logger.handlers):
-        if (
-            isinstance(handler, logging.FileHandler)
-            and os.path.abspath(handler.baseFilename) == target
-        ):
-            lsar_root_logger.removeHandler(handler)
-            try:
-                handler.close()
-            except Exception:  # noqa: BLE001
-                pass
+    try:
+        from lsar.utils import logger as lsar_logger  # type: ignore[import-not-found]
+
+        remembered = (getattr(lsar_logger, "_state", None) or {}).get("file_paths")
+    except Exception:  # noqa: BLE001
+        remembered = None
+    for handler in handlers:
+        lsar_root_logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:  # noqa: BLE001
+            pass
+        if isinstance(remembered, set) and isinstance(handler, logging.FileHandler):
+            remembered.discard(Path(handler.baseFilename))
 
 
 class ReviewGate:
@@ -683,7 +706,7 @@ class ReviewGate:
             sys.path.insert(0, lsar_root)
             added_to_path = True
 
-        lsar_log_file: Optional[Path] = None
+        lsar_log_file: list[logging.Handler] = []
         try:
             from lsar.pipeline import LSARPipeline  # type: ignore[import-not-found]
 

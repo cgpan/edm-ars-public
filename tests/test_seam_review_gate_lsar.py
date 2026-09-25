@@ -158,3 +158,53 @@ def test_revision_problems_reach_the_run_errors_only_when_they_mattered() -> Non
     assert _revision_problem({**unavailable, "passed": True}) is None
     assert _revision_problem({**unavailable, "max_cycles": 1}) is None
     assert _revision_problem({**unavailable, "ran": False}) is None
+
+
+def test_each_cycle_log_is_detached_even_when_lsar_respells_its_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real LSAR opens ``Path(log_file).resolve()`` and remembers it.
+    resolve() can differ from os.path.abspath in case (Windows) or through
+    a symlink (macOS /tmp), so a detach that matched by path removed
+    nothing: every later cycle wrote into every earlier cycle's lsar.log
+    and the handles stayed open. Simulated here with a fake that opens a
+    differently spelled file, which no path comparison can match."""
+    monkeypatch.delenv("LSAR_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("LSAR_QUIET", raising=False)
+
+    def run(**kw: Any) -> Any:
+        logging.getLogger("lsar.stage1").warning(
+            "record from %s", Path(kw["output_dir"]).name
+        )
+        return "# report", {"scores": {"overall_score": 7.0}}
+
+    lsar_logger = _install_fake_lsar(monkeypatch, run)
+    state: dict[str, Any] = {"file_paths": set()}
+
+    def configure_logging(level: Any = None, *, console: Any = None,
+                          log_file: Any = None) -> logging.Logger:
+        if log_file is not None:
+            resolved = Path(log_file).parent / "resolved-lsar.log"
+            if resolved not in state["file_paths"]:
+                lsar_logger.addHandler(
+                    logging.FileHandler(str(resolved), encoding="utf-8"))
+                state["file_paths"].add(resolved)
+        return lsar_logger
+
+    logger_mod = sys.modules["lsar.utils.logger"]
+    monkeypatch.setattr(logger_mod, "configure_logging", configure_logging, raising=False)
+    monkeypatch.setattr(logger_mod, "_state", state, raising=False)
+
+    gate = _gate(tmp_path)
+    pdf = tmp_path / "paper_for_review.pdf"
+    for cycle in (1, 2):
+        assert gate.run_lsar(pdf, cycle=cycle) is not None
+        assert not [h for h in lsar_logger.handlers
+                    if isinstance(h, logging.FileHandler)], f"cycle {cycle}"
+        assert state["file_paths"] == set()
+
+    review = tmp_path / "lsar_review"
+    first = (review / "cycle_1" / "resolved-lsar.log").read_text(encoding="utf-8")
+    second = (review / "cycle_2" / "resolved-lsar.log").read_text(encoding="utf-8")
+    assert "record from cycle_1" in first and "cycle_2" not in first
+    assert "record from cycle_2" in second
