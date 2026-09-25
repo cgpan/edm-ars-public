@@ -342,48 +342,67 @@ def _exception_code(ctx: Any, exc: BaseException, default: str = "UNKNOWN") -> s
 
 
 def _emit_sample_metric(ctx: Any, report: Any, stage: str = "ENGINEERING") -> None:
-    """One ``metric`` event for the analytic sample size, best effort."""
+    """One ``metric`` event for the analytic sample size, best effort.
+    Never raises (see _emit_results_metric)."""
     if not isinstance(report, dict):
         return
-    n = report.get("analytic_n")
-    events.emit(
-        ctx,
-        "metric",
-        stage=stage,
-        plain=f"{n} students in the analytic sample",
-        key="analytic_n",
-        value=n,
-        ci=None,
-        label="Students in the analytic sample",
-    )
+    try:
+        n = report.get("analytic_n")
+        events.emit(
+            ctx,
+            "metric",
+            stage=stage,
+            plain=f"{n} students in the analytic sample",
+            key="analytic_n",
+            value=n,
+            ci=None,
+            label="Students in the analytic sample",
+        )
+    except Exception:  # noqa: BLE001
+        return
 
 
 def _emit_results_metric(ctx: Any, results: Any, stage: str = "ANALYZING") -> None:
-    """One ``metric`` event for the analysis headline, best effort."""
+    """One ``metric`` event for the analysis headline, best effort.
+
+    Never raises. It runs inside the ANALYZING and REVISING stages after
+    the stage's work is done, and results.json is model-written: a
+    ``best_model`` that is a list or a dict, or an ``all_models`` that is
+    not a mapping, used to raise here and turn a finished analysis into
+    an abort (or a REVISING failure into an UNVERIFIED paper).
+    """
     if not isinstance(results, dict):
         return
-    value = results.get("best_metric_value")
-    if not isinstance(value, (int, float)):
+    try:
+        value = results.get("best_metric_value")
+        if not isinstance(value, (int, float)):
+            return
+        metric = str(results.get("primary_metric") or "metric")
+        best = results.get("best_model")
+        ci = None
+        all_models = results.get("all_models")
+        row = (
+            all_models.get(best)
+            if isinstance(best, str) and isinstance(all_models, dict)
+            else None
+        )
+        if isinstance(row, dict):
+            lo = row.get(f"{metric.lower()}_ci_lower")
+            hi = row.get(f"{metric.lower()}_ci_upper")
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+                ci = [lo, hi]
+        events.emit(
+            ctx,
+            "metric",
+            stage=stage,
+            plain=f"Best model {best}: {metric} = {value}",
+            key=metric,
+            value=value,
+            ci=ci,
+            label=f"{metric} of the best model ({best})",
+        )
+    except Exception:  # noqa: BLE001
         return
-    metric = str(results.get("primary_metric") or "metric")
-    best = results.get("best_model")
-    ci = None
-    row = (results.get("all_models") or {}).get(best) if best else None
-    if isinstance(row, dict):
-        lo = row.get(f"{metric.lower()}_ci_lower")
-        hi = row.get(f"{metric.lower()}_ci_upper")
-        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
-            ci = [lo, hi]
-    events.emit(
-        ctx,
-        "metric",
-        stage=stage,
-        plain=f"Best model {best}: {metric} = {value}",
-        key=metric,
-        value=value,
-        ci=ci,
-        label=f"{metric} of the best model ({best})",
-    )
 
 
 def _critic_abort_message(review: Any) -> str:

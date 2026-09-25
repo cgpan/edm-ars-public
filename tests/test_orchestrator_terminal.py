@@ -812,6 +812,55 @@ def test_event_sink_failure_never_breaks_a_run(
     assert orch.run().current_state == PipelineState.COMPLETED
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        {"best_model": ["XGBoost"]},
+        {"best_model": {"name": "XGBoost"}},
+    ],
+)
+def test_a_malformed_results_headline_does_not_abort_the_analysis(
+    tmp_path: Path, shape: dict
+) -> None:
+    """results.json is model-written. The informational metric event read
+    ``all_models.get(best_model)`` unguarded, so an unhashable best_model
+    raised TypeError after ANALYZING had completed and the run aborted."""
+    from tests.test_end_to_end import _RESULTS
+
+    orch = _orch(tmp_path, _config(tmp_path))
+    _wire(orch)
+    out = orch.ctx.output_dir
+    bad = {**copy.deepcopy(_RESULTS), **shape}
+
+    def analyst(**_kw: Any) -> dict:
+        with open(os.path.join(out, "results.json"), "w", encoding="utf-8") as f:
+            json.dump(bad, f)
+        return bad
+
+    orch.analyst.run = analyst
+    ctx = orch.run()
+    assert ctx.current_state != PipelineState.ABORTED, ctx.abort_info
+    assert "CRITIQUING" in ctx.completed_stages
+    metrics = [
+        e for e in _events(tmp_path)
+        if e["type"] == "metric" and e.get("stage") == "ANALYZING"
+    ]
+    assert metrics and metrics[-1]["data"]["value"] == bad["best_metric_value"]
+
+
+def test_the_metric_helpers_never_raise(tmp_path: Path) -> None:
+    from src.orchestrator import _emit_results_metric, _emit_sample_metric
+
+    ctx = _ctx(tmp_path)
+    for results in (
+        {"best_metric_value": 0.7, "best_model": ["XGBoost"]},
+        {"best_metric_value": 0.7, "best_model": "XGBoost", "all_models": [1, 2]},
+        {"best_metric_value": 0.7, "best_model": "XGBoost", "all_models": {"XGBoost": 5}},
+    ):
+        _emit_results_metric(ctx, results)
+    _emit_sample_metric(ctx, {"analytic_n": object()})
+
+
 # ---------------------------------------------------------------------------
 # D1 -- atomic checkpoint, readable failure on a corrupt one
 # ---------------------------------------------------------------------------
