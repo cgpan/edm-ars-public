@@ -275,22 +275,32 @@ class FakeDisclosure:
 # edmars.secrets / edmars.proc
 # ---------------------------------------------------------------------------
 
+class SecretStoreError(RuntimeError):
+    """Stands in for edmars.secrets.SecretStoreError (no credential store)."""
+
+
 class FakeSecrets:
+    SecretStoreError = SecretStoreError
+
     def __init__(self) -> None:
         self.store: dict[str, str] = {}
         self.backend = "keyring"
         self.set_calls: list[str] = []
         self.fail_on_set: BaseException | None = None
+        self.file_fallback_works = True
 
     def get_secret(self, name: str) -> str | None:
         return os.environ.get(name) or self.store.get(name)
 
-    def set_secret(self, name: str, value: str) -> str:
-        if self.fail_on_set is not None:
+    def set_secret(self, name: str, value: str, *, allow_file: bool = False) -> str:
+        if self.fail_on_set is not None and not (allow_file and self.file_fallback_works):
             raise self.fail_on_set
         self.store[name] = value
         self.set_calls.append(name)
-        return self.backend
+        return "file" if self.fail_on_set is not None else self.backend
+
+    def secrets_file(self) -> Path:
+        return Path("~") / ".config" / "edm-ars" / "secrets.env"
 
     def delete_secret(self, name: str) -> None:
         self.store.pop(name, None)
@@ -676,7 +686,8 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fakes:
         "disclosure": _module("disclosure", fakes.disclosure, ("ACK_VERSION", "ack_text", "disclaimer_text",
                                                                "privacy_text", "is_acknowledged", "record_ack")),
         "secrets": _module("secrets", fakes.secrets, ("get_secret", "set_secret", "delete_secret", "secret_source",
-                                                       "child_secrets", "redact")),
+                                                       "child_secrets", "redact", "secrets_file",
+                                                       "SecretStoreError")),
         "proc": _module("proc", fakes.proc, ("which", "pid_alive", "run", "spawn_detached")),
         "providers": _module("providers", fakes.providers, ("PROVIDERS", "KeyCheck", "check_key",
                                                              "check_semantic_scholar", "default_models",

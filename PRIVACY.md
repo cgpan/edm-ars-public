@@ -4,6 +4,13 @@ This page lists what EDM-ARS sends off your computer, to whom, and what it
 keeps locally. It is written so you can hand it to an ethics board or IT
 department. It describes the software, not any promise by a third party.
 
+The sections below describe the pipeline as you run it from a copy of the
+repository (`python -m src.main`). If you installed EDM-ARS with the
+installer and use the `edmars` command, the pipeline sends exactly the same
+things; what differs (where keys and files are kept, what `edmars` itself
+downloads or checks, and how to delete everything) is in
+[If you use the `edmars` command](#if-you-use-the-edmars-command).
+
 ## EDM-ARS itself collects nothing
 
 EDM-ARS has **no telemetry, analytics or crash reporting**. Its authors never
@@ -25,9 +32,10 @@ server.
 whole dataset; it receives descriptions of it, results computed from it, and
 occasionally small excerpts inside error messages or printed output.
 
-Apart from the Docker case above, EDM-ARS downloads nothing by itself. You
-download the datasets, LSAR, LaTeX and R packages yourself, and those sites
-see ordinary download requests. (If MiKTeX is set to install missing packages
+Apart from the Docker case above, the pipeline downloads nothing by itself.
+You download the datasets, LSAR, LaTeX and R packages yourself (or let the
+`edmars` command do it after you approve each download; see below), and
+those sites see ordinary download requests. (If MiKTeX is set to install missing packages
 on the fly, compiling a paper can make MiKTeX download LaTeX packages.)
 
 Each AI service handles what it receives under its own terms and privacy
@@ -68,8 +76,56 @@ saved as environment variables in your shell profile or with `setx`. To
 delete data held by an AI provider, use that provider's account tools, and
 revoke keys you no longer use from the provider's website.
 
+## If you use the `edmars` command
+
+The `edmars` command runs the same pipeline, so everything in *What is
+sent, and to whom* above applies. In addition:
+
+**What `edmars` itself sends, and when**
+
+| Sent to | What | When |
+|---|---|---|
+| **The AI service you choose, and Semantic Scholar** | Your API key, to confirm it works: a request that lists the service's models (for DeepSeek, a second one reads your account balance), or one small Semantic Scholar search | When `edmars setup` checks a key, and in `edmars doctor --deep` |
+| **NCES** (nces.ed.gov) | Ordinary download requests (your IP address) | Only when you accept a dataset's terms and download it (`edmars setup`, `edmars data install`) |
+| **GitHub and the Python Package Index** | Ordinary download requests | Only when you approve installing the automated reviewer (LSAR) |
+| **yihui.org, GitHub and CTAN mirrors** | Ordinary download requests | Only when you approve installing TinyTeX |
+| **Posit Package Manager** (packagemanager.posit.co) | Ordinary download requests | Only when you approve installing R packages |
+| **GitHub** (api.github.com) | An ordinary request for the latest release number | Only when you run `edmars update` |
+| **astral.sh, GitHub and the Python Package Index** | Ordinary download requests | Only while the installer runs (it fetches uv, a private Python, EDM-ARS and its packages) |
+
+`edmars` has no telemetry either, and makes no other network requests.
+
+**What stays on your computer**
+
+| Item | Where | Notes |
+|---|---|---|
+| API keys | Your operating system's credential store (Windows Credential Manager, macOS Keychain, or the Linux Secret Service), under the name `edm-ars` | Never written into settings or study folders. If no credential store works, `edmars` asks before using a file readable only by your user. A key you set as an environment variable takes priority over a stored one. |
+| Settings | `settings.yaml` in your user configuration folder (`edmars doctor` prints the path) | No secrets. Your name and affiliation (for the paper's author line) and a Crossref contact email, if you give them. |
+| Datasets, the automated reviewer (LSAR) and the findings memory | Your user data folder (on Windows `%LOCALAPPDATA%\edm-ars`) | The findings memory works as described above; each study's `run_config.yaml` shows where it is. |
+| Studies | The studies folder you chose in setup (default `~/EDM-ARS/studies`), one folder per study | The same contents as a run folder above, plus `run_config.yaml` (the settings the study ran with; no secrets), `runner.json` (how it was started, including your question) and `console.log`. Treat study folders like the dataset itself. |
+| Support file | Only if you run `edmars doctor --bundle` | A zip with the check results, your settings with your name, email and home folder removed, version numbers and, if you agree when asked, the last study's logs with keys removed. It never includes `prompts/` or data files. Read it before you share it. |
+
+`edmars` hands your keys to the pipeline only through the environment of
+the process it starts, and the pipeline removes them from the environment
+of the AI-written code, as described in *Keys are kept away from generated
+code*. A key kept in the fallback file (see the table) is a file your user
+account can read, so that code could read it too.
+
+**Deleting everything**
+
+`edmars uninstall` removes your settings, the keys EDM-ARS stored in your
+credential store, the automated reviewer, the findings memory and caches,
+and asks separately whether to delete your downloaded datasets and your
+study folders. It then lists the program files the installer created (the
+program, its private Python, the `edmars` command and any PATH change) for
+you to delete once the window is closed, because a running program cannot
+delete itself. Keys you set as environment variables, and data held by an AI
+provider, are removed the same way as described above.
+
 ## Questions
 
 Open an issue at <https://github.com/cgpan/edm-ars-public/issues>. Do not
 paste keys, data, run folders, `prompts/` or CSV files into an issue. If you
-attach `pipeline.log` or `run_status.json`, read them first.
+attach `pipeline.log` or `run_status.json`, read them first. With the
+`edmars` command, `edmars doctor --bundle` makes a support file with keys
+removed and asks before including any study's logs.

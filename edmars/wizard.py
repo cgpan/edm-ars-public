@@ -108,6 +108,8 @@ NONINTERACTIVE_OPTIONS: dict[str, tuple[str, str]] = {
     "deepseek_key_env": ("EDMARS_DEEPSEEK_KEY_ENV", "NAME of the variable holding a DeepSeek key for the reviewer"),
     "semantic_scholar_key_env": ("EDMARS_S2_KEY_ENV", "NAME of the variable holding a Semantic Scholar key"),
     "check_keys": ("EDMARS_CHECK_KEYS", "false to skip the live key checks (no network)"),
+    "allow_key_file": ("EDMARS_ALLOW_KEY_FILE", "true to keep keys in a private file when the credential "
+                                                "store does not work"),
     "base_url": ("EDMARS_BASE_URL", "server address for provider=local, e.g. http://localhost:11434/v1"),
     "model": ("EDMARS_MODEL", "model name for provider=local or openai (used for every step)"),
     "dataset": ("EDMARS_DATASET", "dataset for dataset_action (default hsls09_public)"),
@@ -901,8 +903,19 @@ class _Wizard:
         try:
             store = secrets.set_secret(env_var, key)
         except Exception as exc:  # noqa: BLE001
-            self.fail(f"Couldn't save the key: {_doctor.redact(str(exc), [key])}")
-            return False
+            store_error = getattr(secrets, "SecretStoreError", None)
+            if not (isinstance(store_error, type) and isinstance(exc, store_error)):
+                self.fail(f"Couldn't save the key: {_doctor.redact(str(exc), [key])}")
+                return False
+            # No working credential store (headless Linux, a locked keychain):
+            # a private file is the fallback, and only with consent.
+            if not self._consent_to_key_file(exc):
+                return False
+            try:
+                store = secrets.set_secret(env_var, key, allow_file=True)
+            except Exception as again:  # noqa: BLE001
+                self.fail(f"Couldn't save the key: {_doctor.redact(str(again), [key])}")
+                return False
         where = _doctor.store_label(store, env_var)
         if store == "keyring":
             self.ok(f"Saved in {where}, not in a file.")
@@ -1026,6 +1039,29 @@ class _Wizard:
                     recheck = True
             elif nxt == "skip":
                 return False
+
+    def _consent_to_key_file(self, problem: BaseException) -> bool:
+        """Ask before keys go into the fallback file instead of the credential store."""
+        from edmars import secrets
+
+        where = getattr(secrets, "secrets_file", None)
+        path = str(where()) if callable(where) else "a file in your EDM-ARS settings folder"
+        text = (f"This computer's credential store did not keep the key ({_doctor.redact(str(problem))}). "
+                f"EDM-ARS can keep it in {path} instead: a plain-text file that only your user account can "
+                "read. Anyone who can sign in as you, or a program you run, could read it.")
+        if self.ni:
+            if _truthy(self.opt("allow_key_file", False)):
+                self.warn(text + " Using it because allow_key_file was given.")
+                return True
+            self.error(text + " To allow that, run setup again with --option allow_key_file=yes, or set the "
+                       "key as an environment variable instead.")
+            return False
+        self.warn(text)
+        if self.yes("Keep the key in that file?", default=False):
+            return True
+        self.info("The key was not saved. You can set it as an environment variable instead "
+                  "(ask your IT support how), or try again later.")
+        return False
 
     def _keep_key(self, env_var: str, key: str, origin: str) -> bool:
         """Make sure a key the user wants to keep is where EDM-ARS will find it."""

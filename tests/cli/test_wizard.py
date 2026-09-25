@@ -579,3 +579,30 @@ def test_final_check_does_not_call_the_finished_setup_unfinished(fx: Fakes) -> N
     fx.ui.script = FULL_FLOW + ["later"]
     run()
     assert "Setup was not finished" not in fx.ui.output
+
+
+def test_a_key_file_is_used_only_with_consent(fx: Fakes) -> None:
+    from tests.cli.wizard_fakes import SecretStoreError
+
+    fx.secrets.fail_on_set = SecretStoreError("Could not save DEEPSEEK_API_KEY in the credential store")
+    fx.ui.script = ["deepseek", "paste", GOOD_KEY, False, "skip"]
+    assert run("ai") == 0
+    assert "DEEPSEEK_API_KEY" not in fx.secrets.store
+    assert "only your user account can read" in fx.ui.output
+
+    fx.ui.script = ["deepseek", "paste", GOOD_KEY, True]
+    assert run("ai") == 0
+    assert fx.secrets.store["DEEPSEEK_API_KEY"] == GOOD_KEY
+
+
+def test_noninteractive_key_file_needs_the_option(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.cli.wizard_fakes import SecretStoreError
+
+    monkeypatch.setenv("CI_DEEPSEEK", GOOD_KEY)
+    fx.secrets.fail_on_set = SecretStoreError("no credential store")
+    options = {"accept_disclosure": True, "key_env": "CI_DEEPSEEK"}
+    assert run(non_interactive=True, options=options) == 1
+    assert "allow_key_file=yes" in fx.ui.output
+    assert "DEEPSEEK_API_KEY" not in fx.secrets.store
+    assert run(non_interactive=True, options={**options, "allow_key_file": True}) == 0
+    assert fx.secrets.store["DEEPSEEK_API_KEY"] == GOOD_KEY

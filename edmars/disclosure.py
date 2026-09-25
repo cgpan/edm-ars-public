@@ -32,7 +32,7 @@ ACK_FILE = "acknowledgement_v1.md"
 
 #: SHA-256 of the acknowledgement text with LF line endings. Pinned so a
 #: wording change cannot ship without a version bump.
-ACK_SHA256 = "6053324c1b0428e64749d6a231fef0778cd1b1e604ed800806fc2d457897e0f4"
+ACK_SHA256 = "6f78b5a3c473f571b7412e882ad5303cc3daf8557e8fbaacc739794924269373"
 
 #: The reminder every result screen ends with.
 AI_DRAFT_REMINDER = (
