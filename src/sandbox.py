@@ -483,7 +483,12 @@ class DockerSandbox:
         try:
             container = client.containers.create(
                 self.image,
-                command=code,
+                # A LIST, never the bare string. docker-py shlex-splits a
+                # str command, so with ENTRYPOINT ["python", "-c"] the
+                # container ran `python -c import` (SyntaxError), and an
+                # apostrophe in a comment raised "No closing quotation"
+                # before the container was even created.
+                command=[code],
                 volumes=volumes,
                 environment=environment,
                 mem_limit=self.memory_limit,
