@@ -138,8 +138,11 @@ and asks separately whether to delete your downloaded datasets and your
 study folders. It then lists the program files the installer created (the
 program, its private Python, the `edmars` command and any PATH change) for
 you to delete once the window is closed, because a running program cannot
-delete itself. Keys you set as environment variables, and data held by an AI
-provider, are removed the same way as described above.
+delete itself. It does not remove TinyTeX, if `edmars setup pdf` installed
+it, because other programs can use it: it names the folder for you to
+delete (run `tlmgr path remove` first). R packages from `edmars setup r`
+stay in your R library. Keys you set as environment variables, and data
+held by an AI provider, are removed the same way as described above.
 
 ## Questions
 

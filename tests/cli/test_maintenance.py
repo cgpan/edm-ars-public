@@ -130,6 +130,34 @@ def test_uninstall_removes_settings_keys_and_downloads_but_keeps_data(
     assert made["study"].exists() and made["notes"].exists()
 
 
+def test_uninstall_names_the_tinytex_it_leaves_in_place(
+    edmars_home: Path, fake_keyring: FakeKeyring, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # `edmars setup pdf` installs TinyTeX (about 300 MB) outside EDM-ARS's
+    # folders. Uninstall said "settings, keys and downloads were removed"
+    # and never mentioned it.
+    from edmars import toolchain
+
+    _populate(edmars_home, fake_keyring)
+    current = settings.load()
+    settings.set_(current, "latex.mode", "tinytex")
+    settings.set_(current, "r.packages_ok", True)
+    settings.save(current)
+    tinytex = tmp_path / "appdata" / "TinyTeX"
+    (tinytex / "bin" / "windows").mkdir(parents=True)
+    (tinytex / "bin" / "windows" / "pdflatex.exe").write_bytes(b"x" * 2048)
+    monkeypatch.setattr(toolchain, "tinytex_root", lambda: tinytex)
+
+    assert maintenance.uninstall(assume_yes=True) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert tinytex.is_dir()  # other programs may use it; the user decides
+    assert str(tinytex) in out and "tlmgr path remove" in out
+    assert "R library" in out
+    assert "downloads were removed" not in out
+    assert "automated reviewer and caches were removed" in out
+
+
 def test_uninstall_can_remove_data_but_only_study_folders(
     edmars_home: Path, fake_keyring: FakeKeyring
 ) -> None:

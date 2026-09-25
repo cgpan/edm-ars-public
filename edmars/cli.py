@@ -1148,7 +1148,7 @@ def uninstall_cmd(
     plain: PlainOpt = False,
     yes: YesOpt = False,
 ) -> None:
-    """Remove EDM-ARS's settings, stored keys and downloads from this computer."""
+    """Remove EDM-ARS's settings, stored keys, automated reviewer and caches from this computer."""
     non_interactive = _modes(plain, yes)
     maintenance = _module("maintenance")
     raise _exit(
