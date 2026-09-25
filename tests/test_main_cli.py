@@ -1,6 +1,7 @@
-"""src/main.py: how a run is asked for, checked and started.
+"""src/main.py: how a run is asked for, checked, started and reported.
 
-Covers the launch defects C1-C5, C7 and the resume/output-folder defects:
+Covers the launch defects C1-C5, C7, the resume/output-folder defects and
+B4 (the end-of-run summary):
 every test drives ``main(argv)`` in-process with a stubbed Orchestrator, so
 nothing here calls a provider or runs a pipeline stage.
 """
@@ -8,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -68,10 +71,13 @@ class _NoOrchestrator:
 
 
 class _StubOrchestrator:
-    """Records the context main() built; run() ends in ``final_state``."""
+    """Records the context main() built; run() ends in ``final_state`` and
+    writes ``status`` as run_status.json when one is given."""
 
     instances: list["_StubOrchestrator"] = []
     final_state: PipelineState = PipelineState.COMPLETED
+    status: dict | None = None
+    errors: list[str] = []
 
     def __init__(self, ctx: Any, config: dict, config_path: str = "") -> None:
         self.ctx = ctx
@@ -82,6 +88,11 @@ class _StubOrchestrator:
 
     def run(self, user_prompt: str | None = None) -> Any:
         self.ctx.current_state = self.final_state
+        self.ctx.errors = list(self.errors)
+        if self.status is not None:
+            path = os.path.join(self.ctx.output_dir, "run_status.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.status, f)
         return self.ctx
 
 
@@ -89,6 +100,8 @@ class _StubOrchestrator:
 def stub(monkeypatch: pytest.MonkeyPatch) -> type[_StubOrchestrator]:
     _StubOrchestrator.instances = []
     _StubOrchestrator.final_state = PipelineState.COMPLETED
+    _StubOrchestrator.status = None
+    _StubOrchestrator.errors = []
     monkeypatch.setattr(main_mod, "Orchestrator", _StubOrchestrator)
     monkeypatch.setattr(main_mod, "check_run_prerequisites", lambda *a, **k: [])
     return _StubOrchestrator
@@ -421,9 +434,13 @@ def test_a_new_run_folder_never_reuses_an_existing_one(
             return main_mod.datetime(2026, 1, 2, 3, 4, 5)
 
     monkeypatch.setattr(main_mod, "datetime", _Frozen)
-    (env["out_base"] / "run_20260102_030405").mkdir(parents=True)
+    taken = env["out_base"] / "run_20260102_030405"
+    taken.mkdir(parents=True)
+    (taken / "checkpoint.json").write_text("{}", encoding="utf-8")
     assert main(["--config", str(env["config"])]) == 0
-    assert Path(stub.instances[0].ctx.output_dir).name == "run_20260102_030405_2"
+    used = Path(stub.instances[0].ctx.output_dir)
+    assert used.parent == env["out_base"] and used != taken
+    assert (taken / "checkpoint.json").read_text(encoding="utf-8") == "{}"
 
 
 # ---------------------------------------------------------------------------
@@ -488,3 +505,291 @@ def test_resume_past_engineering_only_warns_about_missing_data(
     [finding] = main_mod._preflight(plan)
     assert finding.severity == "warn"
     assert "back to data preparation" in finding.message
+
+# ---------------------------------------------------------------------------
+# B4 and stale run_status: how the end of a run is reported
+#
+# The console used to print ``Final state: PipelineState.COMPLETED`` and
+# ``Release: YES (1 critical invariant finding(s); review gate did not
+# pass)`` -- an enum repr, and a release line followed by what read as its
+# blockers -- and it printed whatever run_status.json sat in the folder,
+# including an earlier run's.
+# ---------------------------------------------------------------------------
+
+
+def _status_v2(**fields: Any) -> dict:
+    status = {
+        "schema": 2, "state": "COMPLETED", "released": True, "reason": "clean",
+        "reason_code": "CLEAN", "advisories": [], "abort": None,
+        "gate": {"enabled": False, "ran": False, "skip_reason": "disabled",
+                 "passed": None, "score": None, "threshold": None,
+                 "advisory": None, "venue": "EDM"},
+        "invariant_counts": {"critical": 0, "major": 0, "minor": 0},
+        "blocking_findings": [],
+        "written_at": "2999-01-01T00:00:00Z",
+    }
+    status.update(fields)
+    return status
+
+
+def _run(env: dict[str, Path], *extra: str) -> int:
+    return main(["--config", str(env["config"]),
+                 "--output-dir", str(env["root"] / "run"), *extra])
+
+
+def test_released_with_advisories_is_not_a_contradiction(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The released (v1) status shape: the reason lists what did not block.
+    stub.status = {
+        "released": True,
+        "reason": "1 critical invariant finding(s); review gate did not pass",
+        "invariant_counts": {"critical": 1, "major": 2, "minor": 0},
+        "blocking_findings": [],
+    }
+    assert _run(env) == 0
+    out = capsys.readouterr().out
+    assert "PipelineState." not in out
+    assert "Run finished: COMPLETED" in out
+    assert "Released: yes" in out
+    for line in out.splitlines():
+        assert not re.match(r"^Release[d]?: (YES|yes) \(.*critical", line), line
+    assert "Did not block release, but worth checking: 1 critical" in out
+    assert "Final checks: 1 critical, 2 major, 0 minor" in out
+
+
+def test_blocked_release_says_what_blocked_it(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub.final_state = PipelineState.INCOMPLETE
+    stub.status = _status_v2(
+        state="INCOMPLETE", released=False, reason_code="BLOCKING_FINDINGS",
+        reason="1 critical invariant finding(s)",
+        blocking_findings=["INV_LATEX_NO_PDF"],
+    )
+    stub.errors = ["Release blocked by 1 critical invariant finding(s): INV_LATEX_NO_PDF"]
+    assert _run(env) == 2
+    out, err = capsys.readouterr()
+    assert "Released: no - a final check blocked release: INV_LATEX_NO_PDF" in out
+    assert "Paper: none was written" in out
+    # Errors one per line, not a Python list repr.
+    assert "  - Release blocked by 1 critical" in err
+    assert "['Release" not in err
+
+
+def test_gate_that_did_not_run_is_said_in_words(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub.status = _status_v2(
+        reason_code="GATE_NOT_RUN",
+        advisories=["review gate did not run (lsar_not_found)"],
+        gate={"enabled": True, "ran": False, "skip_reason": "lsar_not_found",
+              "passed": None, "score": None, "threshold": None,
+              "advisory": None, "venue": "EDM"},
+    )
+    assert _run(env) == 0
+    out = capsys.readouterr().out
+    assert "Automated peer review (LSAR): did not run (lsar_not_found)" in out
+    assert "0.0" not in out
+
+
+def test_gate_score_is_shown_against_its_benchmark(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub.status = _status_v2(
+        reason_code="GATE_FAILED", advisories=["review gate did not pass"],
+        gate={"enabled": True, "ran": True, "skip_reason": None, "passed": False,
+              "score": 5.9, "threshold": 6.3, "advisory": False, "venue": "EDM"},
+    )
+    _run(env)
+    out = capsys.readouterr().out
+    assert "score 5.90, benchmark 6.30 - below the benchmark" in out
+
+
+def test_a_paper_pdf_is_pointed_to(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    original_run = _StubOrchestrator.run
+
+    def _run_with_pdf(self: _StubOrchestrator, user_prompt: str | None = None) -> Any:
+        Path(self.ctx.output_dir, "paper.pdf").write_bytes(b"%PDF-1.5")
+        return original_run(self, user_prompt)
+
+    monkeypatch.setattr(_StubOrchestrator, "run", _run_with_pdf)
+    stub.status = _status_v2()
+    _run(env)
+    out = capsys.readouterr().out
+    assert f"Paper: {env['root'] / 'run' / 'paper.pdf'}" in out
+
+
+def test_an_aborted_run_never_prints_an_earlier_release(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = env["root"] / "run"
+    _checkpoint(run_dir, current_state="ENGINEERING")
+    stale = run_dir / "run_status.json"
+    stale.write_text(json.dumps({
+        "released": True, "reason": "clean",
+        "timestamp": "2020-01-01T00:00:00",
+    }), encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+    stub.final_state = PipelineState.ABORTED
+    assert _run(env, "--resume") == 3
+    out = capsys.readouterr().out
+    assert "Released: yes" not in out
+    assert "Released: no - the run stopped before it finished" in out
+
+
+def test_abort_reason_and_resume_command_when_resumable(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub.final_state = PipelineState.ABORTED
+    stub.status = _status_v2(
+        state="ABORTED", released=False, reason_code="ABORTED",
+        abort={"stage": "FORMULATING", "code": "NO_CREDIT",
+               "message": "the DeepSeek account has no balance", "resumable": True},
+    )
+    assert _run(env) == 3
+    out = capsys.readouterr().out
+    assert "Run stopped: ABORTED during FORMULATING" in out
+    assert "NO_CREDIT - the DeepSeek account has no balance" in out
+    assert "After fixing the cause, continue the run with:" in out
+    assert "--resume" in out
+
+
+def test_no_resume_command_when_the_abort_is_final(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub.final_state = PipelineState.ABORTED
+    stub.status = _status_v2(
+        state="ABORTED", released=False, reason_code="ABORTED",
+        abort={"stage": "CRITIQUING", "code": "CRITIC_ABORT",
+               "message": "confirmed leakage", "resumable": False},
+    )
+    _run(env)
+    assert "--resume" not in capsys.readouterr().out
+
+
+def test_json_summary_is_one_object_on_stdout(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub.status = _status_v2()
+    assert _run(env, "--json-summary") == 0
+    out, err = capsys.readouterr()
+    payload = json.loads(out)
+    assert payload["state"] == "COMPLETED"
+    assert payload["exit_code"] == 0
+    assert payload["released"] is True
+    assert payload["run_status_path"] == str(env["root"] / "run" / "run_status.json")
+    assert payload["run_status"]["reason_code"] == "CLEAN"
+    assert "Released: yes" in err  # the readable summary moved to stderr
+
+
+def test_json_summary_for_dry_run_and_usage_errors(
+    env: dict[str, Path], no_orchestrator: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    assert main(["--dry-run", "--json-summary", "--config", str(env["config"])]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True and payload["would_start"] is False
+    assert "KEY_MISSING" in [c["code"] for c in payload["checks"]]
+
+    assert main(["--json-summary", "--dataset", "nope",
+                 "--config", str(env["config"])]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"error": payload["error"], "exit_code": 1}
+    assert "nope" in payload["error"]
+
+
+def test_resuming_a_finished_run_reports_it_without_starting_anything(
+    env: dict[str, Path], no_orchestrator: None, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)  # not needed
+    run_dir = env["root"] / "run"
+    _checkpoint(run_dir, current_state="COMPLETED")
+    (run_dir / "run_status.json").write_text(json.dumps(_status_v2()), encoding="utf-8")
+    assert _run(env, "--resume") == 0
+    out = capsys.readouterr().out
+    assert "already finished (COMPLETED)" in out
+    assert "Released: yes" in out
+
+
+# ---------------------------------------------------------------------------
+# Unit level
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("state, status, code", [
+    ("COMPLETED", {"released": True}, 0),
+    ("COMPLETED", None, 0),
+    ("COMPLETED", {"released": False}, 2),
+    ("INCOMPLETE", {"released": False}, 2),
+    ("ABORTED", None, 3),
+    ("ABORTED", {"abort": {"code": "CRASHED"}}, 5),
+    ("INTERRUPTED", None, 4),
+    ("CRASHED", None, 5),
+    ("ANALYZING", None, 3),
+])
+def test_exit_codes(state: str, status: dict | None, code: int) -> None:
+    assert main_mod._exit_code(state, status) == code
+
+
+def test_state_names_are_plain() -> None:
+    assert main_mod._state_name(PipelineState.COMPLETED) == "COMPLETED"
+    assert main_mod._state_name("PipelineState.ABORTED") == "ABORTED"
+    assert main_mod._state_name("INCOMPLETE") == "INCOMPLETE"
+
+
+def test_status_from_this_run_is_recognised(tmp_path: Path) -> None:
+    path = tmp_path / "run_status.json"
+    path.write_text(json.dumps({"released": True,
+                                "written_at": "2026-09-25T10:00:00Z"}), encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(path, (old, old))
+    now = time.time()
+    # Old file, stamped before this run started: not ours.
+    assert main_mod._current_status(str(tmp_path), "2026-09-25T11:00:00+00:00", now)[1] is None
+    # Stamped after the (resumed) run's original start: ours.
+    assert main_mod._current_status(str(tmp_path), "2026-09-25T09:00:00", now)[1] is not None
+    # Written during this invocation: ours.
+    os.utime(path, None)
+    assert main_mod._current_status(str(tmp_path), "", now - 1)[1] is not None
+
+
+def test_a_real_orchestrator_run_is_summarised_from_its_own_status(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The real Orchestrator with the end-to-end suite's stub agents."""
+    from src.orchestrator import Orchestrator
+    from tests.test_end_to_end import _wire_stubs
+
+    class _Wired(Orchestrator):
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            super().__init__(*a, **kw)
+            _wire_stubs(self)
+
+    monkeypatch.setattr(main_mod, "Orchestrator", _Wired)
+    monkeypatch.setattr(main_mod, "check_run_prerequisites", lambda *a, **k: [])
+    run_dir = env["root"] / "real"
+    code = main(["--config", str(env["config"]), "--output-dir", str(run_dir)])
+    out = capsys.readouterr().out
+    status = json.loads((run_dir / "run_status.json").read_text(encoding="utf-8"))
+    state = "COMPLETED" if status["released"] else "INCOMPLETE"
+    assert code == (0 if status["released"] else 2)
+    assert f"Run finished: {state}" in out
+    assert ("Released: yes" if status["released"] else "Released: no") in out
+    assert "PipelineState." not in out
+    assert f"Run folder: {run_dir}" in out

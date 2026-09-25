@@ -19,7 +19,7 @@ import shutil
 import sys
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -325,6 +325,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "would run, and exit. Needs no API key, sends nothing, and "
             "creates or deletes no files. Exit status 1 when a real run "
             "would not start."
+        ),
+    )
+    parser.add_argument(
+        "--json-summary",
+        action="store_true",
+        dest="json_summary",
+        help=(
+            "Print one JSON object on stdout at the end (state, exit code, "
+            "run folder, the path and contents of this run's "
+            "run_status.json; for --dry-run, the checks) for scripts. The "
+            "readable summary goes to stderr instead."
         ),
     )
     parser.add_argument(
@@ -807,7 +818,7 @@ def _dry_run(plan: _Plan, args: argparse.Namespace) -> int:
             "Add --resume or --overwrite, or choose a new --output-dir.",
         ))
 
-    out = sys.stdout
+    out = _human_stream(args)
     print("DRY RUN - pre-flight summary (nothing is created, changed or sent):", file=out)
     print(f"  config:               {plan.config_path}", file=out)
     print(f"  llm_provider:         {plan.config.get('llm_provider')}", file=out)
@@ -853,12 +864,287 @@ def _dry_run(plan: _Plan, args: argparse.Namespace) -> int:
         _print_findings(findings, out)
     else:
         print("  [ok] nothing to report", file=out)
-    if has_failures(findings):
+    failed = has_failures(findings)
+    if failed:
         n = sum(1 for f in findings if f.severity == FAIL)
         print(f"Result: a real run would not start ({n} problem(s) above).", file=out)
-        return EXIT_USAGE
-    print("Result: a real run would start.", file=out)
-    return EXIT_RELEASED
+    else:
+        print("Result: a real run would start.", file=out)
+    code = EXIT_USAGE if failed else EXIT_RELEASED
+    if args.json_summary:
+        _print_json({
+            "dry_run": True,
+            "exit_code": code,
+            "would_start": not failed,
+            "task_type": plan.task_type,
+            "dataset": plan.dataset,
+            "output_dir": plan.output_dir,
+            "raw_data_path": plan.raw_data_path,
+            "checks": [f._asdict() for f in findings],
+        })
+    return code
+
+
+# ---------------------------------------------------------------------------
+# The end of a run, in plain words
+# ---------------------------------------------------------------------------
+
+#: What each run_status ``reason_code`` means, for a reader who has not
+#: seen the code. ``Release: YES (1 critical invariant finding(s))`` read
+#: as a contradiction; the release decision and the things that did not
+#: block it are now separate lines.
+_REASON_WORDS: dict[str, str] = {
+    "CLEAN": "no problems found",
+    "ADVISORY_FINDINGS": "the final checks flagged issues to review",
+    "CRITIC_UNVERIFIED": (
+        "the internal methods review did not sign off, so the paper carries "
+        "an UNVERIFIED warning"
+    ),
+    "GATE_FAILED": "the automated peer review scored the paper below its benchmark",
+    "GATE_NOT_RUN": "the automated peer review did not run",
+    "BLOCKING_FINDINGS": "a final check blocked release",
+    "VERIFICATION_NOT_RUN": "the final checks did not run",
+    "ABORTED": "the run stopped before it finished",
+    "INTERRUPTED": "the run was interrupted before it finished",
+}
+
+#: A status file whose mtime is at most this much older than the start of
+#: this invocation still counts as written by it (coarse file-system clocks).
+_MTIME_SLACK_S = 2.0
+
+
+def _human_stream(args: argparse.Namespace) -> Any:
+    """Readable output goes to stdout, or to stderr when stdout carries JSON."""
+    return sys.stderr if getattr(args, "json_summary", False) else sys.stdout
+
+
+def _print_json(payload: dict) -> None:
+    print(json.dumps(payload, default=str, ensure_ascii=False))
+
+
+def _parse_utc(text: Any) -> datetime | None:
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        stamp = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
+
+
+def _current_status(
+    output_dir: str,
+    run_start_time: str,
+    invocation_start: float,
+    trust_existing: bool = False,
+) -> tuple[str, dict | None]:
+    """``(path, run_status)`` when run_status.json was written by this run.
+
+    A reused folder used to print the previous run's "Release: YES
+    (clean)" under a new run that had aborted, because the file was read
+    whenever it existed. It now counts only if it was written during this
+    invocation, or stamped at or after this run's start (a resumed run
+    keeps its original start time), or ``trust_existing`` says the run
+    was already finished when resumed.
+    """
+    path = os.path.join(output_dir, "run_status.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            status = json.load(f)
+        mtime = os.path.getmtime(path)
+    except (OSError, ValueError):
+        return path, None
+    if not isinstance(status, dict):
+        return path, None
+    if trust_existing or mtime >= invocation_start - _MTIME_SLACK_S:
+        return path, status
+    started = _parse_utc(run_start_time)
+    written = _parse_utc(status.get("written_at") or status.get("timestamp"))
+    if started is not None and written is not None and written >= started:
+        return path, status
+    return path, None
+
+
+def _abort_block(status: dict | None, abort_info: Any = None) -> dict:
+    abort = (status or {}).get("abort")
+    if isinstance(abort, dict):
+        return abort
+    return abort_info if isinstance(abort_info, dict) else {}
+
+
+def _exit_code(state: str, status: dict | None) -> int:
+    """The process exit code for a run that ended in ``state``."""
+    if state == "CRASHED":
+        return EXIT_CRASHED
+    if state == "INTERRUPTED":
+        return EXIT_INTERRUPTED
+    if state == "ABORTED":
+        crashed = _abort_block(status).get("code") == "CRASHED"
+        return EXIT_CRASHED if crashed else EXIT_ABORTED
+    if state == "INCOMPLETE":
+        return EXIT_INCOMPLETE
+    if state == "COMPLETED":
+        released = (status or {}).get("released")
+        return EXIT_INCOMPLETE if released is False else EXIT_RELEASED
+    # run() returns only in a terminal state; anything else did not finish.
+    return EXIT_ABORTED
+
+
+def _advisories(status: dict) -> list[str]:
+    listed = status.get("advisories")
+    if isinstance(listed, list):
+        return [str(a) for a in listed if a]
+    reason = str(status.get("reason") or "")
+    if not reason or reason == "clean":
+        return []
+    return [part.strip() for part in reason.split(";") if part.strip()]
+
+
+def _release_lines(state: str, status: dict | None) -> list[str]:
+    if status is None:
+        if state in _TERMINAL_FINISHED:
+            return ["Released: not evaluated (this run wrote no run_status.json)"]
+        return ["Released: no - the run stopped before it finished"]
+    code = status.get("reason_code")
+    if status.get("released"):
+        lines = ["Released: yes"]
+        notes = _advisories(status)
+        if notes:
+            lines.append(
+                "  Did not block release, but worth checking: " + "; ".join(notes)
+            )
+        return lines
+    blockers = status.get("blocking_findings") or []
+    if code == "BLOCKING_FINDINGS" or (code is None and blockers):
+        return [
+            "Released: no - a final check blocked release: "
+            + (", ".join(str(b) for b in blockers) or "see invariants.json")
+        ]
+    if code == "VERIFICATION_NOT_RUN":
+        error = (status.get("verification") or {}).get("error")
+        return ["Released: no - the final checks did not run"
+                + (f" ({error})" if error else "")]
+    words = _REASON_WORDS.get(str(code)) if code else None
+    return [f"Released: no - {words or status.get('reason') or 'see run_status.json'}"]
+
+
+def _gate_line(status: dict | None) -> str | None:
+    gate = (status or {}).get("gate")
+    if not isinstance(gate, dict) or not gate.get("enabled"):
+        return None
+    if not gate.get("ran"):
+        skip = gate.get("skip_reason")
+        return "Automated peer review (LSAR): did not run" + (f" ({skip})" if skip else "")
+    score = gate.get("score")
+    text = "Automated peer review (LSAR): "
+    text += f"score {score:.2f}" if isinstance(score, (int, float)) else "no score"
+    threshold = gate.get("threshold")
+    if gate.get("advisory"):
+        text += f" (score only: no benchmark for {gate.get('venue') or 'this venue'})"
+    elif isinstance(threshold, (int, float)):
+        verdict = "passed" if gate.get("passed") else "below the benchmark"
+        text += f", benchmark {threshold:.2f} - {verdict}"
+    return text
+
+
+def _paper_line(output_dir: str, state: str) -> str | None:
+    pdf = os.path.join(output_dir, "paper.pdf")
+    tex = os.path.join(output_dir, "paper.tex")
+    if os.path.isfile(pdf):
+        return f"Paper: {pdf}"
+    if os.path.isfile(tex):
+        return f"Paper: no PDF was produced; the LaTeX source is {tex}"
+    if state in _TERMINAL_FINISHED:
+        return "Paper: none was written"
+    return None
+
+
+def _resumable(state: str, status: dict | None, abort_info: Any = None) -> bool:
+    if state in ("INTERRUPTED", "CRASHED"):
+        return True
+    if state != "ABORTED":
+        return False
+    return bool(_abort_block(status, abort_info).get("resumable"))
+
+
+def _report(
+    plan: _Plan,
+    args: argparse.Namespace,
+    state: str,
+    status_path: str,
+    status: dict | None,
+    errors: list | None = None,
+    abort_info: Any = None,
+    detail: str | None = None,
+) -> int:
+    """Print how the run ended, in words, and return its exit code."""
+    out = _human_stream(args)
+    code = _exit_code(state, status)
+    abort = _abort_block(status, abort_info)
+    where = abort.get("stage")
+
+    if state in _TERMINAL_FINISHED:
+        print(f"Run finished: {state}", file=out)
+    elif state == "INTERRUPTED":
+        print("Run interrupted" + (f" during {where}" if where else "")
+              + " (Ctrl-C or a stop signal).", file=out)
+    elif state == "CRASHED":
+        print("Run stopped by an unexpected error"
+              + (f" during {where}" if where else "")
+              + (f": {detail}" if detail else "") + ".", file=out)
+    else:
+        print(f"Run stopped: {state}" + (f" during {where}" if where else ""), file=out)
+        if abort.get("code") or abort.get("message"):
+            print(f"  Why: {abort.get('code') or ''}"
+                  + (f" - {abort.get('message')}" if abort.get("message") else ""),
+                  file=out)
+
+    for line in _release_lines(state, status):
+        print(line, file=out)
+    counts = (status or {}).get("invariant_counts") or {}
+    if counts:
+        print(
+            f"Final checks: {counts.get('critical', 0)} critical, "
+            f"{counts.get('major', 0)} major, {counts.get('minor', 0)} minor "
+            "finding(s) (details in invariants.json)",
+            file=out,
+        )
+    gate = _gate_line(status)
+    if gate:
+        print(gate, file=out)
+    paper = _paper_line(plan.output_dir, state)
+    if paper:
+        print(paper, file=out)
+    print(f"Run folder: {plan.output_dir}", file=out)
+    if errors:
+        print("Errors recorded by the run:", file=sys.stderr)
+        for error in errors:
+            print(f"  - {_one_line(str(error))}", file=sys.stderr)
+    resume = _resume_command(plan) if _resumable(state, status, abort_info) else None
+    if resume:
+        lead = (
+            "After fixing the cause, continue the run with:"
+            if state == "ABORTED" else "Your finished steps are saved. Continue with:"
+        )
+        print(lead, file=out)
+        print(f"  {resume}", file=out)
+
+    if args.json_summary:
+        pdf = os.path.join(plan.output_dir, "paper.pdf")
+        _print_json({
+            "state": state,
+            "exit_code": code,
+            "released": bool((status or {}).get("released")),
+            "reason_code": (status or {}).get("reason_code"),
+            "output_dir": plan.output_dir,
+            "paper_pdf": pdf if os.path.isfile(pdf) else None,
+            "run_status_path": status_path if status is not None else None,
+            "run_status": status,
+            "resume_command": resume,
+        })
+    return code
 
 
 # ---------------------------------------------------------------------------
@@ -866,9 +1152,39 @@ def _dry_run(plan: _Plan, args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _claim_run_dir(plan: _Plan, args: argparse.Namespace) -> None:
+    """Create an auto-named run folder atomically when the context module
+    offers it, so two launches in the same second cannot share one."""
+    if args.output_dir:
+        return
+    import src.context as context_mod
+
+    allocate = getattr(context_mod, "allocate_run_dir", None)
+    if allocate is None:
+        return
+    try:
+        plan.output_dir = allocate(os.path.dirname(plan.output_dir))
+    except OSError as exc:
+        raise UsageError(
+            f"could not create a run folder under "
+            f"{os.path.dirname(plan.output_dir)}: {_one_line(exc)}"
+        ) from None
+
+
 def _run(plan: _Plan, args: argparse.Namespace) -> int:
     if plan.occupied:
         raise UsageError(plan.occupied)
+
+    if plan.resume and plan.start_state in _TERMINAL_FINISHED:
+        # Nothing would run: say so, and report the run as it finished,
+        # without building agents (which needs a key) or touching files.
+        print(
+            f"This run already finished ({plan.start_state}); there is "
+            "nothing to resume.",
+            file=_human_stream(args),
+        )
+        path, status = _current_status(plan.output_dir, "", 0.0, trust_existing=True)
+        return _report(plan, args, plan.start_state or "", path, status)
 
     findings = _preflight(plan)
     if findings:
@@ -893,6 +1209,7 @@ def _run(plan: _Plan, args: argparse.Namespace) -> int:
             f"from {plan.output_dir}.",
             file=sys.stderr,
         )
+    _claim_run_dir(plan, args)
 
     ctx = PipelineContext(
         dataset_name=plan.dataset,
@@ -911,40 +1228,21 @@ def _run(plan: _Plan, args: argparse.Namespace) -> int:
             f"the run could not be set up: {type(exc).__name__}: {_one_line(exc)}"
         ) from None
 
-    print(f"Run folder: {plan.output_dir}")
+    print(f"Run folder: {plan.output_dir}", file=_human_stream(args))
+    invocation_start = datetime.now().timestamp()
     result_ctx = orchestrator.run(user_prompt=args.prompt)
 
-    print(f"Pipeline complete. Final state: {_state_name(result_ctx.current_state)}")
-    print(f"Output directory: {result_ctx.output_dir}")
-    if result_ctx.errors:
-        print(f"Errors: {result_ctx.errors}", file=sys.stderr)
-
-    # Say out loud what the run decided about itself, and exit non-zero
-    # when it decided against release.
-    #
-    # This process used to exit 0 unconditionally, with no sys.exit
-    # anywhere in the file, so a run whose quality gate said
-    # ``passed: false`` was indistinguishable from a clean one to any
-    # wrapper script, CI job or batch harness. 23 archived runs carry a
-    # failing gate under ``current_state: "COMPLETED"``.
-    status_path = os.path.join(result_ctx.output_dir, "run_status.json")
-    if os.path.exists(status_path):
-        try:
-            with open(status_path, encoding="utf-8") as f:
-                status = json.load(f)
-            counts = status.get("invariant_counts") or {}
-            print(
-                f"Release: {'YES' if status.get('released') else 'NO'} "
-                f"({status.get('reason')})"
-            )
-            print(
-                f"Invariant findings: {counts.get('critical', 0)} critical, "
-                f"{counts.get('major', 0)} major, {counts.get('minor', 0)} minor"
-            )
-        except (OSError, ValueError):
-            pass
-
-    return _exit_code_for(result_ctx)
+    state = _state_name(result_ctx.current_state)
+    path, status = _current_status(
+        plan.output_dir,
+        str(getattr(result_ctx, "run_start_time", "") or ""),
+        invocation_start,
+    )
+    return _report(
+        plan, args, state, path, status,
+        errors=list(result_ctx.errors or []),
+        abort_info=getattr(result_ctx, "abort_info", None),
+    )
 
 
 def _debug(args: argparse.Namespace) -> bool:
@@ -971,16 +1269,14 @@ def main(argv: list[str] | None = None) -> int:
         if _debug(args):
             traceback.print_exc()
         print(f"error: {exc}", file=sys.stderr)
+        if args.json_summary:
+            _print_json({"error": str(exc), "exit_code": EXIT_USAGE})
         return EXIT_USAGE
 
 
-def _exit_code_for(ctx: Any) -> int:
-    state = _state_name(getattr(ctx, "current_state", ""))
-    if state == "ABORTED":
-        return EXIT_ABORTED
-    if state == "INCOMPLETE":
-        return EXIT_INCOMPLETE
-    return EXIT_RELEASED
+def _exit_code_for(ctx: Any, status: dict | None = None) -> int:
+    """Exit code for a finished context (kept for callers of the old name)."""
+    return _exit_code(_state_name(getattr(ctx, "current_state", "")), status)
 
 
 if __name__ == "__main__":
