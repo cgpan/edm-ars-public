@@ -62,15 +62,15 @@ def test_stage_titles_and_reminder_present() -> None:
 
 
 def test_printed_paths_keep_their_backslashes_in_git_bash(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Unquoted, Git Bash turns C:\Users\x\studies\run into C:Usersxstudiesrun,
+    # Unquoted, Git Bash turns D:\EDM-ARS\studies\run into D:EDM-ARSstudiesrun,
     # so a pasted `edmars resume ...` found no study.
     monkeypatch.setattr(endstates.os, "name", "nt")
-    study = r"C:\Users\someone\EDM-ARS\studies\2026-09-25_1200_gpa_ab12"
+    study = r"D:\EDM-ARS\studies\2026-09-25_1200_gpa_ab12"
     assert endstates.quote_path(study) == f'"{study}"'
-    assert endstates.quote_path("C:/Users/someone/run") == "C:/Users/someone/run"
+    assert endstates.quote_path("D:/EDM-ARS/studies/run") == "D:/EDM-ARS/studies/run"
     monkeypatch.setattr(endstates.os, "name", "posix")
-    assert endstates.quote_path("/home/someone/run") == "/home/someone/run"
-    assert endstates.quote_path("/home/some one/a\\b") == "'/home/some one/a\\b'"
+    assert endstates.quote_path("/srv/studies/run") == "/srv/studies/run"
+    assert endstates.quote_path("/srv/my studies/a\\b") == "'/srv/my studies/a\\b'"
 
 
 def test_fill_leaves_unknown_placeholders() -> None:

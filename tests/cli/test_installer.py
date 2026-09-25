@@ -317,7 +317,7 @@ def test_ps1_writes_an_edmars_command_git_bash_can_run(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert b"\r" not in launcher.read_bytes()
 
-    study = r"C:\Users\someone\EDM-ARS\studies\2026-09-25_1200_gpa_ab12"
+    study = r"D:\EDM-ARS\studies\2026-09-25_1200_gpa_ab12"
     run = subprocess.run([str(SH), str(launcher), "resume", study, "--yes"],
                          capture_output=True, text=True, timeout=60,
                          env={**_clean_env(tmp_path), "PYTHONPATH": "x"})

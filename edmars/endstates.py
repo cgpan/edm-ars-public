@@ -120,8 +120,8 @@ def invariant_title(code: str) -> str:
 def quote_path(path: Path | str) -> str:
     """A path as it should be typed in a terminal command.
 
-    A backslash is never left bare: Git Bash drops it (C:\\Users\\x arrives
-    as C:Usersx), and cmd, PowerShell and Git Bash all keep a double-quoted
+    A backslash is never left bare: Git Bash drops it (D:\\studies\\x arrives
+    as D:studiesx), and cmd, PowerShell and Git Bash all keep a double-quoted
     Windows path intact.
     """
     text = str(path)
