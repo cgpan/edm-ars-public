@@ -37,6 +37,14 @@ _CLEARED_ENV = (
     "EDMARS_PLAIN",
     "NO_COLOR",
     "MSYSTEM",
+    # Pipeline settings a developer's shell may hold, and that the pipeline
+    # tests leak: src.config.load_config sets LSAR_HOME in os.environ when
+    # it is unset, so a runner test that checks the child environment
+    # passed alone and failed after them in the full suite.
+    "LSAR_HOME",
+    "EDM_ARS_RSCRIPT",
+    "OPENAI_BASE_URL",
+    "DEEPSEEK_BASE_URL",
 )
 
 
