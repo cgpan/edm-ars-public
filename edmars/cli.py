@@ -109,6 +109,13 @@ class TaskType(str, Enum):
     psychometrics = "psychometrics"
 
 
+class PaperFormat(str, Enum):
+    """What ``edmars run --paper-format`` accepts."""
+
+    conference = "conference"
+    journal = "journal"
+
+
 class OpenWhat(str, Enum):
     """What ``edmars results --open`` opens."""
 
@@ -220,13 +227,30 @@ def _friendly(func: F) -> F:
 
 
 def _expected_error(exc: BaseException) -> bool:
-    """Errors whose message is already written for the user."""
-    try:
-        from edmars.secrets import SecretStoreError
-        from edmars.settings import SettingsError
-    except Exception:  # pragma: no cover
-        return False
-    return isinstance(exc, (SettingsError, SecretStoreError))
+    """Errors whose message is already written for the user.
+
+    Settings and key-store errors, the runner's refusals (another study
+    is running, nothing to resume), the study flow's refusals, and every
+    error that marks itself ``user_facing`` (a wrong dataset file, a full
+    disk, a failed download): the message is the whole story, so it is
+    printed as it is, not as a crash report.
+    """
+    if getattr(exc, "user_facing", False):
+        return True
+    expected: list[type[BaseException]] = []
+    for module, name in (
+        ("edmars.settings", "SettingsError"),
+        ("edmars.secrets", "SecretStoreError"),
+        ("edmars.runner", "RunnerError"),
+        ("edmars.study", "StudyError"),
+    ):
+        try:
+            cls = getattr(importlib.import_module(module), name)
+        except Exception:  # noqa: BLE001 -- a missing part cannot have raised it
+            continue
+        if isinstance(cls, type) and issubclass(cls, BaseException):
+            expected.append(cls)
+    return isinstance(exc, tuple(expected))
 
 
 # --- Helpers -------------------------------------------------------------------------
@@ -337,14 +361,37 @@ def _after_start(run_dir: Path, watch: bool) -> None:
     _watch_then_results(run_dir)
 
 
-def _preflight_confirm_launch(
-    settings: dict[str, Any], plan: Any, *, yes: bool, watch: bool, allow_edit: bool
-) -> str:
-    """Check the plan, show the confirmation card, start the study.
+def _pipeline_check(settings: dict[str, Any], plan: Any) -> None:
+    """Run the pipeline's own start-up check; stop the command if it fails.
 
-    Returns "edit" when the user wants to change the plan; otherwise it
-    ends the command itself (typer.Exit).
+    The feasibility check asks "can this question be answered with this
+    data?"; this one asks "would the pipeline start?" (keys, models, the
+    data file, R, the reviewer), using the exact config and environment a
+    launch uses, so a study that would stop in its first second never
+    gets a folder.
     """
+    runner = _module("runner")
+    with ui.status("Checking that the pipeline can start this study"):
+        checks = runner.pipeline_check(settings, plan)
+    failed = [check for check in checks if check.status == "fail"]
+    shown = [check for check in checks if check.status in ("fail", "warn")]
+    if shown:
+        ui.show_checks(shown)
+    if failed:
+        ui.fail("The study was not started: fix the problems above, then try again.")
+        raise typer.Exit(1)
+
+
+def _launch(settings: dict[str, Any], plan: Any, *, watch: bool) -> None:
+    """Start the study and follow it (ends the command)."""
+    runner = _module("runner")
+    run_dir = Path(runner.launch(settings, plan))
+    ui.ok(f"The study has started. Its folder: {run_dir}")
+    _after_start(run_dir, watch)
+
+
+def _preflight_confirm_launch(settings: dict[str, Any], plan: Any, *, yes: bool, watch: bool) -> None:
+    """``edmars run``: check the plan, show the confirmation card, start it."""
     study = _module("study")
     with ui.status(
         "Checking that this study can run (the first check on a large dataset "
@@ -352,9 +399,10 @@ def _preflight_confirm_launch(
     ):
         checks = study.preflight(plan, settings)
     ui.show_checks(checks)
-    if any(check.status == "fail" for check in checks):
+    if study.blocking(checks):
         ui.fail("This study cannot start until the problems above are fixed.")
         raise typer.Exit(1)
+    _pipeline_check(settings, plan)
 
     ui.panel("Ready to start", study.confirmation_card(plan, settings))
     if not yes:
@@ -365,22 +413,26 @@ def _preflight_confirm_launch(
             raise ui.NonInteractiveError(
                 "Start this study?", hint="Add --yes to start it without being asked."
             )
-        choices = [("start", "Start the study")]
-        if allow_edit:
-            choices.append(("edit", "Change something"))
-        choices.append(("cancel", "Cancel"))
-        answer = ui.select("Start this study?", choices, default="start")
-        if answer == "edit":
-            return "edit"
+        answer = ui.select(
+            "Start this study?", [("start", "Start the study"), ("cancel", "Cancel")], default="start"
+        )
         if answer == "cancel":
             ui.info("No study was started.")
             raise typer.Exit(0)
+    _launch(settings, plan, watch=watch)
 
-    runner = _module("runner")
-    run_dir = Path(runner.launch(settings, plan))
-    ui.ok(f"The study has started. Its folder: {run_dir}")
-    _after_start(run_dir, watch)
-    return "started"  # pragma: no cover - _after_start always exits
+
+def _review_available(settings: dict[str, Any]) -> bool:
+    """Whether LSAR is set up well enough for a study to ask for a review."""
+    from edmars import settings as settings_mod
+
+    home = settings_mod.get(settings, "lsar.home")
+    return bool(
+        settings_mod.get(settings, "lsar.enabled", False)
+        and settings_mod.get(settings, "provider", "deepseek") != "local"
+        and home
+        and Path(str(home)).is_dir()
+    )
 
 
 def _confirm_spend(question: str, yes: bool) -> None:
@@ -498,6 +550,10 @@ def _root(
 # --- Commands --------------------------------------------------------------------------
 
 
+def _setup_option(flag: str, help_text: str) -> Any:
+    return typer.Option(flag, help=help_text, show_default=False)
+
+
 @app.command("setup")
 @_friendly
 def setup_cmd(
@@ -505,24 +561,80 @@ def setup_cmd(
         Optional[str],
         typer.Argument(help="Only this part of the setup (leave out to see the menu).", show_default=False),
     ] = None,
+    provider: Annotated[
+        Optional[str], _setup_option("--provider", "With --yes: deepseek, openai, anthropic or local.")
+    ] = None,
+    key_env: Annotated[
+        Optional[str],
+        _setup_option("--key-env", "With --yes: NAME of the environment variable that holds the AI key."),
+    ] = None,
+    deepseek_key_env: Annotated[
+        Optional[str],
+        _setup_option("--deepseek-key-env", "With --yes: NAME of the variable holding a DeepSeek key for the reviewer."),
+    ] = None,
+    no_key_check: Annotated[
+        bool, typer.Option("--no-key-check", help="With --yes: do not test the keys online.")
+    ] = False,
+    studies_dir: Annotated[
+        Optional[str], _setup_option("--studies-dir", "With --yes: the folder for your studies.")
+    ] = None,
+    dataset_action: Annotated[
+        Optional[str], _setup_option("--dataset-action", "With --yes: download, import or skip.")
+    ] = None,
+    dataset_path: Annotated[
+        Optional[str], _setup_option("--dataset-path", "With --yes and --dataset-action import: the file.")
+    ] = None,
+    latex_action: Annotated[
+        Optional[str], _setup_option("--latex-action", "With --yes: auto, system, tinytex or skip.")
+    ] = None,
+    r_action: Annotated[Optional[str], _setup_option("--r-action", "With --yes: skip, find or install.")] = None,
+    rscript: Annotated[Optional[str], _setup_option("--rscript", "With --yes: the path to Rscript.")] = None,
+    lsar_action: Annotated[
+        Optional[str], _setup_option("--lsar-action", "With --yes: auto, manual or skip (the automated reviewer).")
+    ] = None,
     option: Annotated[
         Optional[list[str]],
         typer.Option(
             "--option",
             "-o",
-            help="Answer a setup question in advance, as KEY=VALUE (repeatable; for --yes).",
+            help="Answer any other setup question in advance, as KEY=VALUE (repeatable; "
+            "see --list-options).",
         ),
     ] = None,
+    list_options: Annotated[
+        bool, typer.Option("--list-options", help="List every KEY that --option accepts, and stop.")
+    ] = False,
     accept_disclosure: AcceptOpt = False,
     plain: PlainOpt = False,
     yes: YesOpt = False,
 ) -> None:
     """Set up EDM-ARS, or change one part of the setup."""
     non_interactive = _modes(plain, yes)
+    wizard = _module("wizard")
+    if list_options:
+        for key, (env_name, meaning) in wizard.NONINTERACTIVE_OPTIONS.items():
+            ui.say(f"{key} (or {env_name}): {meaning}")
+        raise typer.Exit(0)
     options = _parse_options(option)
+    named = {
+        "provider": provider,
+        "key_env": key_env,
+        "deepseek_key_env": deepseek_key_env,
+        "studies_dir": studies_dir,
+        "dataset_action": dataset_action,
+        "dataset_path": dataset_path,
+        "latex_action": latex_action,
+        "r_action": r_action,
+        "rscript": rscript,
+        "lsar_action": lsar_action,
+    }
+    options.update({k: v for k, v in named.items() if v is not None})
+    if no_key_check:
+        options["check_keys"] = False
     if accept_disclosure:
         options["accept_disclosure"] = True
-    wizard = _module("wizard")
+    if options and not non_interactive:
+        ui.info("Answers given as options are used only with --yes; setup will ask instead.")
     raise _exit(wizard.run_setup(section, non_interactive=non_interactive, options=options or None))
 
 
@@ -536,7 +648,10 @@ def doctor_cmd(
     bundle: Annotated[
         bool, typer.Option("--bundle", help="Make a support file (secrets removed) to attach to an issue.")
     ] = False,
-    quick: Annotated[bool, typer.Option("--quick", hidden=True)] = False,
+    quick: Annotated[
+        bool,
+        typer.Option("--quick", help="Only check the installation itself (what the installer runs)."),
+    ] = False,
     plain: PlainOpt = False,
     yes: YesOpt = False,
 ) -> None:
@@ -545,7 +660,7 @@ def doctor_cmd(
     if json_out:
         ui.set_machine_output(True)
     doctor = _module("doctor")
-    raise _exit(doctor.main(deep=deep and not quick, json_out=json_out, bundle=bundle))
+    raise _exit(doctor.main(deep=deep and not quick, json_out=json_out, bundle=bundle, quick=quick))
 
 
 @app.command("new")
@@ -567,16 +682,15 @@ def new_cmd(
     settings = _settings()
     _require_ack(settings, accept_disclosure)
     study = _module("study")
-    while True:
-        plan = study.new_study_interactive(settings)
-        if plan is None:
-            ui.info("No study was started.")
-            raise typer.Exit(0)
-        outcome = _preflight_confirm_launch(
-            settings, plan, yes=False, watch=not no_watch, allow_edit=True
-        )
-        if outcome != "edit":
-            return
+    # new_study_interactive runs the feasibility check, the options and the
+    # confirmation card itself (R4-R6); it returns a plan only after the
+    # user pressed Start.
+    plan = study.new_study_interactive(settings)
+    if plan is None:
+        ui.info("No study was started.")
+        raise typer.Exit(0)
+    _pipeline_check(settings, plan)
+    _launch(settings, plan, watch=not no_watch)
 
 
 @app.command("run")
@@ -598,6 +712,19 @@ def run_cmd(
     dataset: Annotated[Optional[str], typer.Option("--dataset", help="The dataset to use.")] = None,
     venue: Annotated[
         Optional[str], typer.Option("--venue", help="Where the paper is aimed (default: EDM).")
+    ] = None,
+    paper_format: Annotated[
+        Optional[PaperFormat],
+        typer.Option("--paper-format", help="conference or journal (default: your setup's choice)."),
+    ] = None,
+    review: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--review/--no-review",
+            help="Run the automated peer review (LSAR) after the paper is written "
+            "(default: your setup's choice).",
+            show_default=False,
+        ),
     ] = None,
     no_watch: NoWatchOpt = False,
     accept_disclosure: AcceptOpt = False,
@@ -630,7 +757,17 @@ def run_cmd(
         message = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
         ui.fail(str(message))
         raise typer.Exit(1) from None
-    _preflight_confirm_launch(settings, plan, yes=non_interactive, watch=not no_watch, allow_edit=False)
+    import dataclasses
+
+    if paper_format is not None:
+        plan = dataclasses.replace(plan, paper_format=paper_format.value)
+    if review is not None:
+        if review and not _review_available(settings):
+            ui.fail("The automated reviewer is not set up, so --review cannot be used.")
+            ui.info("Set it up with `edmars setup reviewer`, or leave out --review.")
+            raise typer.Exit(1)
+        plan = dataclasses.replace(plan, review=review)
+    _preflight_confirm_launch(settings, plan, yes=non_interactive, watch=not no_watch)
 
 
 @app.command("status")
@@ -768,16 +905,6 @@ def review_cmd(run: RunArg = None, plain: PlainOpt = False, yes: YesOpt = False)
 
 # --- data -------------------------------------------------------------------------------
 
-_DEFAULT_TERMS = (
-    "This is public-use data from its provider (for the NCES datasets: the "
-    "National Center for Education Statistics).\n"
-    "- Use it only for statistical research, and make no attempt to identify "
-    "any person or school.\n"
-    "- Cite the provider as the source in anything you publish.\n"
-    "- EDM-ARS is not affiliated with or endorsed by NCES/IES or any data provider."
-)
-
-
 def _dataset_info(datasets: ModuleType, name: str) -> Any:
     catalog = getattr(datasets, "CATALOG", {})
     if name not in catalog:
@@ -787,40 +914,41 @@ def _dataset_info(datasets: ModuleType, name: str) -> Any:
     return catalog[name]
 
 
-def _progress_printer() -> Callable[..., None]:
-    """A download progress callback tolerant of (done, total) or (fraction,) calls."""
-    state = {"last": -1}
+_PHASE_WORDS = {"download": "downloaded", "extract": "unpacked", "verify": "checked"}
 
-    def report(*args: Any, **_kwargs: Any) -> None:
-        numbers = [a for a in args if isinstance(a, (int, float))]
-        if not numbers:
+
+def _progress_printer() -> Callable[..., None]:
+    """A download progress callback: one line per 10% of each phase.
+
+    ``datasets`` reports ``(done, total, phase)`` with the phases
+    download, extract and verify; a line per phase keeps a 2 GB unzip
+    from looking like a hang after "downloaded 100%".
+    """
+    state = {"phase": "", "last": -1}
+
+    def report(done: Any = 0, total: Any = None, phase: str = "download", *_rest: Any) -> None:
+        try:
+            done_n, total_n = float(done or 0), float(total or 0)
+        except (TypeError, ValueError):
             return
-        if len(numbers) >= 2 and numbers[1]:
-            fraction = float(numbers[0]) / float(numbers[1])
-        elif numbers[0] <= 1:
-            fraction = float(numbers[0])
-        else:
+        if not total_n:
             return
-        step = int(max(0.0, min(fraction, 1.0)) * 10)
+        if phase != state["phase"]:
+            state["phase"], state["last"] = phase, -1
+        step = int(max(0.0, min(done_n / total_n, 1.0)) * 10)
         if step > state["last"]:
             state["last"] = step
-            ui.say(f"  downloaded {step * 10}%")
+            ui.say(f"  {_PHASE_WORDS.get(phase, phase)} {step * 10}%")
 
     return report
 
 
-def _record_dataset(
-    settings: dict[str, Any], name: str, path: Path, check: Any, *, terms_accepted: bool = False
-) -> None:
+def _save_dataset_path(settings: dict[str, Any], name: str, path: Path) -> None:
+    """Remember where a dataset is (``datasets`` records hashes itself)."""
     from edmars import settings as settings_mod
 
-    entry = dict(settings_mod.get(settings, f"datasets.{name}", {}) or {})
-    entry["path"] = str(path)
-    if terms_accepted:
-        entry["terms_accepted_at"] = settings_mod.utc_now()
-    if getattr(check, "status", None) == "ok":
-        entry["verified_at"] = settings_mod.utc_now()
-    settings_mod.set_(settings, f"datasets.{name}", entry)
+    if settings_mod.get(settings, f"datasets.{name}.path") != str(path):
+        settings_mod.set_(settings, f"datasets.{name}.path", str(path))
     settings_mod.save(settings)
 
 
@@ -854,32 +982,34 @@ def data_install_cmd(
     _modes(plain, yes)
     datasets = _module("datasets")
     settings = _settings()
-    info = _dataset_info(datasets, name)
+    _dataset_info(datasets, name)
 
-    accepted = False
     if name == "did_els_hsls_panel":
         with ui.status("Building the combined ELS:2002 + HSLS:09 panel from your two datasets"):
-            path = Path(datasets.build_did_panel(settings))
+            path = Path(datasets.install(name, settings))
     else:
-        terms = getattr(info, "terms", None) or _DEFAULT_TERMS
-        if not accept_terms:
-            if not ui.is_interactive():
-                raise ui.NonInteractiveError(
-                    "Do you accept the data provider's terms?",
-                    hint="Read them with `edmars data install NAME` in a terminal, or add --accept-terms.",
-                )
-            ui.panel("Terms of use", str(terms))
-            if not ui.confirm("Do you accept these terms?", default=False):
-                ui.info("Nothing was downloaded.")
-                raise typer.Exit(0)
-        accepted = True
+        terms = datasets.terms_text(name)
+        if terms and not datasets.terms_accepted(name, settings):
+            if not accept_terms:
+                if not ui.is_interactive():
+                    raise ui.NonInteractiveError(
+                        "Do you accept the data provider's terms?",
+                        hint="Read them with `edmars data install NAME` in a terminal, or add --accept-terms.",
+                    )
+                ui.panel("Terms of use", str(terms))
+                if not ui.confirm("Do you accept these terms?", default=False):
+                    ui.info("Nothing was downloaded.")
+                    raise typer.Exit(0)
+            datasets.accept_terms(name, settings)
+            from edmars import settings as settings_mod
+
+            settings_mod.save(settings)
         ui.info("Downloading. Large files take a while; if it stops, run the same command to continue.")
-        path = Path(
-            datasets.download(name, datasets.raw_data_dir(settings), progress=_progress_printer())
-        )
+        path = Path(datasets.install(name, settings, progress=_progress_printer()))
     check = datasets.validate_file(name, path)
     ui.show_checks([check])
-    _record_dataset(settings, name, path, check, terms_accepted=accepted)
+    if check.status != "fail":
+        _save_dataset_path(settings, name, path)
     raise typer.Exit(0 if check.status != "fail" else 1)
 
 
@@ -899,10 +1029,12 @@ def data_import_cmd(
     datasets = _module("datasets")
     settings = _settings()
     _dataset_info(datasets, name)
-    stored = Path(datasets.import_file(name, path, settings))
+    with ui.status("Checking and copying the file (a 2 GB file takes a minute)"):
+        stored = Path(datasets.import_file(name, path, settings))
     check = datasets.validate_file(name, stored)
     ui.show_checks([check])
-    _record_dataset(settings, name, stored, check)
+    if check.status != "fail":
+        _save_dataset_path(settings, name, stored)
     raise typer.Exit(0 if check.status != "fail" else 1)
 
 
@@ -910,27 +1042,27 @@ def data_import_cmd(
 @_friendly
 def data_verify_cmd(
     name: Annotated[
-        Optional[str], typer.Argument(help="Only this dataset (default: all).", show_default=False)
+        Optional[str], typer.Argument(help="Only this dataset (default: all installed ones).", show_default=False)
     ] = None,
     plain: PlainOpt = False,
     yes: YesOpt = False,
 ) -> None:
-    """Check that your datasets are present and in the expected format."""
+    """Re-read your datasets and check they are complete and unchanged."""
     _modes(plain, yes)
     datasets = _module("datasets")
     settings = _settings()
-    from edmars import settings as settings_mod
-
-    names = [name] if name else list(datasets.CATALOG)
     if name:
         _dataset_info(datasets, name)
+    names = [name] if name else list(datasets.CATALOG)
     checks = []
     for item in names:
-        recorded = settings_mod.get(settings, f"datasets.{item}.path")
-        if recorded and Path(str(recorded)).exists():
-            checks.append(datasets.validate_file(item, Path(str(recorded))))
-        else:
-            checks.append(datasets.status(item, settings))
+        current = datasets.status(item, settings)
+        if current.status == "fail" or (not name and current.status != "ok"):
+            # Not installed: nothing to re-read (status says how to get it).
+            checks.append(current)
+            continue
+        with ui.status(f"Re-reading {item} and checking its fingerprint (SHA-256)"):
+            checks.append(datasets.verify(item, settings))
     ui.show_checks(checks)
     raise typer.Exit(1 if any(c.status == "fail" for c in checks) else 0)
 

@@ -172,9 +172,10 @@ def test_doctor_passes_flags_and_exit_code(monkeypatch: pytest.MonkeyPatch) -> N
 
     fake_module(monkeypatch, "doctor", main=main)
     assert invoke("doctor", "--deep", "--json").exit_code == 3
-    assert calls[-1] == {"deep": True, "json_out": True, "bundle": False}
+    assert calls[-1] == {"deep": True, "json_out": True, "bundle": False, "quick": False}
+    # --quick is the installer's smoke test: installation checks only.
     invoke("doctor", "--quick", "--deep", "--bundle")
-    assert calls[-1] == {"deep": False, "json_out": False, "bundle": True}
+    assert calls[-1] == {"deep": False, "json_out": False, "bundle": True, "quick": True}
 
 
 def test_setup_passes_section_and_options(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,7 +198,8 @@ def test_setup_passes_section_and_options(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def _study_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-                 checks: list[Check] | None = None) -> dict[str, list[Any]]:
+                 checks: list[Check] | None = None,
+                 pipeline_checks: list[Check] | None = None) -> dict[str, list[Any]]:
     record: dict[str, list[Any]] = {"launch": [], "plan": []}
     plan = StudyPlan(task_type="prediction", dataset="hsls09_public", research_question="Q?", prompt="Q?")
 
@@ -212,6 +214,7 @@ def _study_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
         "study",
         plan_from_flags=plan_from_flags,
         preflight=lambda plan, settings: checks if checks is not None else [Check("Data", "ok", "found")],
+        blocking=lambda found: any(c.status == "fail" for c in found),
         confirmation_card=lambda plan, settings: "Question: Q?",
     )
 
@@ -219,7 +222,11 @@ def _study_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
         record["launch"].append(plan)
         return tmp_path / "study"
 
-    fake_module(monkeypatch, "runner", launch=launch)
+    def pipeline_check(settings: dict, plan: StudyPlan) -> list[Check]:
+        record.setdefault("pipeline_check", []).append(plan)
+        return list(pipeline_checks or [Check("Pipeline check", "ok", "passed")])
+
+    fake_module(monkeypatch, "runner", launch=launch, pipeline_check=pipeline_check)
     return record
 
 
@@ -268,6 +275,72 @@ def test_run_stops_on_a_failed_preflight(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert "HSLS is not installed" in result.output
     assert "edmars data install hsls09_public" in result.output
     assert record["launch"] == []
+
+
+def test_run_stops_when_the_pipeline_would_refuse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    accept_disclosure()
+    record = _study_fakes(
+        monkeypatch, tmp_path,
+        pipeline_checks=[Check("AI service key", "fail", "DEEPSEEK_API_KEY is not set",
+                               fix="Run `edmars setup ai` to add the key.")],
+    )
+    result = invoke("run", "--type", "prediction", "--prompt", "Q?", "--yes", "--no-watch")
+    assert result.exit_code == 1
+    assert "DEEPSEEK_API_KEY is not set" in result.output
+    assert "edmars setup ai" in result.output
+    assert record["launch"] == []
+
+
+def test_run_passes_paper_format_and_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    accept_disclosure()
+    record = _study_fakes(monkeypatch, tmp_path)
+    result = invoke("run", "--type", "prediction", "--prompt", "Q?", "--paper-format", "journal",
+                    "--no-review", "--yes", "--no-watch")
+    assert result.exit_code == 0, result.output
+    assert record["launch"][0].paper_format == "journal"
+    assert record["launch"][0].review is False
+    # --review needs a reviewer that is set up.
+    result = invoke("run", "--type", "prediction", "--prompt", "Q?", "--review", "--yes", "--no-watch")
+    assert result.exit_code == 1
+    assert "edmars setup reviewer" in result.output
+    assert len(record["launch"]) == 1
+
+
+def test_setup_named_flags_become_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    def run_setup(section: str | None = None, *, non_interactive: bool = False,
+                  options: dict | None = None) -> int:
+        calls.append((section, non_interactive, options))
+        return 0
+
+    fake_module(monkeypatch, "wizard", run_setup=run_setup,
+                NONINTERACTIVE_OPTIONS={"provider": ("EDMARS_PROVIDER", "which AI service")})
+    result = invoke("setup", "--yes", "--provider", "openai", "--key-env", "MY_KEY",
+                    "--no-key-check", "--lsar-action", "skip", "--latex-action", "skip")
+    assert result.exit_code == 0, result.output
+    assert calls[-1] == (None, True, {"provider": "openai", "key_env": "MY_KEY", "check_keys": False,
+                                      "lsar_action": "skip", "latex_action": "skip"})
+    listed = invoke("setup", "--list-options")
+    assert listed.exit_code == 0
+    assert "provider (or EDMARS_PROVIDER): which AI service" in listed.output
+
+
+def test_user_facing_errors_are_not_crash_reports(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Refused(RuntimeError):
+        user_facing = True
+
+    def boom(*_args: Any, **_kwargs: Any) -> list[Any]:
+        raise Refused("The file is not the labelled HSLS:09 CSV.")
+
+    source = paths.data_dir() / "some.csv"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("x", encoding="utf-8")
+    fake_module(monkeypatch, "datasets", CATALOG={"hsls09_public": object()}, import_file=boom)
+    result = invoke("data", "import", "hsls09_public", str(source))
+    assert result.exit_code == 1
+    assert "The file is not the labelled HSLS:09 CSV." in result.output
+    assert "Something went wrong" not in result.output
 
 
 def test_run_reports_a_bad_plan_plainly(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -391,26 +464,47 @@ def test_runs_lists_and_prints_json(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
 
 def _dataset_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
+    """Stand-ins with the real edmars.datasets signatures (no network)."""
     downloads: list[str] = []
     info = types.SimpleNamespace(label="HSLS:09 public-use file", terms="Use it for research only.")
+    verified: list[str] = []
 
-    def download(name: str, dest_dir: Path, progress: Any = None) -> Path:
+    def install(name: str, settings_: dict, progress: Any = None) -> Path:
         downloads.append(name)
         if progress is not None:
-            progress(50, 100)
-            progress(100, 100)
+            progress(50, 100, "download")
+            progress(100, 100, "download")
+            progress(100, 100, "extract")
         target = tmp_path / "hsls.csv"
         target.write_text("X1SEX\nMale\n", encoding="utf-8")
+        settings.set_(settings_, f"datasets.{name}.sha256", "ab" * 32)
+        settings.set_(settings_, f"datasets.{name}.verified_at", "2026-09-25T00:00:00Z")
         return target
+
+    def accept_terms(name: str, settings_: dict) -> None:
+        settings.set_(settings_, f"datasets.{name}.terms_accepted_at", "2026-09-25T00:00:00Z")
+
+    def status(name: str, settings_: dict) -> Check:
+        if settings.get(settings_, f"datasets.{name}.path"):
+            return Check(name, "ok", "installed")
+        return Check(name, "warn", "not downloaded yet", fix="edmars data install " + name)
+
+    def verify(name: str, settings_: dict, progress: Any = None) -> Check:
+        verified.append(name)
+        return Check("HSLS:09", "ok", "labelled values found. SHA-256 abcd...")
 
     fake_module(
         monkeypatch,
         "datasets",
         CATALOG={"hsls09_public": info},
-        download=download,
+        install=install,
+        terms_text=lambda name: info.terms,
+        terms_accepted=lambda name, s: bool(settings.get(s, f"datasets.{name}.terms_accepted_at")),
+        accept_terms=accept_terms,
         raw_data_dir=lambda s: tmp_path,
         validate_file=lambda name, path: Check("HSLS:09", "ok", "labelled values found"),
-        status=lambda name, s: Check(name, "warn", "not downloaded yet", fix="edmars data install " + name),
+        status=status,
+        verify=verify,
         import_file=lambda name, path, s: path,
     )
     return downloads
@@ -430,10 +524,15 @@ def test_data_install_records_the_dataset(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert result.exit_code == 0, result.output
     assert downloads == ["hsls09_public"]
     assert "downloaded 100%" in result.output
+    assert "unpacked 100%" in result.output
     entry = settings.load()["datasets"]["hsls09_public"]
     assert entry["path"] == str(tmp_path / "hsls.csv")
     assert entry["verified_at"].endswith("Z")
+    assert entry["sha256"] == "ab" * 32  # the record datasets.install made is saved
     assert entry["terms_accepted_at"].endswith("Z")
+    # Terms already accepted: not asked again, even without --accept-terms.
+    again = invoke("data", "install", "hsls09_public")
+    assert again.exit_code == 0, again.output
 
 
 def test_data_install_unknown_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
