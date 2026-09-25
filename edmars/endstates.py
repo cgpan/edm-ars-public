@@ -171,6 +171,7 @@ _ENVIRONMENT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 _STAGE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("INSTALL_BROKEN", re.compile(r"ModuleNotFoundError: No module named|DLL load failed")),
     ("ANALYSIS_FAILED", re.compile(r"ANALYZING failed")),
     ("INTERRUPTED", re.compile(r"KeyboardInterrupt")),
 ]
@@ -204,6 +205,18 @@ def _tail(path: Path, max_bytes: int = 16_000) -> str:
             return fh.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
+
+
+_ERROR_LINE = re.compile(r"^(?:[\w.]+\.)?\w+(?:Error|Exception|Interrupt)\b:?.*$")
+
+
+def last_error_line(text: str) -> str | None:
+    """The last ``SomethingError: message`` line of a traceback, if any."""
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if _ERROR_LINE.match(line):
+            return line[:300]
+    return None
 
 
 def _last_abort_line(log_tail: str) -> str | None:
@@ -243,7 +256,10 @@ def _abort_details(run_dir: Path, state: RunState, status: dict[str, Any] | None
     if not message and texts:
         message = texts[-1]
     for extra in ("crash.log", "console.log"):
-        texts.append(_tail(run_dir / extra, 8000))
+        tail = _tail(run_dir / extra, 8000)
+        texts.append(tail)
+        if not message:
+            message = last_error_line(tail) or ""
     texts.append(log_tail[-4000:])
 
     code = None

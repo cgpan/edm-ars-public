@@ -342,6 +342,27 @@ def test_crash_log_names_the_cause(run_home: Path) -> None:
     assert classify(run).code == "NO_CREDIT"
 
 
+def test_process_that_died_at_import_names_the_missing_part(run_home: Path) -> None:
+    console = ("Traceback (most recent call last):\n  File \"<frozen runpy>\", line 198\n"
+               "ModuleNotFoundError: No module named 'xgboost'\n")
+    run = make_run(run_home, pid=dead_pid(), pdf=False, log=None, data_report=None,
+                   extra={"console.log": console})
+    out = classify(run)
+    assert out.code == "INSTALL_BROKEN"
+    assert "No module named 'xgboost'" in out.why
+    assert out.commands[0] == "edmars doctor"
+
+
+def test_last_error_line() -> None:
+    from edmars.endstates import last_error_line
+
+    assert last_error_line("x\nValueError: config.yaml missing required keys\n") == \
+        "ValueError: config.yaml missing required keys"
+    assert last_error_line("openai.AuthenticationError: Error code: 401") == \
+        "openai.AuthenticationError: Error code: 401"
+    assert last_error_line("all good") is None
+
+
 def test_running(run_home: Path) -> None:
     run = make_run(run_home, pid=alive_pid(), pdf=False,
                    log=log_lines((0, "Starting FORMULATING stage"), (1, "FORMULATING stage complete"),

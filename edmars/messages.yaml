@@ -357,6 +357,13 @@ failures:
       balance, or the network).
     fix: "Your paper is complete. You can run the review again later."
     command: "edmars review {run}"
+  INSTALL_BROKEN:
+    title: "EDM-ARS is not fully installed"
+    why: "The pipeline could not start because a part it needs is missing: {reason}"
+    fix: "Check the installation, and run the installer again if the check says so. Then resume."
+    command: |-
+      edmars doctor
+      edmars resume {run}
   UNKNOWN:
     title: "The study stopped with an unrecognised error"
     why: "The pipeline stopped for a reason EDM-ARS does not recognise: {reason}"

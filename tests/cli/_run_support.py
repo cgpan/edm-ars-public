@@ -234,8 +234,9 @@ def run_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         pass
     from edmars import ui
 
-    if hasattr(ui, "set_plain"):
-        ui.set_plain(True)
+    # Plain output for assertions; monkeypatch restores the real function,
+    # so no global display state leaks into other tests.
+    monkeypatch.setattr(ui, "is_plain", lambda: True)
     return home
 
 
