@@ -571,8 +571,12 @@ class ReviewGate:
         Returns ``None`` on any failure (LSAR crash, import error, etc.).
         """
         lsar_root = str(self.lsar_project_path)
+        # Why the last call returned None, for the gate summary: a gate
+        # that could not run must not read as a review that scored 0.
+        self._last_lsar_failure = None
         if not os.path.isdir(lsar_root):
             self._log(f"LSAR project path does not exist: {lsar_root}")
+            self._last_lsar_failure = f"lsar_not_found: {lsar_root}"
             return None
 
         cycle_dir = self.output_dir / "lsar_review" / f"cycle_{cycle}"
@@ -616,6 +620,12 @@ class ReviewGate:
 
         except Exception as exc:
             self._log(f"LSAR pipeline failed (cycle {cycle}): {exc}")
+            detail = " ".join(str(exc).split())[:200]
+            self._last_lsar_failure = (
+                f"lsar_import_failed: {detail}"
+                if isinstance(exc, ImportError)
+                else f"exception: {type(exc).__name__}: {detail}"
+            )
             return None
         finally:
             if added_to_path and lsar_root in sys.path:
@@ -1551,11 +1561,30 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         }
         return median_report
 
+    #: Optional ``(event_type, **data) -> None`` hook the orchestrator sets
+    #: to receive ``gate.cycle`` / ``gate.review`` / ``gate.skipped``
+    #: events. A class attribute, so constructing a gate is unchanged.
+    event_fn: Any = None
+
+    def _event(self, etype: str, **data: Any) -> None:
+        fn = self.event_fn
+        if fn is None:
+            return
+        try:
+            fn(etype, **data)
+        except Exception:  # noqa: BLE001 - a UI side channel never raises
+            pass
+
     def run_gate(self) -> dict:
         """Execute the full review gate loop.
 
         Returns a summary dict with cycle details, final scores, and
-        whether the paper passed.
+        whether the paper passed. ``ran`` says whether any review
+        happened at all; when it did not, ``skip_reason`` says why and
+        ``final_score`` / ``passed`` are None. The old summary reported a
+        gate that never ran -- LSAR missing, a dependency missing, no PDF
+        -- as ``passed: false, final_score: 0.0``, indistinguishable from
+        a paper reviewed and judged worthless.
         """
         self._log(
             f"Starting review gate (max_cycles={self.max_cycles}, "
@@ -1567,14 +1596,22 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         final_score: float = 0.0
         final_recommendation: str = "Unknown"
         final_review_path: Optional[str] = None
+        skip_reason: Optional[str] = None
 
         for cycle in range(1, self.max_cycles + 1):
             self._log(f"--- Review gate cycle {cycle}/{self.max_cycles} ---")
+            self._event(
+                "gate.cycle",
+                cycle=cycle,
+                plain=f"Review gate: cycle {cycle} of {self.max_cycles}",
+                max_cycles=self.max_cycles,
+            )
 
             # 1. Prepare PDF
             pdf_path = self.prepare_pdf(self.output_dir, cycle=cycle)
             if pdf_path is None:
                 self._log("Cannot prepare PDF; skipping review gate")
+                skip_reason = "no_pdf"
                 break
 
             # 2. Run LSAR (with borderline-triggered median sampling —
@@ -1586,6 +1623,9 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             report_json = self.run_lsar(pdf_path, cycle)
             if report_json is None:
                 self._log("LSAR returned no result; skipping review gate")
+                skip_reason = (
+                    getattr(self, "_last_lsar_failure", None) or "lsar_no_result"
+                )
                 break
             report_json = self._maybe_median_sample(report_json, pdf_path, cycle)
 
@@ -1633,6 +1673,18 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                     "median_sampling": median_info,
                     "honesty_blockers": honesty,
                 }
+            )
+            self._event(
+                "gate.review",
+                cycle=cycle,
+                plain=(
+                    f"Review gate cycle {cycle}: score {final_score}, "
+                    + ("passed" if passed else "not passed")
+                ),
+                score=final_score,
+                passed=passed,
+                recommendation=final_recommendation,
+                threshold=self.pass_threshold,
             )
 
             if passed:
@@ -1764,14 +1816,28 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         # Build final summary. I5: threshold provenance and the median
         # sample set used to live only in pipeline.log — the summary now
         # carries everything needed to audit the verdict from disk.
+        ran = bool(per_cycle_scores)
+        if not ran:
+            skip_reason = skip_reason or (
+                "no_cycles" if self.max_cycles < 1 else "unknown"
+            )
+            self._event(
+                "gate.skipped",
+                plain=f"The review gate could not run ({skip_reason})",
+                reason=skip_reason,
+            )
         summary: dict[str, Any] = {
+            "ran": ran,
+            "skip_reason": None if ran else skip_reason,
             "cycles_used": len(per_cycle_scores),
             "max_cycles": self.max_cycles,
-            "final_score": final_score,
-            "final_recommendation": final_recommendation,
+            "final_score": final_score if ran else None,
+            "final_recommendation": (
+                final_recommendation if ran else "Not reviewed"
+            ),
             "per_cycle_scores": per_cycle_scores,
             "final_review_path": final_review_path,
-            "passed": final_passed,
+            "passed": final_passed if ran else None,
             "threshold_used": self.pass_threshold,
             "threshold_source": self.calibration_source,
             "advisory_mode": getattr(self, "advisory_mode", None),
@@ -1785,10 +1851,16 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         summary_path.write_text(
             json.dumps(summary, indent=2, default=str), encoding="utf-8"
         )
-        self._log(
-            f"Review gate finished: passed={final_passed}, "
-            f"cycles={len(per_cycle_scores)}, final_score={final_score:.2f}"
-        )
+        if ran:
+            self._log(
+                f"Review gate finished: passed={final_passed}, "
+                f"cycles={len(per_cycle_scores)}, final_score={final_score:.2f}"
+            )
+        else:
+            self._log(
+                f"Review gate did NOT run ({skip_reason}); the paper was not "
+                "reviewed and no score exists."
+            )
         return summary
 
     def _compile_full_latex(self, run_dir: Path) -> None:
