@@ -6,11 +6,13 @@ leaves any Python you already have alone. After it finishes, the setup
 wizard (`edmars setup`) walks you through the rest: AI service key, datasets,
 PDF tools and the optional reviewer.
 
-**Supported:** Windows 10 (version 1809 or newer) and Windows 11, 64-bit;
-macOS on Apple Silicon (M1 or newer); Linux on x86_64 or arm64 with glibc
-(Ubuntu, Debian, Fedora and similar), best effort. **Not supported:** Intel
-Macs (numba, llvmlite and scs no longer publish Intel Mac builds of the
-tested versions), 32-bit Windows, and musl-based Linux such as Alpine.
+**Supported:** Windows 10 (version 1809 or newer) and Windows 11, 64-bit
+(tested on Windows 11). **Untested preview:** macOS on Apple Silicon (M1 or
+newer), and Linux on x86_64 or arm64 with glibc (Ubuntu, Debian, Fedora and
+similar, best effort). The installer is written for them, but it has not yet
+been run on a Mac or a Linux computer. **Not supported:** Intel Macs (numba,
+llvmlite and scs no longer publish Intel Mac builds of the tested versions),
+32-bit Windows, and musl-based Linux such as Alpine.
 
 You need about 6 GB of free disk space (packages, datasets and study
 outputs) and an internet connection. 16 GB of memory is recommended.
