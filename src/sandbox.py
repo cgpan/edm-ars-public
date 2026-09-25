@@ -12,6 +12,7 @@ import os
 import re
 import pathlib
 import subprocess
+import sys
 import warnings
 from typing import TYPE_CHECKING, Any
 
@@ -145,11 +146,36 @@ def check_portability(code: str) -> list[str]:
     return findings
 
 
+#: Returned when the interpreter itself cannot be started -- the shell's
+#: "command not found" code, so it cannot be mistaken for a script error.
+INTERPRETER_NOT_STARTED = 127
+
+
 class SubprocessExecutor:
     """Execute LLM-generated code via bare subprocess.run().
 
     Mirrors the interface of DockerSandbox.run() so the two are interchangeable.
+
+    The script runs under the SAME interpreter as the pipeline
+    (``sys.executable``), not whatever ``python`` the OS finds first. On
+    Windows a venv's python.exe is a redirector that starts the base
+    install, and CreateProcess searches the running image's own directory
+    before PATH, so a bare ``python`` resolved to the base interpreter even
+    inside an activated venv -- one without the packages the README had
+    just installed. On macOS a bare ``python`` often does not exist at all.
+    ``python_executable`` (config ``sandbox.python_executable``) overrides
+    the choice for operators who deliberately run analysis code elsewhere.
     """
+
+    def __init__(self, python_executable: str | None = None) -> None:
+        self.python_executable: str | None = (
+            os.path.expanduser(os.path.expandvars(str(python_executable)))
+            if python_executable else None
+        )
+
+    def interpreter(self) -> str:
+        """The Python the generated script will run under."""
+        return self.python_executable or sys.executable or "python"
 
     def run(
         self,
@@ -174,7 +200,9 @@ class SubprocessExecutor:
 
         Returns
         -------
-        dict with keys: stdout, stderr, returncode
+        dict with keys: stdout, stderr, returncode. returncode is 127
+        (``INTERPRETER_NOT_STARTED``) when the interpreter could not be
+        started at all.
         """
         # Write code to a temp file instead of passing via -c to avoid
         # Windows command-line length limit (WinError 206, ~32k char cap).
@@ -213,17 +241,34 @@ class SubprocessExecutor:
             }
 
         script_path = os.path.join(output_dir, "_generated_script.py")
+        exe = self.interpreter()
         try:
             with open(script_path, "w", encoding="utf-8") as fh:
                 fh.write(code)
-            result = subprocess.run(
-                ["python", script_path],
-                capture_output=True,
-                text=True,
-                timeout=timeout_s,
-                cwd=output_dir,
-                env=blas_thread_env(),
-            )
+            try:
+                result = subprocess.run(
+                    [exe, script_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_s,
+                    cwd=output_dir,
+                    env=blas_thread_env(),
+                )
+            except OSError as exc:
+                # Only the interpreter launch lands here: writing the
+                # script above is outside this try on purpose, so a bad
+                # output_dir still raises as it always did.
+                return {
+                    "stdout": "",
+                    "stderr": (
+                        f"Could not start the Python interpreter {exe!r}: "
+                        f"{exc}. Set sandbox.python_executable in config.yaml "
+                        "to a Python that has this project's requirements "
+                        "installed, or leave it unset to use the interpreter "
+                        "running the pipeline."
+                    ),
+                    "returncode": INTERPRETER_NOT_STARTED,
+                }
             return {
                 "stdout": result.stdout,
                 "stderr": result.stderr,
@@ -265,6 +310,7 @@ class DockerSandbox:
         cpu_count: int = 2,
         network_disabled: bool = True,
         auto_build: bool = True,
+        python_executable: str | None = None,
     ) -> None:
         self.image = image
         self.memory_limit = memory_limit
@@ -272,6 +318,9 @@ class DockerSandbox:
         self.network_disabled = network_disabled
         self.auto_build = auto_build
         self._client: Any = None  # lazy-initialised on first run()
+        # Every "fall back to subprocess" path uses this one, so a fallback
+        # runs under the configured interpreter, not the default one.
+        self._fallback = SubprocessExecutor(python_executable=python_executable)
 
     def _get_client(self) -> Any:
         """Return (and cache) a docker.DockerClient."""
@@ -327,7 +376,7 @@ class DockerSandbox:
                 RuntimeWarning,
                 stacklevel=2,
             )
-            return SubprocessExecutor().run(
+            return self._fallback.run(
                 code=code, output_dir=output_dir,
                 raw_data_path=raw_data_path, timeout_s=timeout_s,
             )
@@ -416,7 +465,7 @@ class DockerSandbox:
                         RuntimeWarning,
                         stacklevel=2,
                     )
-                return SubprocessExecutor().run(
+                return self._fallback.run(
                     code=code, output_dir=output_dir,
                     raw_data_path=raw_data_path, timeout_s=timeout_s,
                 )
@@ -426,7 +475,7 @@ class DockerSandbox:
                     RuntimeWarning,
                     stacklevel=2,
                 )
-                return SubprocessExecutor().run(
+                return self._fallback.run(
                     code=code, output_dir=output_dir,
                     raw_data_path=raw_data_path, timeout_s=timeout_s,
                 )
@@ -524,10 +573,19 @@ def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecuto
     If sandbox.enabled is False (or the key is absent), returns SubprocessExecutor.
     If Docker daemon is not reachable, emits a RuntimeWarning and returns
     SubprocessExecutor.
+
+    Every executor returned -- including the subprocess one a Docker
+    sandbox falls back to -- carries ``sandbox.python_executable`` (null =
+    the interpreter running the pipeline).
     """
-    sandbox_cfg: dict[str, Any] = config.get("sandbox", {})
+    sandbox_cfg: dict[str, Any] = config.get("sandbox") or {}
+    python_executable = sandbox_cfg.get("python_executable") or None
+
+    def _subprocess() -> SubprocessExecutor:
+        return SubprocessExecutor(python_executable=python_executable)
+
     if not sandbox_cfg.get("enabled", False):
-        return SubprocessExecutor()
+        return _subprocess()
 
     if not _DOCKER_AVAILABLE:
         warnings.warn(
@@ -536,7 +594,7 @@ def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecuto
             RuntimeWarning,
             stacklevel=2,
         )
-        return SubprocessExecutor()
+        return _subprocess()
 
     try:
         client = docker.from_env()
@@ -548,7 +606,7 @@ def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecuto
             RuntimeWarning,
             stacklevel=2,
         )
-        return SubprocessExecutor()
+        return _subprocess()
 
     return DockerSandbox(
         image=sandbox_cfg.get("image", "edm-ars-sandbox:latest"),
@@ -556,4 +614,5 @@ def create_executor(config: dict[str, Any]) -> DockerSandbox | SubprocessExecuto
         cpu_count=sandbox_cfg.get("cpu_count", 2),
         network_disabled=sandbox_cfg.get("network_disabled", True),
         auto_build=sandbox_cfg.get("auto_build", True),
+        python_executable=python_executable,
     )
