@@ -69,6 +69,8 @@ class FakeUI:
     def __init__(self) -> None:
         self.script: list[Any] = []
         self.prompts: list[tuple[str, str, list[tuple[str, str]] | None]] = []
+        #: The default each select prompt offered (None: Enter alone does not answer).
+        self.defaults: dict[str, str | None] = {}
         self.lines: list[str] = []
         self.plain = True
         self.console: Any = FakeConsole(self.lines)
@@ -86,8 +88,11 @@ class FakeUI:
         return answer
 
     def select(self, message: str, choices: list[tuple[str, str]], default: str | None = None) -> str:
+        self.defaults[message] = default
         answer = self._next("select", message, list(choices))
         if answer is DEFAULT:
+            # The real prompt asks again when Enter is pressed with no default.
+            assert default is not None, f"{message!r} offers no default; the script must pick an option"
             return str(default)
         values = [v for v, _ in choices]
         assert answer in values, f"{answer!r} is not a choice for {message!r}: {values}"

@@ -1,8 +1,9 @@
 """`edmars setup`: the guided setup wizard (screens S0 to S11).
 
 Written for education researchers who have never used a terminal: plain
-English, one decision per screen, the recommended answer pre-selected,
-links printed in full, keys pasted hidden and checked live, and a clear
+English, one decision per screen, the recommended answer pre-selected
+(except where the answer records consent: the notice and a dataset's
+terms need an explicit choice), links printed in full, keys pasted hidden and checked live, and a clear
 "Saved in <place>" after every key. Progress is saved after each screen,
 so an interrupted setup continues where it stopped.
 
@@ -418,14 +419,23 @@ class _Wizard:
 
     # -- questions --------------------------------------------------------------
     def choose(self, message: str, choices: Sequence[tuple[str, str]], default: str | None = None,
-               *, back: bool | None = None, quit_: bool = True) -> str:
+               *, back: bool | None = None, quit_: bool = True, explicit: bool = False) -> str:
+        """Ask for one of ``choices``.
+
+        ``explicit`` offers no default, so pressing Enter alone never
+        answers: used where the answer records consent (the notice, a
+        dataset's terms). Put a harmless option first, because the
+        arrow-key menu starts on the first one.
+        """
         options = [(value, _t(_nb(label))) for value, label in choices]
         if self.allow_back if back is None else back:
             options.append((_BACK, "Go back"))
         if quit_:
             options.append((_QUIT, _t("Quit setup for now (your answers so far are saved)")))
         values = [value for value, _ in options]
-        if default not in values:
+        if explicit:
+            default = None
+        elif default not in values:
             default = values[0] if values else None
         answer = self.ui.select(_t(message), options, default=default)
         if answer is None or answer == _QUIT:
@@ -608,12 +618,14 @@ class _Wizard:
                        "and `edmars privacy`, then run setup again with --accept-disclosure.")
             raise _Abort(1)
         while True:
+            # No default, and accepting is not the first option: accepting
+            # must be something the user chose, not what Enter did.
             answer = self.choose(
-                "Do you understand and accept this?",
-                [("accept", "I understand and accept \u2014 continue"),
-                 ("disclaimer", "Read the full disclaimer first"),
-                 ("privacy", "Read the full privacy notice first")],
-                default="accept")
+                "Do you understand and accept this? (Pick an option; pressing Enter alone does not accept.)",
+                [("disclaimer", "Read the full disclaimer first"),
+                 ("privacy", "Read the full privacy notice first"),
+                 ("accept", "I understand and accept \u2014 continue")],
+                explicit=True)
             if answer in ("disclaimer", "privacy"):
                 # Long Markdown texts are printed literally, not as a panel.
                 self.say(disclosure.disclaimer_text() if answer == "disclaimer" else disclosure.privacy_text())
@@ -1390,9 +1402,10 @@ class _Wizard:
         if self.ni:
             self.info(f"Terms accepted for {label} because dataset_action=download was given.")
         else:
-            answer = self.choose("Do you agree to use the data under these terms?",
-                                 [("agree", "I agree \u2014 download it"), ("no", "Don't download")],
-                                 default="agree", back=False)
+            answer = self.choose("Do you agree to use the data under these terms? (Pick an option; pressing "
+                                 "Enter alone does not agree.)",
+                                 [("no", "Don't download"), ("agree", "I agree \u2014 download it")],
+                                 explicit=True, back=False)
             if answer != "agree":
                 return False
         self.set(f"datasets.{name}.terms_accepted_at", _now())

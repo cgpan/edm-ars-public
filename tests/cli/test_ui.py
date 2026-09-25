@@ -195,6 +195,17 @@ def test_plain_select_by_number_value_and_default(typed, capsys: pytest.CaptureF
     assert ui.select("Which AI service?", choices) == "local"
 
 
+def test_plain_select_without_a_default_needs_a_pick(typed, capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
+    # Consent prompts (the setup notice, a dataset's terms) pass no default:
+    # an empty line must ask again, never answer.
+    typed("", "2")
+    picked = ui.select("Do you accept?", [("read", "Read it first"), ("accept", "I accept")], default=None)
+    assert picked == "accept"
+    out = capsys.readouterr().out
+    assert "(default)" not in out
+    assert "Please type one of the numbers shown." in out
+
+
 def test_plain_select_refuses_disabled_options(typed, capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
     typed("2", "1")
     picked = ui.select(

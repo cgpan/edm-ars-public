@@ -144,6 +144,30 @@ def test_notice_must_be_accepted_to_continue(fx: Fakes) -> None:
     assert "[PRIVACY.md](PRIVACY.md)" in fx.ui.output
 
 
+def test_accepting_the_notice_is_never_what_enter_does(fx: Fakes) -> None:
+    # Pressing Enter through setup used to record consent: "accept" was the
+    # default and the first option. Now there is no default and the arrow-key
+    # menu starts on "Read the full disclaimer first".
+    fx.ui.script = ["continue", DEFAULT]
+    with pytest.raises(AssertionError, match="offers no default"):
+        run()
+    assert not fx.saved().get("acknowledged")
+    message, choices = next((m, c) for kind, m, c in fx.ui.prompts if m.startswith("Do you understand"))
+    assert fx.ui.defaults[message] is None
+    assert choices is not None and choices[0][0] != "accept"
+    assert "Enter alone does not accept" in message
+
+
+def test_dataset_terms_need_an_explicit_agreement(fx: Fakes) -> None:
+    fx.ui.script = ["download", DEFAULT]
+    with pytest.raises(AssertionError, match="offers no default"):
+        run("datasets")
+    assert "terms_accepted_at" not in (fx.saved().get("datasets", {}).get("hsls09_public") or {})
+    message, choices = next((m, c) for kind, m, c in fx.ui.prompts if m.startswith("Do you agree"))
+    assert fx.ui.defaults[message] is None
+    assert choices is not None and choices[0][0] == "no"
+
+
 def test_non_tty_prompt_failure_is_a_clear_message(fx: Fakes) -> None:
     fx.ui.script = [NonInteractiveError("stdin is not a terminal")]
     assert run() == 1
