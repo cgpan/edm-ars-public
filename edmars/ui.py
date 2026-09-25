@@ -609,8 +609,34 @@ def text(message: str, default: str | None = None, validate: Validator | None = 
         return value
 
 
+def _without_hidden_claim(message: str) -> str:
+    """``message`` without "it stays hidden", for a terminal that shows typing."""
+    message = re.sub(r"\s*\(it stays hidden\)", "", message)
+    return re.sub(r"it stays hidden[;,]\s*", "", message)
+
+
+def _erase_rows(typed_chars: int) -> str:
+    """ANSI codes that erase the ``typed_chars`` characters just echoed.
+
+    After Enter the cursor is at the start of the next row. The prompt and
+    the input filled ceil(typed_chars / width) rows above it; go up that
+    many and clear to the end of the screen. The width is the terminal's
+    when it can be read, else 80 columns. A wider window only means a
+    line or two above the prompt is cleared as well.
+    """
+    import shutil
+
+    width = max(1, shutil.get_terminal_size((80, 24)).columns)
+    rows = max(1, -(-max(typed_chars, 1) // width))
+    return f"\x1b[{rows}A\r\x1b[J"
+
+
 def secret(message: str) -> str:
-    """Ask for a secret (an API key) without showing it on screen."""
+    """Ask for a secret (an API key) without showing it on screen.
+
+    Git Bash's window (mintty) cannot hide typing: there the key is shown
+    while it is pasted and erased from the screen after Enter.
+    """
     if not is_interactive():
         raise NonInteractiveError(
             message,
@@ -634,11 +660,13 @@ def secret(message: str) -> str:
             "the screen after you press Enter. (PowerShell or Windows Terminal "
             "hide it as you type.)"
         )
-        raw = _read_line(f"{message}: ")
+        prompt = f"{_without_hidden_claim(message)}: "
+        raw = _read_line(prompt)
         if raw is None:
             raise _end_of_input(message)
-        # Move up one line and clear it: mintty understands ANSI escapes.
-        sys.stdout.write("\x1b[1A\x1b[2K")
+        # A long key wraps over several rows; erase every row the prompt and
+        # the key took, not only the last one (mintty understands ANSI escapes).
+        sys.stdout.write(_erase_rows(len(prompt) + len(raw)))
         sys.stdout.flush()
         return raw.strip()
 

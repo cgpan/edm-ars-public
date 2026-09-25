@@ -272,6 +272,28 @@ def test_plain_secret_reads_a_stripped_line(typed) -> None:  # type: ignore[no-u
     assert ui.secret("Paste your key") == "sk-fake-pasted-0123456789"
 
 
+def test_git_bash_secret_erases_every_row_the_key_took(typed, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:  # type: ignore[no-untyped-def]
+    # mintty echoes the pasted key. Erasing only the last row left 158 of a
+    # 164-character OpenAI key on screen in an 80-column window, right after
+    # the prompt had said the key "stays hidden".
+    import os
+    import shutil
+
+    key = "sk-proj-" + "F" * 156  # fake, 164 characters like a real project key
+    typed(key)
+    monkeypatch.setattr(ui, "is_mintty", lambda: True)
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=(80, 24): os.terminal_size((80, 24)))
+    message = "Paste your OpenAI key (it stays hidden; press Enter on an empty line to go back)"
+    assert ui.secret(message) == key
+    out = capsys.readouterr().out
+    prompt = "Paste your OpenAI key (press Enter on an empty line to go back): "
+    assert prompt in out and "stays hidden" not in out
+    rows = -(-(len(prompt) + len(key)) // 80)
+    assert rows >= 3
+    assert out.endswith(f"\x1b[{rows}A\r\x1b[J")
+    assert ui._without_hidden_claim("Paste the server's key (it stays hidden)") == "Paste the server's key"
+
+
 def test_get_console_returns_a_real_console_for_rich_widgets() -> None:
     from rich.console import Console
 
