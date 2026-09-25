@@ -590,6 +590,36 @@ def test_gate_outcomes_are_distinguishable(
         assert status["review_gate_score"] is None
 
 
+def test_a_gate_whose_last_cycle_failed_says_the_paper_was_not_re_reviewed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cycle 1 was scored, the paper was revised, and cycle 2 reviewed
+    nothing. The score is cycle 1's; the delivered paper is not the one
+    it belongs to, and run_status must say so."""
+    _no_invariants(monkeypatch)
+    orch = _orch(tmp_path, _config(tmp_path, review_gate__enabled=True))
+    orch.ctx.review_gate_result = {
+        "ran": True, "skip_reason": None, "passed": False, "cycles_used": 1,
+        "final_score": 5.0, "threshold_used": 9.0,
+        "final_manuscript_reviewed": False,
+        "last_cycle_failure": "lsar_scoring_failed: simulated",
+    }
+    orch.ctx.current_state = PipelineState.VERIFYING
+
+    orch._run_verifying()
+
+    status = _status(tmp_path)
+    gate = status["gate"]
+    assert gate["ran"] is True and gate["score"] == 5.0
+    assert gate["final_manuscript_reviewed"] is False
+    assert gate["last_cycle_failure"] == "lsar_scoring_failed: simulated"
+    assert status["reason_code"] == "GATE_FAILED"
+    assert (
+        "the revised paper was not re-reviewed (lsar_scoring_failed: simulated)"
+        in status["reason"]
+    )
+
+
 def test_an_unverified_paper_outranks_a_gate_that_did_not_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

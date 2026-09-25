@@ -1084,6 +1084,11 @@ class Orchestrator:
         A gate that never ran (disabled, LSAR missing, no PDF, an
         exception) reports ``ran: false`` with ``score: null`` -- never a
         failed review scored 0.0, which is what the old record said (B2).
+
+        A gate that ran also carries ``final_manuscript_reviewed`` (False
+        when paper.tex was revised after the review ``score`` comes from)
+        and ``last_cycle_failure`` (why the next cycle reviewed nothing),
+        both None when the summary does not say.
         """
         rg_cfg = self.config.get("review_gate", {}) or {}
         enabled = bool(rg_cfg.get("enabled", False))
@@ -1121,6 +1126,14 @@ class Orchestrator:
                 float(score)
                 if isinstance(score, (int, float)) and not isinstance(score, bool)
                 else None
+            )
+            reviewed = res.get("final_manuscript_reviewed")
+            block["final_manuscript_reviewed"] = (
+                reviewed if isinstance(reviewed, bool) else None
+            )
+            failure = res.get("last_cycle_failure")
+            block["last_cycle_failure"] = (
+                _one_line(failure, 200) if failure else None
             )
         else:
             skip = res.get("skip_reason")
@@ -2465,6 +2478,16 @@ class Orchestrator:
             (
                 f"review gate did not run ({gate['skip_reason']})"
                 if gate_not_run
+                else ""
+            ),
+            (
+                "the revised paper was not re-reviewed"
+                + (
+                    f" ({gate['last_cycle_failure']})"
+                    if gate.get("last_cycle_failure")
+                    else ""
+                )
+                if gate.get("final_manuscript_reviewed") is False
                 else ""
             ),
             "critic verdict was not PASS" if unverified else "",
