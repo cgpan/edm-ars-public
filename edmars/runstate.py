@@ -171,6 +171,9 @@ class RunState:
     #: When the latest process started (the last ``run.start``); files
     #: older than this belong to an earlier attempt.
     run_started_at: datetime | None = None
+    #: The study plan was built with the menus or came from the user's own
+    #: file, not from a tested example (runner.json ``study.experimental``).
+    experimental: bool = False
 
     def stage(self, key: str) -> StageState:
         for st in self.stages:
@@ -1268,6 +1271,7 @@ def _enrich(state: RunState, run_dir: Path, files: _FileCache, *, tail: bool) ->
         or ""
     )
     state.dataset = str(study.get("dataset") or state.dataset or checkpoint.get("dataset_name") or "")
+    state.experimental = study.get("experimental") is True
     state.provider = str(study.get("provider") or state.provider or config.get("llm_provider") or "")
     rg = as_dict(config.get("review_gate"))
     if rg.get("enabled"):
@@ -1651,6 +1655,11 @@ def describe_now(state: RunState, now: datetime | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Shown with every screen about an EXPERIMENTAL study (the words the
+#: confirmation card uses).
+EXPERIMENTAL_LINE = "[EXPERIMENTAL] not a tested example study"
+EXPERIMENTAL_NOTE = "Check the results with extra care."
+
 #: Final states of a study that ran to its end, whether or not the paper
 #: was released.
 RAN_TO_END_STATES: tuple[str, ...] = ("COMPLETED", "INCOMPLETE")
@@ -1736,6 +1745,8 @@ def load_json(path: Path) -> Any:
 
 
 __all__ = [
+    "EXPERIMENTAL_LINE",
+    "EXPERIMENTAL_NOTE",
     "RunState",
     "as_dict",
     "StageState",

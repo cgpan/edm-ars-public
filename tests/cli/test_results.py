@@ -79,6 +79,30 @@ def test_gate_scores_on_success_screen(run_home: Path, capsys: pytest.CaptureFix
     assert "Automated peer review (LSAR): 5.1 out of 10, below the benchmark of 6.3" in " ".join(out.split())
 
 
+def test_an_experimental_plan_is_labelled_on_every_result(run_home: Path,
+                                                         capsys: pytest.CaptureFixture[str]) -> None:
+    # runner.json recorded study.experimental, but only the confirmation
+    # card ever showed it: a finished menu-built study read as a plain "Ready".
+    from edmars import view
+    from edmars.endstates import classify
+    from edmars.runstate import load_state
+
+    run = _ready(run_home, study={"experimental": True})
+    _, out = _show(run, capsys)
+    lines = out.splitlines()
+    assert lines[0] == "[ok] Ready"
+    assert lines[1].startswith("[EXPERIMENTAL] not a tested example study.")
+    state = load_state(run)
+    html_text = results.render_summary_html(classify(run), state, run)
+    assert "[EXPERIMENTAL] not a tested example study" in html_text
+    assert "[EXPERIMENTAL]" in view.screen_text(state, width=80, plain=True)
+
+    plain = _ready(run_home / "b")
+    _, out = _show(plain, capsys)
+    assert "EXPERIMENTAL" not in out
+    assert "EXPERIMENTAL" not in results.render_summary_html(classify(plain), load_state(plain), plain)
+
+
 def test_a_review_that_did_not_run_is_explained_and_setup_comes_first(
     run_home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

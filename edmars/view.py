@@ -27,6 +27,7 @@ from typing import Any, Callable
 from rich.cells import cell_len
 
 from edmars.runstate import (
+    EXPERIMENTAL_LINE,
     RunState,
     StateReader,
     fmt_duration,
@@ -167,6 +168,8 @@ def render_screen(
 
     question = state.question or "(the study plan is being written)"
     add(f'EDM-ARS · "{question}"', "bold")
+    if state.experimental:
+        add(EXPERIMENTAL_LINE, "bold yellow")
     left = " · ".join(p for p in (_type_label(state.task_type), state.dataset, _provider_label(state.provider)) if p)
     right = f"Started {_local(state.started)} · now {_local(ref)}"
     for text in _two_col(left, right, width, plain):
