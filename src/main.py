@@ -225,7 +225,7 @@ _PAST_ENGINEERING = (
 #: console.log, a locked spec) survive.
 _RUN_FILES = (
     "checkpoint.json", "run_status.json", "invariants.json", "obligations.json",
-    "events.jsonl", "live_status.json", "live_status.json.tmp", "pipeline.log",
+    "events.jsonl", "live_status.json", "pipeline.log",
     "crash.log", "token_usage.jsonl", "run_cost.json", "config_snapshot.yaml",
     "verification_report.json", "verification_raw.txt", "manuscript_lint.json",
     "research_spec.json", "literature_context.json",
@@ -233,13 +233,23 @@ _RUN_FILES = (
     "citation_depth_report.json", "data_report.json", "results.json",
     "review_report.json", "critic_reasoning.txt", "paper_outline.json",
     "references.bib", "train_X.csv", "train_y.csv", "test_X.csv", "test_y.csv",
-    "test_protected.csv", "panel_analytic.csv", "items_analytic.csv",
+    "test_protected.csv", "train_school_ids.csv", "test_school_ids.csv",
+    "panel_analytic.csv", "items_analytic.csv",
     "q_matrix.json", "data_engineer_generated.py", "_generated_script.py",
     "analysis_helpers.py", "r_bridge.py", "model_comparison.csv",
-    "feature_importance.csv", "subgroup_performance.csv", "roc_curves.png",
-    "shap_summary.png", "shap_importance.png",
+    "feature_importance.csv", "subgroup_performance.csv",
 )
-_RUN_FILE_PATTERNS = ("paper.*", "paper_for_review.*", "pdp_*.png")
+#: Every image in a run folder counts as one of the run's figures: the
+#: Analyst and the Writer adopt any .png/.pdf/.jpg on disk that results.json
+#: does not list (analyst.py _verify_figures_on_disk, writer.py
+#: _available_figures). An earlier run's figure left behind by --overwrite
+#: would therefore be embedded in the new paper, so all of them go. The
+#: ``*.json.tmp`` names are the atomic-write temporaries of the checkpoint,
+#: run_status and live_status files.
+_RUN_FILE_PATTERNS = (
+    "paper.*", "paper_for_review.*", "*.png", "*.jpg", "*.jpeg", "*.pdf",
+    "*.json.tmp", "*.json.*.tmp",
+)
 _RUN_DIRS = ("prompts", "lsar_review")
 
 
@@ -297,8 +307,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Start over in an --output-dir that already holds a run: delete "
-            "that run's files (checkpoint, results, paper, logs) first. "
-            "Other files in the folder are left alone."
+            "that run's files (checkpoint, results, figures and other "
+            "images, paper, logs) first. Other files in the folder are left "
+            "alone."
         ),
     )
     parser.add_argument(

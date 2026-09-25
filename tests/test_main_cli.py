@@ -405,6 +405,12 @@ def test_overwrite_removes_only_the_earlier_runs_files(
     for name in ("run_status.json", "invariants.json", "obligations.json",
                  "events.jsonl", "live_status.json", "paper.pdf", "paper.log",
                  "paper.tex", "token_usage.jsonl", "pipeline.log",
+                 "train_school_ids.csv", "checkpoint.json.4242.tmp",
+                 "live_status.json.tmp",
+                 # An earlier run's figures: the Analyst and Writer adopt
+                 # every image in the folder, so one left behind would be
+                 # embedded in the new paper.
+                 "love_plot.png", "cate_distribution.pdf", "roc_curves.png",
                  "run_config.yaml", "my_notes.txt"):
         (run_dir / name).write_text("old", encoding="utf-8")
     (run_dir / "prompts" / "writer").mkdir(parents=True)
