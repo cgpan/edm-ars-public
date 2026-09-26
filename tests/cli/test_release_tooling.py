@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -104,6 +105,24 @@ def test_lock_marks_platform_only_packages() -> None:
         assert pins[name][1] is not None and "linux" in pins[name][1]
 
 
+def test_locked_questionary_works_with_the_locked_prompt_toolkit() -> None:
+    # questionary 2.1.0 reaches into prompt-toolkit's prompt layout, which
+    # prompt-toolkit 3.0.52 changed: its select menu then raises
+    # AttributeError ('VSplit' object has no attribute 'content'), and every
+    # menu of `edmars setup` and `edmars new` crashed. 2.1.1 fixes it. The
+    # suite's own questionary tests only catch this when they run in the
+    # locked environment, so the pair is also checked here.
+    pins = _lock_pins()
+    toolkit = Version(pins["prompt-toolkit"][0])
+    questionary = Version(pins["questionary"][0])
+    if toolkit >= Version("3.0.52"):
+        assert questionary >= Version("2.1.1"), (
+            f"questionary {questionary} crashes with prompt-toolkit {toolkit}; lock 2.1.1 or later")
+    for req in _requirements(REPO_ROOT / "requirements-cli.txt"):
+        if canonicalize_name(req.name) == "questionary":
+            assert not req.specifier.contains("2.1.0"), "requirements-cli.txt must exclude questionary 2.1.0"
+
+
 def test_lock_header_says_what_was_tested() -> None:
     header = LOCK.read_text(encoding="utf-8").split("\n\n", 1)[0].lower()
     assert "python 3.11" in header
@@ -117,7 +136,7 @@ def test_cli_requirements_are_the_agreed_list() -> None:
     assert lines == [
         "typer>=0.12",
         "rich>=13.7",
-        "questionary>=2.0",
+        "questionary>=2.1.1",
         "keyring>=23.0",
         "platformdirs>=4.0",
         "psutil>=5.9",
