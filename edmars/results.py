@@ -263,6 +263,12 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
         add(f"What happened: {outcome.headline}")
         if outcome.why:
             add(f"Why: {outcome.why}")
+        if outcome.details:
+            add(outcome.details_heading or "Details:")
+            for line in outcome.details:
+                add(f"  - {line}")
+        if outcome.note:
+            add(outcome.note)
         if outcome.fix:
             add(f"What to do: {outcome.fix}")
         if outcome.commands:
@@ -430,6 +436,13 @@ def render_summary_html(outcome: Outcome, state: RunState, run_dir: Path) -> str
     if outcome.kind not in READY_KINDS:
         if outcome.why:
             add(f"<p><strong>Why:</strong> {_e(outcome.why)}</p>")
+        if outcome.details:
+            add(f"<p><strong>{_e(outcome.details_heading or 'Details:')}</strong></p><ul>")
+            for line in outcome.details:
+                add(f"<li>{_e(line)}</li>")
+            add("</ul>")
+        if outcome.note:
+            add(f"<p>{_e(outcome.note)}</p>")
         if outcome.fix:
             add(f"<p><strong>What to do:</strong> {_e(outcome.fix)}</p>")
         if outcome.commands:

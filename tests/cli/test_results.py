@@ -244,3 +244,20 @@ def test_a_tested_plan_carries_no_experimental_label(
     _, out = _show(run, capsys)
     assert "EXPERIMENTAL" not in out
     assert "EXPERIMENTAL" not in (run / "summary.html").read_text(encoding="utf-8")
+
+
+
+def test_a_study_the_checks_stopped_shows_what_they_found(run_home: Path,
+                                                          capsys: pytest.CaptureFixture[str]) -> None:
+    from tests.cli.test_endstates import PCC_07, WORKED_Q, _pre_critic_run
+
+    run = _pre_critic_run(run_home, second=False)
+    code, out = _show(run, capsys)
+    assert code == 3
+    flat = " ".join(out.split())
+    assert "What the automatic checks found: - " + PCC_07.split(": ", 1)[1] in flat
+    assert f'The study worded your question as: "{WORKED_Q}"' in flat
+    assert "simpler question" not in flat
+    assert "What to do: The question the study worked from promised a comparison" in flat
+    html = (run / "summary.html").read_text(encoding="utf-8")
+    assert "What the automatic checks found:" in html and "above and beyond" in html
