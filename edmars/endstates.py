@@ -34,6 +34,7 @@ from edmars.runstate import (
     RunState,
     as_dict,
     fmt_score,
+    literature_notes,
     load_json,
     load_state,
     parse_ts,
@@ -762,12 +763,34 @@ def _concerns(run_dir: Path, state: RunState, status: dict[str, Any] | None,
         elif gate.get("ran") and gate.get("passed") is False and not gate.get("advisory"):
             out.append(_gate_sentence(gate))
     lit = status.get("literature") if isinstance(status, dict) else None
-    if isinstance(lit, dict) and lit.get("degraded"):
-        out.append(
-            "Few related papers were found (the literature search was partly "
-            "unavailable). Check the related-work section and the references."
-        )
+    if isinstance(lit, dict):
+        out.extend(literature_concerns(lit))
     return out
+
+
+def literature_concerns(lit: dict[str, Any]) -> list[str]:
+    """The "Please check" line for run_status.json's ``literature`` block.
+
+    Names the source that did not answer and how: the Mac test's arXiv
+    search was refused (HTTP 406) and its Semantic Scholar searches
+    rate-limited, and the old line said only that the search was "partly
+    unavailable".
+    """
+    sources = lit.get("sources") if isinstance(lit.get("sources"), dict) else {}
+    notes = literature_notes(sources)
+    key_hint = (" A free Semantic Scholar key (`edmars setup literature`) makes that much "
+                "less likely." if sources.get("semantic_scholar") == "rate_limited" else "")
+    if lit.get("degraded"):
+        why = (": " + " and ".join(notes) + "." if notes
+               else " (the literature search was partly unavailable).")
+        return [f"Few related papers were found{why} Check the related-work section and "
+                f"the references.{key_hint}"]
+    if notes:
+        only = ("all come from Semantic Scholar" if sources.get("semantic_scholar") == "ok"
+                else "come from fewer sources than usual")
+        return [f"{'; '.join(notes)}, so the related papers {only}. "
+                "Check the related-work section and the references."]
+    return []
 
 
 def _gate_sentence(gate: dict[str, Any]) -> str:

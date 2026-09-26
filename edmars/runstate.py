@@ -33,7 +33,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import yaml
 
@@ -345,6 +345,92 @@ def _add_recent(state: RunState, line: str | None) -> None:
         del state.recent[: len(state.recent) - 50]
 
 
+def _lit_progress(state: RunState, data: dict[str, Any]) -> None:
+    """One ``lit.progress`` event is one literature request (query).
+
+    A source's papers found are the SUM over its queries; keeping only the
+    latest query's count showed "8 papers found" for a search whose three
+    arXiv queries returned 10, 9 and 8. Counts are kept per query index, so
+    a search that runs again (after a resume, or when a revision re-runs
+    the question step) replaces its own counts instead of adding to them.
+    Each query's status is kept too, for :func:`lit_retrieval_status`.
+    """
+    source = str(data.get("source") or "search")
+    queries = state.metrics.setdefault("lit_queries", {}).setdefault(source, {})
+    index = _int(data.get("query_index"))
+    key = str(index) if index is not None else str(len(queries) + 1)
+    found = _int(data.get("papers_found"))
+    queries[key] = {
+        "found": found if found is not None else 0,
+        "status": str(data.get("status") or ("ok" if found is not None else "")),
+        "http_status": _int(data.get("http_status")),
+    }
+    lit = state.metrics.setdefault("lit_sources", {})
+    lit[source] = sum(int(q.get("found") or 0) for q in queries.values())
+    state.metrics["papers_found"] = sum(v for v in lit.values() if isinstance(v, int))
+    state.metrics["lit_status"] = lit_retrieval_status(state.metrics["lit_queries"])
+
+
+def lit_retrieval_status(queries: Mapping[str, Any]) -> dict[str, Any]:
+    """The live tally of ``lit.progress`` events, in the shape of the
+    pipeline's ``retrieval_status`` (CONTRACT section 6), which
+    run_status.json carries as ``literature.sources`` once the step ends.
+
+    Same rule as ProblemFormulator._retrieval_status: a source is ``ok``
+    if any query returned; otherwise ``rate_limited``, ``refused`` or
+    ``failed``. ``arxiv_http_status`` is the refusing (or first failing)
+    request's status.
+    """
+    out: dict[str, Any] = {}
+    for source, public in (("semantic_scholar", "semantic_scholar"), ("arxiv", "arxiv")):
+        rows = queries.get(source) if isinstance(queries, Mapping) else None
+        if not isinstance(rows, Mapping) or not rows:
+            continue
+        statuses = [str(r.get("status") or "") for r in rows.values() if isinstance(r, Mapping)]
+        if "ok" in statuses:
+            out[public] = "ok"
+        elif "rate_limited" in statuses:
+            out[public] = "rate_limited"
+        elif "refused" in statuses:
+            out[public] = "refused"
+        elif any(s and s != "skipped" for s in statuses):
+            out[public] = "failed"
+        if source == "arxiv" and out.get(public) in ("refused", "failed"):
+            wanted = out[public]
+            codes = [_int(r.get("http_status")) for r in rows.values()
+                     if isinstance(r, Mapping) and r.get("status") == wanted]
+            code = next((c for c in codes if c is not None), None)
+            if code is not None:
+                out["arxiv_http_status"] = code
+    return out
+
+
+def literature_notes(sources: Mapping[str, Any] | None) -> list[str]:
+    """Plain words for each literature source that did not answer.
+
+    ``sources`` is run_status.json's ``literature.sources`` (the pipeline's
+    retrieval_status) or :func:`lit_retrieval_status`'s live tally. arXiv's
+    front end refuses some clients outright (the Mac test got HTTP 406 on
+    every query); that is a refusal, not a failure, and is said so.
+    """
+    if not isinstance(sources, Mapping):
+        return []
+    notes: list[str] = []
+    code = _int(sources.get("arxiv_http_status"))
+    http = f" (HTTP {code})" if code is not None else ""
+    arxiv = sources.get("arxiv")
+    if arxiv == "refused":
+        notes.append(f"arXiv refused our requests{http}")
+    elif arxiv == "failed":
+        notes.append(f"arXiv search failed{http}")
+    s2 = sources.get("semantic_scholar")
+    if s2 == "rate_limited":
+        notes.append("Semantic Scholar turned our searches away (too many requests)")
+    elif s2 == "failed":
+        notes.append("Semantic Scholar search failed")
+    return notes
+
+
 def _stage_start(state: RunState, key: str, ts: datetime | None, cycle: int | None) -> None:
     # A new stage implicitly ends any other stage still marked running;
     # the old pipeline logs no "complete" line for CRITIQUING at all.
@@ -555,12 +641,7 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
             state.attempt["ended"] = ts
             state.attempt["returncode"] = data.get("returncode")
     elif etype == "lit.progress":
-        lit = state.metrics.setdefault("lit_sources", {})
-        found = _int(data.get("papers_found"))
-        source = str(data.get("source") or "search")
-        if found is not None:
-            lit[source] = found
-            state.metrics["papers_found"] = sum(v for v in lit.values() if isinstance(v, int))
+        _lit_progress(state, data)
     elif etype == "metric":
         key = data.get("key")
         if key:
@@ -1667,9 +1748,11 @@ def _stage_details(state: RunState) -> None:
     m = state.metrics
     for st in state.stages:
         detail = ""
-        if st.key == "FORMULATING" and m.get("papers_found"):
-            n = m["papers_found"]
-            detail = f"{n} paper{'s' if n != 1 else ''} found"
+        if st.key == "FORMULATING" and (m.get("papers_found") or m.get("lit_status")):
+            n = _int(m.get("papers_found")) or 0
+            parts = [f"{n} paper{'s' if n != 1 else ''} found"] if n or m.get("lit_status") else []
+            parts += literature_notes(m.get("lit_status"))
+            detail = " · ".join(parts)
         elif st.key == "ENGINEERING" and m.get("analytic_n") is not None:
             detail = f"{m['analytic_n']:,} students"
             if m.get("n_predictors"):
@@ -1919,6 +2002,8 @@ __all__ = [
     "fmt_score",
     "fold",
     "key_result",
+    "lit_retrieval_status",
+    "literature_notes",
     "load_state",
     "parse_log_line",
     "parse_ts",

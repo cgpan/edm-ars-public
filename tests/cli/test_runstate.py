@@ -191,6 +191,71 @@ def test_compile_step_reports_missing_tool() -> None:
     assert ev["type"] == "compile.step" and ev["data"]["missing_tool"] == "pdflatex"
 
 
+def _lit(seq: int, source: str, index: int, found: int, status: str = "ok", **extra: object) -> dict:
+    return event(seq, "lit.progress", 0, stage="FORMULATING", source=source, query_index=index,
+                 n_queries=3, papers_found=found, status=status, **extra)
+
+
+def _formulating_detail(events: list[dict]) -> str:
+    state = fold([event(1, "run.start", 0), event(2, "stage.start", 0, stage="FORMULATING"), *events])
+    runstate._stage_details(state)
+    return _stage(state, "FORMULATING").detail
+
+
+def test_papers_found_add_up_over_every_query_of_every_source() -> None:
+    # The handler kept only each source's LAST query: three arXiv queries
+    # returning 10, 9 and 8 showed as 8.
+    events = [_lit(3, "semantic_scholar", 1, 20), _lit(4, "semantic_scholar", 2, 15),
+              _lit(5, "semantic_scholar", 3, 0, "rate_limited"),
+              _lit(6, "arxiv", 1, 10), _lit(7, "arxiv", 2, 9), _lit(8, "arxiv", 3, 8)]
+    state = fold([event(1, "run.start", 0), *events])
+    assert state.metrics["lit_sources"] == {"semantic_scholar": 35, "arxiv": 27}
+    assert state.metrics["papers_found"] == 62
+    assert state.metrics["lit_status"] == {"semantic_scholar": "ok", "arxiv": "ok"}
+    assert _formulating_detail(events) == "62 papers found"
+
+
+def test_a_search_that_runs_again_replaces_its_counts() -> None:
+    # A resume or a revision re-runs the question step's search: the same
+    # query indexes come again and must not be added a second time.
+    first = [_lit(3, "arxiv", 1, 10), _lit(4, "arxiv", 2, 9)]
+    again = [_lit(10, "arxiv", 1, 7), _lit(11, "arxiv", 2, 6)]
+    state = fold([event(1, "run.start", 0), *first, *again])
+    assert state.metrics["papers_found"] == 13
+
+
+def test_an_arxiv_refusal_is_said_as_a_refusal() -> None:
+    # The Mac test: arXiv's front end answered HTTP 406, the other two
+    # queries were not sent, and all three Semantic Scholar searches were
+    # rate-limited.
+    events = [_lit(3, "semantic_scholar", 1, 0, "rate_limited"),
+              _lit(4, "semantic_scholar", 2, 0, "rate_limited"),
+              _lit(5, "semantic_scholar", 3, 0, "rate_limited"),
+              _lit(6, "arxiv", 1, 0, "refused", http_status=406),
+              _lit(7, "arxiv", 2, 0, "skipped"), _lit(8, "arxiv", 3, 0, "skipped")]
+    state = fold([event(1, "run.start", 0), *events])
+    assert state.metrics["lit_status"] == {"semantic_scholar": "rate_limited", "arxiv": "refused",
+                                           "arxiv_http_status": 406}
+    detail = _formulating_detail(events)
+    assert detail.startswith("0 papers found")
+    assert "arXiv refused our requests (HTTP 406)" in detail
+    assert "Semantic Scholar turned our searches away" in detail
+    assert "failed" not in detail
+
+
+def test_literature_notes_follow_the_pipelines_retrieval_status() -> None:
+    notes = runstate.literature_notes
+    assert notes({"semantic_scholar": "ok", "arxiv": "refused", "arxiv_http_status": 406}) == [
+        "arXiv refused our requests (HTTP 406)"]
+    assert notes({"arxiv": "refused"}) == ["arXiv refused our requests"]
+    assert notes({"arxiv": "failed", "arxiv_http_status": 503}) == ["arXiv search failed (HTTP 503)"]
+    assert notes({"semantic_scholar": "ok", "arxiv": "ok"}) == []
+    assert notes({"arxiv": "disabled"}) == [] and notes(None) == []
+    # One arXiv query answered: retrieval_status says "ok", and so does this.
+    ok_then_refused = {"arxiv": {"1": {"status": "ok", "found": 5}, "2": {"status": "refused", "http_status": 406}}}
+    assert runstate.lit_retrieval_status(ok_then_refused) == {"arxiv": "ok"}
+
+
 def test_usage_events_are_priced_like_src_cost() -> None:
     pricing = {"deepseek-v4-pro": {"input": 0.28, "cached_input": 0.028, "output": 0.42}}
     [ev] = usage_events([{"agent": "Analyst", "model": "deepseek-v4-pro", "prompt_tokens": 1_000_000,

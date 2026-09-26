@@ -175,6 +175,36 @@ def test_ready_gate_failed(run_home: Path) -> None:
     assert "5.1" in out.why and "6.3" in out.why and "EDM" in out.why
 
 
+def test_ready_names_the_literature_source_that_refused(run_home: Path) -> None:
+    # arXiv refused (HTTP 406) while Semantic Scholar answered: not
+    # "degraded", but the related work rests on one source.
+    lit = {"degraded": False, "n_papers": 12,
+           "sources": {"semantic_scholar": "ok", "arxiv": "refused", "arxiv_http_status": 406,
+                       "n_semantic_scholar": 12, "n_arxiv": 0}}
+    out = classify(_ready_run(run_home, status=v2_status(literature=lit)))
+    [line] = out.concerns
+    assert line.startswith("arXiv refused our requests (HTTP 406), so the related papers all come "
+                           "from Semantic Scholar.")
+    assert "failed" not in line
+
+
+def test_few_papers_says_which_sources_turned_the_search_away(run_home: Path) -> None:
+    # The Mac test's literature step: every search turned away.
+    lit = {"degraded": True, "n_papers": 0,
+           "sources": {"semantic_scholar": "rate_limited", "arxiv": "refused", "arxiv_http_status": 406,
+                       "n_semantic_scholar": 0, "n_arxiv": 0}}
+    out = classify(_ready_run(run_home, status=v2_status(literature=lit)))
+    [line] = out.concerns
+    assert line.startswith("Few related papers were found: arXiv refused our requests (HTTP 406) and "
+                           "Semantic Scholar turned our searches away (too many requests).")
+    assert "edmars setup literature" in line
+    assert "partly unavailable" not in line
+    # Without a per-source status (an older pipeline) the old sentence stays.
+    assert endstates.literature_concerns({"degraded": True, "n_papers": 0, "sources": {}}) == [
+        "Few related papers were found (the literature search was partly unavailable). "
+        "Check the related-work section and the references."]
+
+
 def test_ready_gate_not_run_is_never_a_zero_score(run_home: Path) -> None:
     gate = {"enabled": True, "ran": False, "skip_reason": "lsar_not_found", "passed": None,
             "score": None, "threshold": None, "advisory": None, "venue": "EDM"}
