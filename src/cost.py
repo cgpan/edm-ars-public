@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 #: Filename written per run, one JSON object per LLM call.
@@ -47,8 +48,10 @@ class TokenUsage:
     #: below a cache miss on DeepSeek, so keeping them separate is the
     #: difference between a real cost and a pessimistic one.
     cached_prompt_tokens: int = 0
-    #: Reasoning/thinking tokens where the provider reports them
-    #: separately; they bill as output.
+    #: Reasoning/thinking tokens where the provider breaks them out.
+    #: Informational only: DeepSeek, OpenAI and Anthropic all count them
+    #: INSIDE completion_tokens and bill them as output, so pricing them
+    #: again on top of completion_tokens would charge them twice.
     reasoning_tokens: int = 0
     stage: Optional[str] = None
     timestamp: Optional[str] = None
@@ -110,9 +113,18 @@ def load_pricing(config: dict) -> dict:
         pricing:
           currency: USD
           per_million_tokens:
-            deepseek-v4-pro:   {input: 0.28, cached_input: 0.028, output: 0.42}
-            deepseek-flash:    {input: 0.07, cached_input: 0.007, output: 0.28,
-                                verified: false}
+            some-model: {input: 1.0, cached_input: 0.1, output: 2.0}
+            deepseek-v4-pro:
+              input: 1.32            # the PEAK (full) rates
+              cached_input: 0.044
+              output: 3.96
+              off_peak: {input: 0.66, cached_input: 0.022, output: 1.98}
+              peak_windows_utc:
+                days: [mon, tue, wed, thu, fri]
+                hours: ["01:00-04:00", "06:00-10:00"]
+
+    An entry without ``off_peak`` has one flat rate. An entry with it is
+    priced per call from the call's UTC timestamp (see ``rate_period``).
 
     Returns an empty dict when unconfigured, which makes every cost
     ``None`` — deliberately. A missing rate must surface as "not priced",
@@ -158,11 +170,94 @@ def rate_is_unverified(rates: Any) -> bool:
     return rates.get("verified") is False
 
 
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def _utc(timestamp: Any) -> Optional[datetime]:
+    """A call's timestamp as naive UTC, or None when it cannot be read.
+
+    ``BaseAgent._meter`` writes ``datetime.utcnow().isoformat()`` (naive,
+    already UTC); an aware timestamp is converted.
+    """
+    if not isinstance(timestamp, str) or not timestamp.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(timestamp.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _minute_of_day(hhmm: str) -> int:
+    hours, minutes = hhmm.strip().split(":")
+    value = int(hours) * 60 + int(minutes)
+    if not 0 <= value <= 24 * 60:
+        raise ValueError(hhmm)
+    return value
+
+
+def _peak_windows(schedule: Any) -> Optional[tuple[set, list]]:
+    """(weekday names, [(start, end) in minutes]), or None if unreadable."""
+    if not isinstance(schedule, dict):
+        return None
+    try:
+        days = {str(d).strip().lower()[:3] for d in schedule.get("days") or ()}
+        spans = []
+        for span in schedule.get("hours") or ():
+            start, end = str(span).split("-")
+            spans.append((_minute_of_day(start), _minute_of_day(end)))
+    except (TypeError, ValueError):
+        return None
+    if not days or not spans or not days <= set(_WEEKDAYS):
+        return None
+    return days, spans
+
+
+def rate_period(usage: TokenUsage, rates: Any) -> str:
+    """Which of a model's rates applies to this call.
+
+    ``"flat"``      the entry has one rate (no ``off_peak`` block);
+    ``"peak"``      the call's timestamp is inside ``peak_windows_utc``;
+    ``"off_peak"``  it is outside them;
+    ``"untimed"``   the entry is time-of-day priced but the call has no
+                    readable timestamp, or the schedule cannot be read.
+                    Such a call is charged the PEAK rate: an unknown time
+                    must never price a call below what it can have cost.
+
+    DeepSeek's peak window excludes Chinese public holidays, which this
+    does not model, so a weekday-peak call on such a holiday is charged
+    the peak rate here and half of it by DeepSeek: an over-estimate,
+    never an under-estimate.
+    """
+    if not isinstance(rates, dict) or not isinstance(rates.get("off_peak"), dict):
+        return "flat"
+    when = _utc(getattr(usage, "timestamp", None))
+    windows = _peak_windows(rates.get("peak_windows_utc"))
+    if when is None or windows is None:
+        return "untimed"
+    days, spans = windows
+    if _WEEKDAYS[when.weekday()] not in days:
+        return "off_peak"
+    minute = when.hour * 60 + when.minute
+    if any(start <= minute < end for start, end in spans):
+        return "peak"
+    return "off_peak"
+
+
 def cost_usd(usage: TokenUsage, pricing: dict) -> Optional[float]:
-    """USD for one call, or None when the model has no configured rate."""
+    """USD for one call, or None when the model has no configured rate.
+
+    The billed quantities are the provider's own counts: uncached input,
+    cached input and ``completion_tokens``. Reasoning tokens are already
+    inside ``completion_tokens`` and are not added again.
+    """
     rates = (pricing or {}).get(usage.model)
     if not rates:
         return None
+    if rate_period(usage, rates) == "off_peak":
+        rates = rates["off_peak"]
     uncached = max(usage.prompt_tokens - usage.cached_prompt_tokens, 0)
     cached_rate = rates.get("cached_input", rates.get("input", 0.0))
     total = (
@@ -278,9 +373,17 @@ class CostSummary:
     #: Calls with no configured rate (their tokens are in the totals,
     #: their dollars are not).
     unpriced_calls: int = 0
-    #: "measured" (every call priced from a verified rate), "estimated"
-    #: (some rate is unverified), "partial" (some calls unpriced) or
-    #: "unpriced" (no call priced). "partial" wins over "estimated".
+    #: Calls priced at a time-of-day model's peak / off-peak rate (see
+    #: ``rate_period``). Calls to flat-rate models are in neither.
+    peak_calls: int = 0
+    off_peak_calls: int = 0
+    #: Calls to a time-of-day model with no readable timestamp. They are
+    #: charged the peak rate, which makes cost_usd an ESTIMATE.
+    untimed_calls: int = 0
+    #: "measured" (every call priced from a verified rate at a known
+    #: time), "estimated" (some rate is unverified, or some call's time is
+    #: unknown), "partial" (some calls unpriced) or "unpriced" (no call
+    #: priced). "partial" wins over "estimated".
     cost_status: str = "unpriced"
     #: Per-agent / per-model breakdowns. Each entry's ``cost_usd`` is None
     #: when none of its calls could be priced -- never a silent 0.0 --
@@ -314,8 +417,16 @@ def summarize(usages: list[TokenUsage], pricing: dict) -> CostSummary:
         else:
             any_priced = True
             priced_total += c
-            if rate_is_unverified((pricing or {}).get(u.model)):
+            rates = (pricing or {}).get(u.model)
+            if rate_is_unverified(rates):
                 unverified.add(u.model)
+            period = rate_period(u, rates)
+            if period == "peak":
+                s.peak_calls += 1
+            elif period == "off_peak":
+                s.off_peak_calls += 1
+            elif period == "untimed":
+                s.untimed_calls += 1
         agent = s.by_agent.setdefault(
             u.agent, {"n_calls": 0, "prompt_tokens": 0,
                       "completion_tokens": 0, "cost_usd": None,
@@ -343,7 +454,7 @@ def summarize(usages: list[TokenUsage], pricing: dict) -> CostSummary:
         s.cost_status = "unpriced"
     elif unpriced:
         s.cost_status = "partial"
-    elif unverified:
+    elif unverified or s.untimed_calls:
         s.cost_status = "estimated"
     else:
         s.cost_status = "measured"
@@ -366,6 +477,23 @@ def write_summary(output_dir: str, config: dict) -> Optional[dict]:
         "those counts multiplied by the configured rate; if rates change, "
         "re-price from the raw counts rather than re-running."
     )
+    if summary.peak_calls or summary.off_peak_calls:
+        payload["note"] += (
+            f" The provider bills by time of day: {summary.peak_calls} "
+            "call(s) fell in its peak window (UTC) and were priced at the "
+            f"peak rate, {summary.off_peak_calls} at the off-peak rate."
+        )
+        if summary.peak_calls:
+            payload["note"] += (
+                " DeepSeek bills a peak-window call on a Chinese public "
+                "holiday at the off-peak rate, half the figure used here."
+            )
+    if summary.untimed_calls:
+        payload["note"] += (
+            f" cost_usd is an ESTIMATE: {summary.untimed_calls} call(s) "
+            "have no readable time, so they were priced at the peak rate, "
+            "up to twice what they cost."
+        )
     if summary.unverified_rate_models:
         payload["note"] += (
             " cost_usd is an ESTIMATE: the configured rate for "

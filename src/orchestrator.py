@@ -1300,13 +1300,21 @@ class Orchestrator:
             cost_str = "not priced" if cost is None else f"${cost:.4f}"
             status = payload.get("cost_status")
             if cost is not None and status in ("estimated", "partial"):
-                # An unverified rate, or calls with no rate at all, make
-                # the figure an estimate or a lower bound; run_cost.json
-                # says which, and the log line should not read as measured.
-                cost_str += (
-                    " (estimated: a rate is unverified)" if status == "estimated"
-                    else " (lower bound: some calls have no rate)"
-                )
+                # An unverified rate, a call of unknown time on a
+                # time-of-day priced model, or calls with no rate at all
+                # make the figure an estimate or a lower bound;
+                # run_cost.json says which, and the log line should not
+                # read as measured.
+                if status == "partial":
+                    cost_str += " (lower bound: some calls have no rate)"
+                elif payload.get("untimed_calls") and not payload.get(
+                    "unverified_rate_models"
+                ):
+                    cost_str += (
+                        " (estimated: some calls have no time, priced at peak)"
+                    )
+                else:
+                    cost_str += " (estimated: a rate is unverified)"
             self._log(
                 "Orchestrator",
                 f"Run cost: {cost_str} over {payload['n_calls']} LLM calls "

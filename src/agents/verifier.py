@@ -94,8 +94,9 @@ class Verifier(BaseAgent):
 
     #: Figures are checked one call each, with the caption. A batch of
     #: ten images in one prompt gets one distracted answer; ten narrow
-    #: calls get ten answers, and the measured cost of that split was
-    #: about $0.10 for 107 figures.
+    #: calls get ten answers. That split came to about $0.10 for 107
+    #: figures, priced with the unverified flash rates config.yaml held
+    #: in 2026-09; the rates verified on 2026-09-26 may give another figure.
     MAX_FIGURE_CALLS = 8
 
     def __init__(

@@ -962,23 +962,53 @@ class ProblemFormulator(BaseAgent):
     # arXiv search
     # ------------------------------------------------------------------
 
-    _ARXIV_API_URL = "http://export.arxiv.org/api/query"
+    # https directly: the http address answers 301, so every query cost
+    # arXiv two requests.
+    _ARXIV_API_URL = "https://export.arxiv.org/api/query"
     _ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom"}
+    #: arXiv's API terms: "no more than one request every three seconds".
+    _ARXIV_DELAY_S = 3.0
+    _ARXIV_HEADERS = {
+        "User-Agent": f"EDM-ARS (+{_CROSSREF_PROJECT_URL})",
+        "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+    }
+    #: Statuses with which arXiv turns a client away rather than failing.
+    #: Its front end answers 406 with an empty body, without reaching the
+    #: API behind it, to some clients whose request misses its cache; the
+    #: headers do not change that (see _search_arxiv). Asking again in the
+    #: same search only adds load, so the remaining queries are skipped.
+    _ARXIV_REFUSAL_STATUSES = frozenset({403, 406, 429})
 
     def _search_arxiv(self, queries: list[str], max_results_per_query: int = 10) -> list[dict]:
         """Query arXiv API with multiple keyword queries and return merged, deduped results.
 
         Returns paper dicts compatible with the S2 paper schema (paperId uses
         the arXiv ID prefixed with ``arxiv:`` to avoid collision with S2 IDs).
+
+        Each query's outcome ("ok", "failed", "refused" or "skipped") is
+        kept in ``_arxiv_query_outcomes`` and the refusal's status (else
+        the first non-200 one) in ``_arxiv_http_status``, for
+        ``retrieval_status``. After a refusal
+        (``_ARXIV_REFUSAL_STATUSES``) the remaining queries are not sent.
+        A refusal is not fixed by headers: arXiv's front end turned away
+        requests from Python's urllib that carried exactly the headers
+        with which ``requests`` got 200, and on a Mac it turned away
+        ``requests`` with curl's headers while curl got 200.
         """
         seen_ids: set[str] = set()
         papers: list[dict] = []
         outcomes: list[str] = []
         self._arxiv_query_outcomes = outcomes
+        self._arxiv_http_status = None
+        refused: int | None = None
 
         for i, query in enumerate(queries):
+            if refused is not None:
+                outcomes.append("skipped")
+                self._lit_progress("arxiv", i + 1, len(queries), 0, "skipped")
+                continue
             if i > 0:
-                time.sleep(1.0)  # rate-limit courtesy
+                time.sleep(self._ARXIV_DELAY_S)
             try:
                 resp = requests.get(
                     self._ARXIV_API_URL,
@@ -989,16 +1019,34 @@ class ProblemFormulator(BaseAgent):
                         "sortBy": "relevance",
                         "sortOrder": "descending",
                     },
+                    headers=dict(self._ARXIV_HEADERS),
                     timeout=15,
                 )
                 if resp.status_code != 200:
-                    self.ctx.log.append({
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "agent": self.agent_name,
-                        "message": f"arXiv query '{query[:50]}' HTTP {resp.status_code}",
-                    })
-                    outcomes.append("failed")
-                    self._lit_progress("arxiv", i + 1, len(queries), 0, "failed")
+                    code = resp.status_code if isinstance(resp.status_code, int) else None
+                    outcome = "refused" if code in self._ARXIV_REFUSAL_STATUSES else "failed"
+                    if self._arxiv_http_status is None or outcome == "refused":
+                        # A refusal ends the search, so its status is the
+                        # one the warning names.
+                        self._arxiv_http_status = code
+                    outcomes.append(outcome)
+                    self._lit_progress(
+                        "arxiv", i + 1, len(queries), 0, outcome, http_status=code
+                    )
+                    rest = len(queries) - i - 1
+                    if outcome == "refused":
+                        refused = code
+                        self._note(
+                            f"arXiv refused query {i + 1}/{len(queries)} "
+                            f"'{query[:50]}' with HTTP {code}"
+                            + (f"; not sending the other {rest} arXiv "
+                               f"quer{'y' if rest == 1 else 'ies'}" if rest else "")
+                        )
+                    else:
+                        self._note(
+                            f"arXiv query {i + 1}/{len(queries)} '{query[:50]}' "
+                            f"failed with HTTP {code}"
+                        )
                     continue
 
                 root = ET.fromstring(resp.text)
@@ -1066,9 +1114,12 @@ class ProblemFormulator(BaseAgent):
         plus ``retrieval_status`` (CONTRACT section 6)::
 
             {"semantic_scholar": "ok|failed|rate_limited|skipped",
-             "arxiv": "ok|failed|disabled",
+             "arxiv": "ok|failed|refused|disabled",
              "n_papers": int, "degraded": bool,
              "n_semantic_scholar": int, "n_arxiv": int}
+
+        plus ``"arxiv_http_status": int`` when arXiv returned nothing and
+        answered with an HTTP error ("refused" is 403, 406 or 429).
 
         ``degraded`` is true when S2 contributed no papers or the pool is
         empty. A run that went on with placeholders or arXiv alone used to
@@ -1078,6 +1129,7 @@ class ProblemFormulator(BaseAgent):
         """
         self._s2_query_outcomes = None
         self._arxiv_query_outcomes = None
+        self._arxiv_http_status = None
         arxiv_enabled = bool(self.config.get("arxiv", {}).get("enabled", True))
         result = self._search_literature_sources(user_prompt, arxiv_enabled)
         status = self._retrieval_status(result, arxiv_enabled)
@@ -1090,7 +1142,7 @@ class ProblemFormulator(BaseAgent):
             message = (
                 "Literature retrieval degraded: Semantic Scholar "
                 f"{status['semantic_scholar']} ({status['n_semantic_scholar']} papers), "
-                f"arXiv {status['arxiv']} ({status['n_arxiv']} papers), "
+                f"{self._arxiv_phrase(status)}, "
                 f"{status['n_papers']} papers in total. Related work and "
                 "citations will be thin or placeholders." + hint
             )
@@ -1113,24 +1165,48 @@ class ProblemFormulator(BaseAgent):
             return "ok" if papers else "failed"
         return str(outcome)
 
+    @staticmethod
+    def _arxiv_phrase(status: dict) -> str:
+        """arXiv's part of the degraded-literature warning."""
+        state = status.get("arxiv")
+        code = status.get("arxiv_http_status")
+        n = status.get("n_arxiv", 0)
+        if state == "refused" and code is not None:
+            return f"arXiv refused the request (HTTP {code}, {n} papers)"
+        if state == "failed" and code is not None:
+            return f"arXiv failed (HTTP {code}, {n} papers)"
+        return f"arXiv {state} ({n} papers)"
+
     def _lit_progress(
         self, source: str, query_index: int, n_queries: int,
-        papers_found: int, status: str,
+        papers_found: int, status: str, http_status: int | None = None,
     ) -> None:
-        """One ``lit.progress`` event per literature request."""
+        """One ``lit.progress`` event per literature request.
+
+        ``http_status`` is the error status of a request that failed with
+        one; a query skipped after a refusal has status ``"skipped"``.
+        """
         label = {
             "semantic_scholar": "Semantic Scholar",
             "semantic_scholar_seminal": "Semantic Scholar (seminal works)",
             "arxiv": "arXiv",
         }.get(source, source)
+        if status == "refused" and http_status is not None:
+            plain = f"{label} refused the request (HTTP {http_status})"
+        elif status == "skipped":
+            plain = f"Skipped {label} ({query_index}/{n_queries}): {label} refused an earlier request"
+        else:
+            plain = f"Searching {label} ({query_index}/{n_queries}): {papers_found} found"
+        extra: dict[str, Any] = {} if http_status is None else {"http_status": http_status}
         self._emit(
             "lit.progress",
-            plain=f"Searching {label} ({query_index}/{n_queries}): {papers_found} found",
+            plain=plain,
             source=source,
             query_index=query_index,
             n_queries=n_queries,
             papers_found=papers_found,
             status=status,
+            **extra,
         )
 
     def _retrieval_status(self, result: dict, arxiv_enabled: bool) -> dict:
@@ -1159,10 +1235,14 @@ class ProblemFormulator(BaseAgent):
             arxiv_outcomes = getattr(self, "_arxiv_query_outcomes", None)
             if arxiv_outcomes is None:
                 arxiv_state = "ok" if n_arxiv else "failed"
+            elif "ok" in arxiv_outcomes:
+                arxiv_state = "ok"
+            elif "refused" in arxiv_outcomes:
+                arxiv_state = "refused"
             else:
-                arxiv_state = "ok" if "ok" in arxiv_outcomes else "failed"
+                arxiv_state = "failed"
 
-        return {
+        status: dict[str, Any] = {
             "semantic_scholar": s2_state,
             "arxiv": arxiv_state,
             "n_papers": len(papers),
@@ -1170,6 +1250,10 @@ class ProblemFormulator(BaseAgent):
             "n_semantic_scholar": n_s2,
             "n_arxiv": n_arxiv,
         }
+        http_status = getattr(self, "_arxiv_http_status", None)
+        if arxiv_state in ("failed", "refused") and isinstance(http_status, int):
+            status["arxiv_http_status"] = http_status
+        return status
 
     def _search_literature_sources(
         self, user_prompt: str | None, arxiv_enabled: bool

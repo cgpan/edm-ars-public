@@ -69,11 +69,13 @@ administrator account.
   check whether your institution allows the provider you pick. See
   [PRIVACY.md](PRIVACY.md) for exactly what is sent.
 - **You are responsible for all charges** on your accounts. Cost figures
-  EDM-ARS shows are estimates: the figure in the README was measured on a
-  single instrumented run, and each run's `run_cost.json` multiplies measured
-  token counts by the rates in `config.yaml`, which you must keep up to date
-  and which can be wrong. The `cost_budget_usd` setting only logs a warning;
-  it never stops a run. Set a spending limit with your provider.
+  EDM-ARS shows are estimates: the figures in the README are token counts
+  from a few archived runs, priced at the rates in `config.yaml` on the date
+  the README gives, and each run's `run_cost.json` multiplies measured token
+  counts by those rates, which you must keep up to date and which can be
+  wrong. `run_cost.json` leaves out the automated reviewer's calls and any
+  call cut off by a stop or a crash. The `cost_budget_usd` setting only logs
+  a warning; it never stops a run. Set a spending limit with your provider.
 - EDM-ARS is not affiliated with, sponsored by or endorsed by DeepSeek,
   OpenAI, Anthropic, MiniMax, Semantic Scholar, arXiv, Crossref or any other
   service it connects to. Services and datasets can change or disappear at
