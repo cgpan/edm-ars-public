@@ -244,3 +244,54 @@ def test_a_tested_plan_carries_no_experimental_label(
     _, out = _show(run, capsys)
     assert "EXPERIMENTAL" not in out
     assert "EXPERIMENTAL" not in (run / "summary.html").read_text(encoding="utf-8")
+
+
+
+def test_a_study_the_checks_stopped_shows_what_they_found(run_home: Path,
+                                                          capsys: pytest.CaptureFixture[str]) -> None:
+    from tests.cli.test_endstates import PCC_07, WORKED_Q, _pre_critic_run
+
+    run = _pre_critic_run(run_home, second=False)
+    code, out = _show(run, capsys)
+    assert code == 3
+    flat = " ".join(out.split())
+    assert "What the automatic checks found: - " + PCC_07.split(": ", 1)[1] in flat
+    assert f'The study worded your question as: "{WORKED_Q}"' in flat
+    assert "simpler question" not in flat
+    assert "What to do: The question the study worked from promised a comparison" in flat
+    html = (run / "summary.html").read_text(encoding="utf-8")
+    assert "What the automatic checks found:" in html and "above and beyond" in html
+
+
+
+def test_the_result_screen_and_summary_word_the_cost_as_the_live_view(
+    run_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The Mac study: the live view said "at least US$0.054 (11 AI calls)",
+    # summary.html "US$0.054 (11 AI calls)", and the result screen nothing.
+    # run_cost.json counts answered calls only (10), so the cut-off call
+    # stays on top of it.
+    import json as _json
+
+    from tests.cli._run_support import event
+
+    events = [
+        event(1, "run.start", 0, task_type="prediction", dataset="hsls09_public", provider="deepseek"),
+        event(2, "stage.start", 0, stage="ANALYZING"),
+        event(3, "llm.end", 1, ok=True, cost_usd=0.02),
+        event(4, "llm.end", 2, ok=False, error_class="_StopRequested", cost_usd=None),
+        event(5, "stage.end", 2, stage="ANALYZING", outcome="interrupted"),
+        event(6, "run.end", 2, state="INTERRUPTED"),
+    ]
+    run = make_run(run_home, pdf=False, log=None, events=events,
+                   status=v2_status("INTERRUPTED", released=False, reason_code="INTERRUPTED",
+                                    abort={"stage": "ANALYZING", "code": "INTERRUPTED", "message": "",
+                                           "resumable": True}),
+                   extra={"run_cost.json": _json.dumps({"n_calls": 1, "cost_usd": 0.0216})})
+    code, out = _show(run, capsys)
+    assert code == 3
+    line = "Cost: at least US$0.022 (2 AI calls, 1 cut off when the study was stopped)"
+    flat = " ".join(out.split())
+    assert line in flat and "may still be billed by the AI service" in flat
+    html = (run / "summary.html").read_text(encoding="utf-8")
+    assert line in html and "may still be billed by the AI service" in html

@@ -229,3 +229,191 @@ def test_an_experimental_plan_is_labelled_on_the_live_view(run_home: Path) -> No
     tested = make_run(run_home, name="2026-09-25_1400_tested_ef01", log=FULL_LOG)
     assert "EXPERIMENTAL" not in view.screen_text(load_state(tested), width=80,
                                                   plain=True, now=NOW)
+
+
+
+@pytest.mark.parametrize("plain", [True, False])
+def test_an_error_in_the_recent_list_is_wrapped_not_cut(plain: bool) -> None:
+    # The Mac study's live view cut pcc_07's sentence (why the study
+    # stopped) at the screen's edge: "... which commits the pa...".
+    message = ("pcc_07: The research question says 'above and beyond', which commits the paper to an "
+               "incremental-validity / nested-model comparison, but no such analysis appears in results.json.")
+    state = fold([
+        event(1, "run.start", 0, task_type="prediction", dataset="hsls09_public", provider="deepseek"),
+        event(2, "stage.start", 0, stage="CRITIQUING"),
+        event(3, "warning", 1, plain="A warning that is long enough to be cut at the edge of an eighty column screen."),
+        event(4, "error", 1, stage="CRITIQUING", code="PRE_CRITIC_ABORT", message=message),
+        event(5, "run.end", 1, state="ABORTED"),
+    ])
+    lines = [text for text, _ in view.render_screen(state, width=80, plain=plain, now=NOW)]
+    assert all(cell_len(text) <= 80 for text in lines)
+    start = next(i for i, text in enumerate(lines) if text.startswith("  pcc_07:"))
+    joined = " ".join(text.strip() for text in lines[start:start + 3])
+    assert message in joined
+    warning = next(text for text in lines if "A warning" in text)
+    assert warning.endswith("..." if plain else "\u2026")  # other lines still fit on one line
+
+
+
+def test_the_view_docstring_says_its_codes_are_not_exit_codes() -> None:
+    doc = " ".join((view.__doc__ or "").split())
+    assert "not exit codes" in doc and "edmars.model.EXIT_" in doc
+
+
+
+def _ev(seq: int, etype: str, clock: str, *, stage: str | None = None, **data: object) -> dict:
+    """An event at 13:<clock> (mm:ss), for timings finer than a minute."""
+    return {"v": 1, "seq": seq, "ts": f"2026-09-25T13:{clock}.000Z", "run_id": "run", "type": etype,
+            "stage": stage, "cycle": None, "agent": None, "plain": None, "data": data}
+
+
+_BEFORE_STOP = [
+    _ev(1, "run.start", "41:24", task_type="prediction", dataset="hsls09_public", provider="deepseek"),
+    _ev(2, "stage.start", "41:24", stage="FORMULATING"),
+    _ev(3, "stage.end", "42:47", stage="FORMULATING", outcome="ok"),
+    _ev(4, "stage.start", "42:47", stage="ENGINEERING"),
+    _ev(5, "stage.end", "47:29", stage="ENGINEERING", outcome="ok"),
+    _ev(6, "stage.start", "47:29", stage="ANALYZING"),
+]
+_THE_STOP = [
+    _ev(7, "stage.end", "48:37", stage="ANALYZING", outcome="interrupted"),
+    _ev(8, "error", "48:37", stage="ANALYZING", code="INTERRUPTED",
+        message="Interrupted (Ctrl-C or a termination signal)"),
+    _ev(9, "run.end", "48:37", state="INTERRUPTED"),
+]
+_AFTER_RESUME = [
+    _ev(10, "run.start", "49:09", resumed=True),
+    _ev(11, "stage.start", "49:09", stage="ANALYZING"),
+    _ev(12, "stage.end", "55:21", stage="ANALYZING", outcome="ok"),
+]
+
+
+def test_an_interrupted_step_is_shown_as_interrupted_not_done() -> None:
+    # After `edmars stop`, the Mac's `status --plain` feed printed
+    # "[ok] Step 3 of 8 done (1m08s): Running the analysis" for an
+    # analysis that had not finished.
+    printer = view.PlainPrinter(width=100)
+    printer.lines(fold(_BEFORE_STOP), now=NOW, clock=0.0)
+    stopped = fold(_BEFORE_STOP + _THE_STOP)
+    out = printer.lines(stopped, now=NOW, clock=1.0)
+    assert "[x] Step 3 of 7 interrupted after 1m08s: Running the analysis" in out
+    assert not any("done" in line and "Running the analysis" in line for line in out)
+    analysis = stopped.stage("ANALYZING")
+    assert analysis.status == "failed" and analysis.interrupted
+    screen = view.screen_text(stopped, width=100, now=NOW)
+    assert "Stopped at step 3 of 7" in screen
+    row = next(line for line in screen.splitlines() if "Running the analysis" in line)
+    assert row.startswith(" [x] 3 ") and "interrupted" in row and "1m08s" in row
+
+
+def test_after_a_resume_a_step_shows_this_attempts_time_and_the_total() -> None:
+    # The Mac view showed 7m20s (1m08s + 6m12s) for an analysis that took
+    # 6m12s after the resume.
+    state = fold(_BEFORE_STOP + _THE_STOP + _AFTER_RESUME)
+    analysis = state.stage("ANALYZING")
+    assert analysis.status == "done" and not analysis.interrupted
+    assert analysis.duration_s() == 372.0 and analysis.total_s() == 440.0
+    assert analysis.rounds == 1
+    assert view.stage_time(analysis) == "6m12s (7m20s incl. the interrupted attempt)"
+    row = next(line for line in view.screen_text(state, width=100, now=NOW).splitlines()
+               if "Running the analysis" in line)
+    assert row.startswith(" [ok] 3 ") and "6m12s (7m20s incl. the interrupted attempt)" in row
+    printer = view.PlainPrinter(width=120)
+    printer.lines(fold(_BEFORE_STOP + _THE_STOP + _AFTER_RESUME[:2]), now=NOW, clock=0.0)
+    out = printer.lines(state, now=NOW, clock=1.0)
+    assert ("[ok] Step 3 of 7 done (6m12s; 7m20s incl. the interrupted attempt): "
+            "Running the analysis") in out
+
+
+def test_a_step_cut_off_without_a_stage_end_counts_as_an_earlier_attempt() -> None:
+    # A killed process writes no stage.end: the round ends at the last
+    # event it wrote, and the resumed round is timed on its own.
+    killed = _BEFORE_STOP + [_ev(7, "llm.start", "48:29", stage="ANALYZING")]
+    state = fold(killed + [_ev(8, "run.start", "50:00", resumed=True),
+                           _ev(9, "stage.start", "50:00", stage="ANALYZING"),
+                           _ev(10, "stage.end", "53:00", stage="ANALYZING", outcome="ok")])
+    analysis = state.stage("ANALYZING")
+    assert analysis.duration_s() == 180.0 and analysis.earlier_s == 60.0
+
+
+
+def _stopped_mid_call() -> list[dict]:
+    return [
+        event(1, "run.start", 0, task_type="prediction", dataset="hsls09_public", provider="deepseek"),
+        event(2, "stage.start", 0, stage="ANALYZING"),
+        event(3, "llm.end", 1, ok=True, cost_usd=0.02),
+        event(4, "llm.end", 2, ok=False, error_class="KeyboardInterrupt", cost_usd=None),
+        event(5, "stage.end", 2, stage="ANALYZING", outcome="interrupted"),
+        event(6, "run.end", 2, state="INTERRUPTED"),
+    ]
+
+
+def test_a_call_cut_off_by_the_stop_is_counted_and_explained() -> None:
+    # The Mac view said "at least US$0.039 (9 AI calls)" at the stop while
+    # pipeline.log counted 8 calls, and nothing said what the ninth was.
+    state = fold(_stopped_mid_call())
+    assert (state.llm_calls, state.calls_cut_off, state.calls_failed) == (2, 1, 0)
+    assert view.cost_line(state) == "Cost: at least US$0.020 (2 AI calls, 1 cut off when the study was stopped)"
+    screen = " ".join(view.screen_text(state, width=80, now=NOW).split())
+    assert "may still be billed by the AI service" in screen
+
+
+def test_a_call_that_failed_makes_the_cost_a_lower_bound_without_calling_it_cut_off() -> None:
+    state = fold([event(1, "llm.end", 0, ok=True, cost_usd=0.01),
+                  event(2, "llm.end", 1, ok=False, error_class="APIStatusError", cost_usd=None)])
+    assert view.cost_line(state) == "Cost so far: at least US$0.010 (2 AI calls)"
+    assert not state.cost_unpriced  # the model has a price; the call had no answer
+    only_cut_off = fold([event(1, "llm.end", 0, ok=False, error_class="KeyboardInterrupt"),
+                         event(2, "run.end", 0, state="INTERRUPTED")])
+    assert view.cost_line(only_cut_off) == \
+        "Cost: at least US$0.000 (1 AI call, 1 cut off when the study was stopped)"
+
+
+def test_a_call_still_waiting_when_the_process_died_is_cut_off() -> None:
+    state = fold([event(1, "llm.end", 0, ok=True, cost_usd=0.01),
+                  event(2, "llm.start", 1),
+                  event(3, "run.start", 5, resumed=True)])
+    assert (state.llm_calls, state.calls_cut_off) == (2, 1)
+    assert not state.waiting_ai
+
+
+
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+def test_killing_the_full_screen_view_shows_the_cursor_again(
+    run_home: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    # On the Mac, `kill` (SIGTERM) on `edmars status` in a terminal left the
+    # cursor hidden: Python's default handler ended the process before rich
+    # could show it again. The signal now ends the view through Python.
+    import signal
+
+    from edmars import ui
+
+    sig = getattr(signal, name, None)
+    if sig is None:
+        pytest.skip(f"this system has no {name}")
+    run = make_run(run_home, pid=alive_pid(), pdf=False, log=log_lines((0, "Starting FORMULATING stage")))
+    console = Console(file=io.StringIO(), width=100, force_terminal=True)
+    monkeypatch.setattr(ui, "get_console", lambda stderr=False: console)
+    monkeypatch.setattr(ui, "is_plain", lambda: False)
+
+    class _NotHandled(Exception):
+        pass
+
+    def _unhandled(signum: int, frame: object) -> None:
+        raise _NotHandled(f"the view left {name} to the previous handler")
+
+    # A stand-in for the default handler, which would end pytest itself.
+    previous = signal.signal(sig, _unhandled)
+    try:
+        monkeypatch.setattr(view.time, "sleep", lambda seconds: signal.raise_signal(sig))
+        with pytest.raises(SystemExit) as ended:
+            view.watch(run)
+        restored = signal.getsignal(sig)
+    finally:
+        signal.signal(sig, previous)
+    assert ended.value.code == 128 + sig
+    out = console.file.getvalue()  # type: ignore[attr-defined]
+    hidden, shown = out.rfind("\x1b[?25l"), out.rfind("\x1b[?25h")
+    assert hidden >= 0 and shown > hidden, "the cursor was left hidden"
+    assert restored is _unhandled  # the earlier handler is put back

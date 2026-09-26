@@ -658,3 +658,58 @@ def test_uninstall_needs_yes_without_a_terminal() -> None:
 def test_a_module_returning_nothing_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_module(monkeypatch, "doctor", main=lambda **_kwargs: None)
     assert invoke("doctor").exit_code == 0
+
+
+
+def test_review_of_a_study_without_a_paper_stops_before_asking_anything() -> None:
+    # Before, the confirmation ("... usually takes 10-40 minutes") and the
+    # notice came first, and only then "no paper PDF".
+    from tests.cli._run_support import make_run, v2_status
+
+    run = make_run(paths.default_studies_dir(), pdf=False,
+                   status=v2_status("ABORTED", released=False, reason_code="ABORTED",
+                                    abort={"stage": "CRITIQUING", "code": "PRE_CRITIC_ABORT",
+                                           "message": "pcc_07: x", "resumable": False}))
+    result = invoke("review", run.name)
+    assert result.exit_code == 1
+    out = " ".join(result.output.split())
+    assert "stopped before its paper was written" in out and "edmars results" in out
+    assert "10-40" not in out and "accept" not in out
+
+
+
+@pytest.mark.parametrize("view_code, exit_code", [(10, 0), (11, 3), (1, 1)])
+def test_status_exit_codes_follow_the_result_screen_scheme(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, view_code: int, exit_code: int
+) -> None:
+    # The view's own return values (10 left running, 11 stopped from the
+    # view) are not exit codes; stopping from the view is "stopped", 3,
+    # the code `edmars results` gives a stopped study.
+    fake_module(monkeypatch, "runner", active_run=lambda: tmp_path, latest_run=lambda s: None)
+    fake_module(monkeypatch, "view", watch=lambda run_dir, plain=False: view_code)
+    assert invoke("status").exit_code == exit_code
+
+
+def test_status_on_a_stopped_study_exits_3_as_its_help_says() -> None:
+    # The Mac test's `edmars status --plain` exited 3 on the stopped study,
+    # while view.py's docstring listed only 0, 10, 11 and 1.
+    from tests.cli._run_support import make_run, v2_status
+
+    run = make_run(paths.default_studies_dir(), pdf=False,
+                   status=v2_status("ABORTED", released=False, reason_code="ABORTED",
+                                    abort={"stage": "CRITIQUING", "code": "PRE_CRITIC_ABORT",
+                                           "message": "pcc_07: x", "resumable": False}))
+    result = invoke("status", run.name, "--plain")
+    assert result.exit_code == 3, result.output
+    assert "Stopped" in result.output
+
+
+@pytest.mark.parametrize("command", ["status", "results", "new", "run", "resume"])
+def test_commands_that_end_on_a_result_screen_document_their_exit_codes(command: str) -> None:
+    from edmars.model import EXIT_NOT_READY, EXIT_READY, EXIT_STOPPED
+
+    assert (EXIT_READY, EXIT_NOT_READY, EXIT_STOPPED) == (0, 2, 3)
+    out = " ".join(invoke(command, "--help").output.split())
+    assert "Exit codes: 0 the paper is ready" in out
+    assert "2 the study finished but the paper is not ready" in out
+    assert "3 the study stopped before it finished" in out

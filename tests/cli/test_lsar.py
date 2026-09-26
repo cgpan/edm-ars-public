@@ -583,3 +583,57 @@ def test_requirements_for_another_python_are_skipped(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text(
         'tenacity>=8\nbackports.zoneinfo; python_version < "3.9"\n', encoding="utf-8")
     assert lsar.runtime_requirements(tmp_path) == ["tenacity>=8"]
+
+
+
+def _stopped_study(tmp_path: Path, *, running: bool = False) -> Path:
+    from tests.cli._run_support import alive_pid, log_lines, make_run, v2_status
+
+    if running:
+        return make_run(tmp_path, pdf=False, pid=alive_pid(),
+                        log=log_lines((0, "Starting FORMULATING stage")))
+    return make_run(tmp_path, pdf=False,
+                    status=v2_status("ABORTED", released=False, reason_code="ABORTED",
+                                     abort={"stage": "CRITIQUING", "code": "PRE_CRITIC_ABORT",
+                                            "message": "pcc_07: promised a test", "resumable": False}))
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_edmars_review_of_a_study_without_a_paper_says_so_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, running: bool
+) -> None:
+    # The Mac study stopped at the automatic checks. `edmars review` first
+    # announced "This usually takes 10-40 minutes", then advised checking
+    # the PDF tools with `edmars doctor` and resuming a study that cannot
+    # be resumed.
+    from edmars import ui
+
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(ui, "fail", lambda msg: shown.append(("fail", msg)))
+    monkeypatch.setattr(ui, "info", lambda msg: shown.append(("info", msg)))
+    entered: list[str] = []
+
+    class _Status:
+        def __init__(self, note: str) -> None:
+            entered.append(note)
+
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(ui, "status", _Status)
+    home = _home(tmp_path)
+    run = _stopped_study(tmp_path / "studies", running=running)
+
+    assert lsar.review_run(run, {"lsar": {"home": str(home)}}) == 1
+    assert entered == []  # no "10-40 minutes" note before the check
+    [(kind, message)] = shown
+    assert kind == "fail" and "no paper PDF" in message
+    assert "doctor" not in message and "edmars resume" not in message
+    if running:
+        assert "still running" in message and "edmars status" in message
+    else:
+        assert "stopped before its paper was written (Automatic checks stopped the study)" in message
+        assert "edmars results" in message

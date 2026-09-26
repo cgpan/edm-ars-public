@@ -690,6 +690,72 @@ def test_abort_reason_and_resume_command_when_resumable(
     assert "--resume" in out
 
 
+def test_a_study_started_by_edmars_is_told_to_use_edmars_resume(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The Mac test's console.log said "Continue with: python -m src.main
+    # --config ... --resume" for a study edmars had started, while edmars
+    # itself said `edmars resume <folder>`.
+    monkeypatch.setenv("EDMARS_RUN_ID", "2026-09-26_0941_which-ninth-grade_c986")
+    stub.final_state = PipelineState.ABORTED
+    stub.status = _status_v2(
+        state="ABORTED", released=False, reason_code="ABORTED",
+        abort={"stage": "FORMULATING", "code": "NO_CREDIT",
+               "message": "the DeepSeek account has no balance", "resumable": True},
+    )
+    assert _run(env) == 3
+    out = capsys.readouterr().out
+    folder = str(env["root"] / "run")
+    assert "After fixing the cause, continue the run with:" in out
+    expected = folder if re.fullmatch(r"[A-Za-z0-9_./:-]+", folder) else (
+        f'"{folder}"' if os.name == "nt" else f"'{folder}'")
+    assert f"  edmars resume {expected}\n" in out
+    assert "python -m src.main" not in out and "--resume" not in out
+
+
+class _SkillDropOrchestrator(_StubOrchestrator):
+    """Logs the skill composer's budget warning, as a real run does."""
+
+    def run(self, user_prompt: str | None = None) -> Any:
+        import logging
+
+        logging.getLogger("src.skills.composer").warning(
+            "format_skills_for_prompt: dropped non-mandatory skill %r (%d chars) due to budget",
+            "model-mlp", 3932)
+        return super().run(user_prompt)
+
+
+@pytest.mark.parametrize("from_edmars", [True, False])
+def test_skill_budget_warnings_go_to_pipeline_log_for_a_study_edmars_started(
+    env: dict[str, Path], stub: type[_StubOrchestrator], capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch, from_edmars: bool,
+) -> None:
+    # On the Mac test, "format_skills_for_prompt: dropped non-mandatory
+    # skill 'model-mlp' ..." lines (Python's last-resort stderr handler)
+    # sat in the user's console.log between the progress lines.
+    import logging
+
+    if from_edmars:
+        monkeypatch.setenv("EDMARS_RUN_ID", "run")
+    else:
+        monkeypatch.delenv("EDMARS_RUN_ID", raising=False)
+    monkeypatch.setattr(main_mod, "Orchestrator", _SkillDropOrchestrator)
+    with caplog.at_level(logging.WARNING, logger="src"):
+        assert _run(env) == 0
+    err = capsys.readouterr().err
+    log = (env["root"] / "run" / "pipeline.log")
+    logged = log.read_text(encoding="utf-8") if log.exists() else ""
+    line = "dropped non-mandatory skill 'model-mlp' (3932 chars) due to budget"
+    if from_edmars:
+        assert line in logged and "[src.skills.composer] warning: format_skills_for_prompt" in logged
+        assert line not in err and not caplog.records
+    else:
+        assert line not in logged
+        assert any(line in r.getMessage() for r in caplog.records)  # unchanged: tests still see it
+    assert not logging.getLogger("src").handlers and logging.getLogger("src").propagate
+
+
 def test_no_resume_command_when_the_abort_is_final(
     env: dict[str, Path], stub: type[_StubOrchestrator],
     capsys: pytest.CaptureFixture[str],

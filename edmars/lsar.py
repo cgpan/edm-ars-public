@@ -836,6 +836,44 @@ def _review_env(names: Sequence[str]) -> dict[str, str]:
     return env
 
 
+def _paper_pdf(run_dir: Path) -> Path | None:
+    """The PDF a review reads: the gate's citation-cleaned copy, else paper.pdf."""
+    return next((run_dir / n for n in ("paper_for_review.pdf", "paper.pdf")
+                 if (run_dir / n).is_file()), None)
+
+
+def no_paper_reason(run_dir: str | Path) -> str | None:
+    """Why ``run_dir`` has no paper to review, in words that fit how the
+    study ended; None when there is a PDF.
+
+    Checked before anything else (before the "10-40 minutes" note and the
+    question about spending), so a study that stopped before writing its
+    paper is sent to its result screen, not told to check the PDF tools and
+    resume, which a stopped study may not allow.
+    """
+    run_dir = Path(run_dir)
+    if _paper_pdf(run_dir) is not None:
+        return None
+    from edmars.endstates import classify, quote_path
+
+    run = quote_path(run_dir)
+    outcome = None
+    if any((run_dir / n).exists() for n in ("runner.json", "events.jsonl", "pipeline.log")):
+        try:
+            outcome = classify(run_dir)
+        except Exception:  # noqa: BLE001 - the plain sentence below still helps
+            outcome = None
+    if outcome is not None and outcome.kind == "running":
+        return ("This study is still running, so there is no paper PDF to review yet. "
+                f"Follow it with: edmars status {run}")
+    if outcome is not None and outcome.kind == "stopped":
+        what = (outcome.title or outcome.headline).rstrip(".")
+        return (f"This study stopped before its paper was written ({what}), so there is no "
+                f"paper PDF to review. See what happened and what to do next with: edmars results {run}")
+    return (f"{run_dir} has no paper PDF (paper.pdf), so there is nothing to review. "
+            f"See why, and how to get the PDF, with: edmars results {run}")
+
+
 def review_paper(
     run_dir: str | Path,
     settings: Mapping[str, Any],
@@ -869,13 +907,9 @@ def review_paper(
     script = home / "scripts" / "run_review.py"
     if not script.is_file():
         raise LsarReviewError(f"LSAR's review script is missing: {script}")
-    pdf = next((run_dir / n for n in ("paper_for_review.pdf", "paper.pdf")
-                if (run_dir / n).is_file()), None)
+    pdf = _paper_pdf(run_dir)
     if pdf is None:
-        raise LsarReviewError(
-            f"{run_dir} has no paper PDF (paper.pdf), so there is nothing to review. "
-            "Check `edmars doctor` for the PDF tools, then resume the study."
-        )
+        raise LsarReviewError(no_paper_reason(run_dir) or f"{run_dir} has no paper PDF (paper.pdf).")
     env = _review_env(REVIEW_SECRETS)
     if not env.get("DEEPSEEK_API_KEY"):
         raise LsarReviewError(
@@ -954,6 +988,10 @@ def review_run(
     from edmars import ui
 
     run_dir = Path(run_dir)
+    missing = no_paper_reason(run_dir)
+    if missing:
+        ui.fail(missing)
+        return 1
     note = (f"Reviewing the paper with LSAR. This usually takes {estimates.MANUAL_REVIEW_TIME}; "
             "you can leave this window open.")
     try:

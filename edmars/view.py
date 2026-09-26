@@ -15,11 +15,19 @@ running (the default) or stop it.
 
 ``watch()`` returns 0 when the study ended, 10 when the person left it
 running, 11 when they stopped it, and 1 when there is no such folder.
+These are for the caller only, not exit codes: ``edmars status`` (and
+``new``, ``run`` and ``resume`` while they watch) turns them into the
+result screen's exit codes, ``edmars.model.EXIT_*``: 0 ready or still
+running (left running), 2 finished but not ready, 3 stopped (also when
+stopped from the view), 1 no matching study.
 """
 from __future__ import annotations
 
+import signal
 import textwrap
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -27,8 +35,10 @@ from typing import Any, Callable
 from rich.cells import cell_len
 
 from edmars.runstate import (
+    CUT_OFF_NOTE,
     EXPERIMENTAL_LINE,
     RunState,
+    StageState,
     StateReader,
     fmt_duration,
     progress,
@@ -36,6 +46,7 @@ from edmars.runstate import (
     step_position,
     stopped_early,
 )
+from edmars.runstate import cost_line as _cost_line
 
 EXIT_ENDED = 0
 EXIT_LEFT_RUNNING = 10
@@ -54,6 +65,9 @@ _ASCII = {
 
 #: Print a "still working" line in plain mode after this much silence.
 PLAIN_HEARTBEAT_S = 300.0
+
+#: An error in the "Recent" list is wrapped, up to this many lines.
+RECENT_ERROR_LINES = 8
 
 Line = tuple[str, str]  # (text, rich style)
 
@@ -132,18 +146,9 @@ def _provider_label(provider: str) -> str:
 
 
 def cost_line(state: RunState) -> str:
-    calls = f"{state.llm_calls} AI call{'s' if state.llm_calls != 1 else ''}"
-    lead = "Cost" if state.finished else "Cost so far"
-    if state.cost_usd is None:
-        if state.llm_calls:
-            return f"{lead}: not priced for this AI service ({calls})"
-        if state.finished:
-            return f"{lead}: not recorded for this study"
-        return f"{lead}: US$0.00 (no AI calls yet)"
-    amount = f"US${state.cost_usd:.3f}"
-    if state.cost_unpriced:
-        amount = f"at least {amount}"
-    return f"{lead}: {amount} ({calls})"
+    """The cost line (edmars.runstate.cost_line, shared with the result
+    screen and summary.html)."""
+    return _cost_line(state)
 
 
 def render_screen(
@@ -194,10 +199,12 @@ def render_screen(
     for number, st in enumerate(state.visible_stages(), start=1):
         title = stage_title(state, st)
         stage_left = f" {glyphs.get(st.status, '·')} {number} {title}"
-        dur = fmt_duration(st.duration_s(ref)) if st.status != "pending" else ""
+        dur = stage_time(st, ref) if st.status != "pending" else ""
         detail = st.detail
         if st.status == "running" and not detail:
             detail = _running_hint(state)
+        if st.status == "failed" and st.interrupted:
+            detail = "interrupted" + (f" · {detail}" if detail else "")
         stage_right = "  ".join(p for p in (dur, detail) if p)
         for text in _two_col(stage_left, stage_right, width, plain):
             add(text, STYLES.get(st.status, ""))
@@ -209,16 +216,42 @@ def render_screen(
     for i, text in enumerate(_wrap(f"Now: {now_text}", width, indent="     ")):
         add(text, "bold" if i == 0 else "")
     tail = "" if state.finished else " · Safe to close this window — the study keeps running"
+    if state.finished and state.calls_cut_off:
+        tail = f". {CUT_OFF_NOTE}"
     for text in _wrap(cost_line(state) + tail, width):
         add(text, "dim")
     recent = state.recent[-3:]
     if recent:
         add("Recent:", "dim")
+        errors = {" ".join(e.split()) for e in state.errors}
         for line in recent:
-            add(f"  {line}", "dim")
+            if line not in errors:
+                add(f"  {line}", "dim")
+                continue
+            # An error is the one line a person needs whole (why the study
+            # stopped): wrap it instead of cutting it at the screen's edge.
+            wrapped = _wrap(to_ascii(line) if plain else line, width - 2, indent="  ")
+            if len(wrapped) > RECENT_ERROR_LINES:
+                wrapped = wrapped[:RECENT_ERROR_LINES]
+                wrapped[-1] = _truncate(wrapped[-1] + " ...", width - 2, plain)
+            for text in wrapped:
+                add(f"  {text}", "red")
     if not state.finished:
         add("Ctrl+C: leave or stop", "dim")
     return out
+
+
+def stage_time(st: StageState, ref: datetime | None = None, *, bracketed: bool = False) -> str:
+    """A step's time in this attempt; after a resume, also the total with
+    the interrupted attempt (the Mac view showed only the sum, 7m20s, for
+    an analysis that took 6m12s after the resume). ``bracketed`` is for
+    text already inside brackets: "6m12s; 7m20s incl. ..." instead of
+    "6m12s (7m20s incl. ...)"."""
+    dur = fmt_duration(st.duration_s(ref))
+    if st.earlier_s and dur:
+        total = f"{fmt_duration(st.total_s(ref))} incl. the interrupted attempt"
+        dur += f"; {total}" if bracketed else f" ({total})"
+    return dur
 
 
 def _running_hint(state: RunState) -> str:
@@ -285,7 +318,7 @@ class PlainPrinter:
                 continue
             self._status[st.key] = st.status
             title = stage_title(state, st)
-            dur = fmt_duration(st.duration_s(ref))
+            dur = stage_time(st, ref, bracketed=True)
             if st.status == "running":
                 out += self._emit(f"[..] Step {number} of {total}: {title}")
             elif st.status == "done":
@@ -295,6 +328,10 @@ class PlainPrinter:
                 if st.detail:
                     text += f" - {st.detail}"
                 out += self._emit(text)
+            elif st.status == "failed" and st.interrupted:
+                text = f"[x] Step {number} of {total} interrupted"
+                text += f" after {dur}" if dur else ""
+                out += self._emit(f"{text}: {title}")
             elif st.status == "failed":
                 out += self._emit(f"[x] Step {number} of {total} did not finish: {title}")
             elif st.status == "skipped" and before is not None:
@@ -307,6 +344,8 @@ class PlainPrinter:
             self._finished_said = True
             ended = "Stopped" if stopped_early(state) else "Finished"
             out += self._emit(f"{ended}. {state.now_text} {cost_line(state)}.")
+            if state.calls_cut_off:
+                out += self._emit(CUT_OFF_NOTE)
         if out:
             self._last_output = tick
         elif not state.finished and self._last_output is not None and \
@@ -437,6 +476,50 @@ def _watch_plain(reader: StateReader, run_dir: Path, *, poll_s: float) -> int:
         return _ask_leave_or_stop(run_dir, _say_plain)
 
 
+#: Signals that end the full-screen view the way Ctrl+C ends a command:
+#: through Python, so rich's Live shows the cursor again on the way out.
+_END_SIGNALS = ("SIGTERM", "SIGHUP")
+
+
+@contextmanager
+def _terminal_restored_on_signals(console: Any) -> Iterator[None]:
+    """While the full-screen view runs, turn SIGTERM and SIGHUP into
+    ``SystemExit(128 + signal)`` and show the cursor again at the end.
+
+    rich hides the cursor while Live draws and only Live.stop shows it
+    again. Python's default for SIGTERM ends the process at once, so
+    `kill`-ing `edmars status` left the terminal without a cursor (it
+    needed `tput cnorm`). Ctrl+C already arrives as KeyboardInterrupt.
+    The previous handlers are put back afterwards; in a thread other than
+    the main one, where handlers cannot be set, nothing changes.
+    """
+    previous: dict[int, Any] = {}
+
+    def _end(signum: int, _frame: Any) -> None:
+        raise SystemExit(128 + signum)
+
+    for name in _END_SIGNALS:
+        sig = getattr(signal, name, None)
+        if sig is None:  # no SIGHUP on Windows
+            continue
+        try:
+            previous[sig] = signal.signal(sig, _end)
+        except (ValueError, OSError):
+            continue
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError, TypeError):
+                pass
+        try:
+            console.show_cursor(True)
+        except Exception:  # noqa: BLE001 - a closed terminal has no cursor to show
+            pass
+
+
 def _watch_live(reader: StateReader, run_dir: Path, *, poll_s: float) -> int:
     from rich.console import Group
     from rich.live import Live
@@ -459,8 +542,9 @@ def _watch_live(reader: StateReader, run_dir: Path, *, poll_s: float) -> int:
     state = reader.refresh()
     last_read = time.monotonic()
     try:
-        with Live(renderable(state), console=console, refresh_per_second=4,
-                  transient=False, auto_refresh=False) as live:
+        with _terminal_restored_on_signals(console), \
+                Live(renderable(state), console=console, refresh_per_second=4,
+                     transient=False, auto_refresh=False) as live:
             while True:
                 if time.monotonic() - last_read >= poll_s:
                     state = reader.refresh()

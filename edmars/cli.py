@@ -34,6 +34,7 @@ import click
 import typer
 
 from edmars import __version__, ui
+from edmars.model import EXIT_CODES_HELP, EXIT_ERROR, EXIT_READY, EXIT_STOPPED
 
 ISSUES_URL = "https://github.com/cgpan/edm-ars-public/issues"
 
@@ -368,7 +369,12 @@ def _resolve_run(
 
 
 def _watch_then_results(run_dir: Path) -> None:
-    """Show the live view; when the study ends, show its results."""
+    """Show the live view; when the study ends, show its results.
+
+    Exits with the result screen's code (edmars.model.EXIT_CODES_HELP);
+    the view's own return values (10 left running, 11 stopped from the
+    view) never reach the shell.
+    """
     view = _module("view")
     code = view.watch(run_dir, plain=ui.is_plain())
     if code == 0:
@@ -379,9 +385,11 @@ def _watch_then_results(run_dir: Path) -> None:
             "The study was stopped. Your finished steps are saved; continue it later "
             "with `edmars resume`."
         )
-    else:
-        ui.info("The study keeps running in the background. Check on it with `edmars status`.")
-    raise typer.Exit(0)
+        raise typer.Exit(EXIT_STOPPED)
+    if code == 1:
+        raise typer.Exit(EXIT_ERROR)
+    ui.info("The study keeps running in the background. Check on it with `edmars status`.")
+    raise typer.Exit(EXIT_READY)
 
 
 def _after_start(run_dir: Path, watch: bool) -> None:
@@ -706,7 +714,7 @@ def doctor_cmd(
     raise _exit(doctor.main(deep=deep and not quick, json_out=json_out, bundle=bundle, quick=quick))
 
 
-@app.command("new")
+@app.command("new", epilog=EXIT_CODES_HELP)
 @_friendly
 def new_cmd(
     no_watch: NoWatchOpt = False,
@@ -737,7 +745,7 @@ def new_cmd(
     _launch(settings, plan, watch=not no_watch)
 
 
-@app.command("run")
+@app.command("run", epilog=EXIT_CODES_HELP)
 @_friendly
 def run_cmd(
     type_: Annotated[
@@ -818,7 +826,7 @@ def run_cmd(
     _preflight_confirm_launch(settings, plan, yes=non_interactive, watch=not no_watch)
 
 
-@app.command("status")
+@app.command("status", epilog=EXIT_CODES_HELP)
 @_friendly
 def status_cmd(run: RunArg = None, plain: PlainOpt = False, yes: YesOpt = False) -> None:
     """Watch a study's progress (the running one, or the latest)."""
@@ -875,7 +883,7 @@ def _local_time(value: str) -> str:
     return ts.astimezone().strftime("%Y-%m-%d %H:%M") if ts is not None else value
 
 
-@app.command("results")
+@app.command("results", epilog=EXIT_CODES_HELP)
 @_friendly
 def results_cmd(
     run: RunArg = None,
@@ -917,7 +925,7 @@ def stop_cmd(run: RunArg = None, plain: PlainOpt = False, yes: YesOpt = False) -
     ui.ok("Stopped. Continue it later with `edmars resume`.")
 
 
-@app.command("resume")
+@app.command("resume", epilog=EXIT_CODES_HELP)
 @_friendly
 def resume_cmd(
     run: RunArg = None,
@@ -965,10 +973,17 @@ def review_cmd(
     review = getattr(lsar, "review_run", None) or getattr(lsar, "review", None)
     if review is None:
         raise FeatureMissing("lsar.review")
+    run_dir = _resolve_run(settings, run, prefer_active=False)
+    # A study with no paper is said so first, before the notice, the
+    # "usually takes 10-40 minutes" question or anything else.
+    no_paper = getattr(lsar, "no_paper_reason", None)
+    reason = no_paper(run_dir) if callable(no_paper) else None
+    if reason:
+        ui.fail(reason)
+        raise typer.Exit(1)
     # The review sends the paper to DeepSeek, which the notice describes;
     # like new, run and resume, it needs the current notice accepted.
     _require_ack(settings, accept_disclosure)
-    run_dir = _resolve_run(settings, run, prefer_active=False)
     _confirm_spend(
         f"Review the paper in {run_dir.name}? This sends it to DeepSeek and usually "
         f"takes {estimates.MANUAL_REVIEW_TIME}.",
@@ -989,35 +1004,16 @@ def _dataset_info(datasets: ModuleType, name: str) -> Any:
     return catalog[name]
 
 
-_PHASE_WORDS = {"download": "downloaded", "extract": "unpacked", "convert": "converted",
-                "verify": "checked"}
-
-
-def _progress_printer() -> Callable[..., None]:
-    """A download progress callback: one line per 10% of each phase.
+def _progress_printer() -> ui.TransferProgress:
+    """A progress callback for ``datasets``: a bar in a terminal, lines in
+    plain mode, each with MB done, speed and time left (ui.TransferProgress).
 
     ``datasets`` reports ``(done, total, phase)``: download, then verify
     (the zip) and convert for HSLS:09, or extract and verify for a file
-    used as it comes; a line per phase keeps a 2 GB conversion from
-    looking like a hang after "downloaded 100%".
+    used as it comes; each phase gets its own bar or lines, so a 2 GB
+    conversion does not look like a hang after "downloaded 100%".
     """
-    state: dict[str, Any] = {"phase": "", "last": -1}
-
-    def report(done: Any = 0, total: Any = None, phase: str = "download", *_rest: Any) -> None:
-        try:
-            done_n, total_n = float(done or 0), float(total or 0)
-        except (TypeError, ValueError):
-            return
-        if not total_n:
-            return
-        if phase != state["phase"]:
-            state["phase"], state["last"] = phase, -1
-        step = int(max(0.0, min(done_n / total_n, 1.0)) * 10)
-        if step > state["last"]:
-            state["last"] = step
-            ui.say(f"  {_PHASE_WORDS.get(phase, phase)} {step * 10}%")
-
-    return report
+    return ui.TransferProgress()
 
 
 def _installed_and_valid(datasets: Any, name: str, settings: dict[str, Any]) -> bool:
@@ -1101,7 +1097,11 @@ def data_install_cmd(
                     "A copy that changed is downloaded again.")
         else:
             ui.info("Downloading. Large files take a while; if it stops, run the same command to continue.")
-        path = Path(datasets.install(name, settings, progress=_progress_printer()))
+        progress = _progress_printer()
+        try:
+            path = Path(datasets.install(name, settings, progress=progress))
+        finally:
+            progress.close()
     check = datasets.validate_file(name, path)
     ui.show_checks([check])
     if check.status != "fail":

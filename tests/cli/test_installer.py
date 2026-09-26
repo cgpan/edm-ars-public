@@ -1,6 +1,6 @@
 """install/install.sh and install/install.ps1, offline.
 
-A real install downloads uv, Python and ~1.5 GB of packages, so it runs in
+A real install downloads uv, Python and 0.7-2 GB of packages, so it runs in
 CI (.github/workflows/ci.yml, job `installer`), not here. These tests pin
 what can be checked without the network: the scripts parse, agree with
 each other and with install/README.md, never `exit` a PowerShell session,
@@ -367,6 +367,7 @@ def test_ps1_dry_run_changes_nothing(tmp_path: Path) -> None:
     assert "Dry run: nothing was downloaded or changed." in result.stdout
     assert "This will:" in result.stdout
     assert f"  7. Add {bin_dir} to your user PATH" in result.stdout
+    assert "  5. Install EDM-ARS and the packages it needs (about 1 GB" in result.stdout  # 950 MB measured
     assert not base.exists() and not bin_dir.exists()
     # GNU spellings are the same options.
     result = _run_ps1(tmp_path, "--dry-run", f"--dir={base}", "--bin-dir", str(bin_dir),
@@ -586,17 +587,24 @@ def test_install_sh_makes_a_uv_found_through_a_relative_path_absolute(tmp_path: 
 
 
 @pytest.mark.skipif(SH is None, reason="sh is not installed")
-@pytest.mark.parametrize("on_path", [True, False])
-def test_install_sh_plan_does_not_promise_a_path_change_when_the_folder_is_on_path(
-    tmp_path: Path, on_path: bool
+@pytest.mark.parametrize("in_file, on_path", [(True, True), (False, True), (True, False), (False, False)])
+def test_install_sh_decides_the_path_change_from_the_shell_start_up_files(
+    tmp_path: Path, in_file: bool, on_path: bool
 ) -> None:
-    # The plan said "Add <bin> to your PATH" even when step 7 then said
-    # "already on your PATH"; it now decides the same way before the plan.
+    # On the owner's Mac the installer ran under an app whose PATH already
+    # had ~/.local/bin, so it wrote no block and a new Terminal window could
+    # not find edmars (on_path without in_file). The folder is left alone
+    # only when a start-up file puts it on PATH and this PATH has it too;
+    # the plan says which file it found, or which files it will change, and
+    # step 7 then does what the plan said.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     home = tmp_path / "home"
     home.mkdir()
-    env = _clean_env(tmp_path, HOME=_sh_path(home))
+    zprofile = home / ".zprofile"
+    if in_file:
+        zprofile.write_text(f'export PATH="{_sh_path(bin_dir)}:$PATH"\n', encoding="utf-8")
+    env = _clean_env(tmp_path, HOME=_sh_path(home), SHELL="/bin/zsh")
     if on_path:
         env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
     result = subprocess.run(
@@ -606,13 +614,76 @@ def test_install_sh_plan_does_not_promise_a_path_change_when_the_folder_is_on_pa
         timeout=120, env=env, stdin=subprocess.DEVNULL,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    already = f"  7. Leave your PATH as it is: {_sh_path(bin_dir)} is already on it."
-    add = f"  7. Add {_sh_path(bin_dir)} to your PATH"
-    if on_path:
-        assert already in result.stdout and add not in result.stdout
+    already = (f"  7. Leave your PATH as it is: {_sh_path(zprofile)} already puts "
+               f"{_sh_path(bin_dir)} on it.")
+    add = (f"  7. Add {_sh_path(bin_dir)} to your PATH (your account only), in a marked block at\n"
+           "     the end of ~/.profile, ~/.zshrc.")
+    if in_file and on_path:
+        assert already in result.stdout and "7. Add" not in result.stdout
     else:
-        assert add in result.stdout and already not in result.stdout
-    assert list(home.iterdir()) == []
+        assert add in result.stdout and "7. Leave" not in result.stdout
+    assert sorted(p.name for p in home.iterdir()) == ([".zprofile"] if in_file else [])
+
+
+_START_UP_LINES = [
+    ('export PATH="$HOME/.local/bin:$PATH"', True),
+    ('export PATH="${HOME}/.local/bin:${PATH}"', True),
+    ("PATH=~/.local/bin:$PATH", True),
+    ("path=(~/.local/bin $path)", True),
+    ("fish_add_path ~/.local/bin", True),
+    ('. "$HOME/.local/bin/env"', True),  # uv's installer writes this line
+    ('[ -f ~/.local/bin/env ] && source ~/.local/bin/env', True),
+    ('case ":${PATH}:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac', True),
+    ('  # export PATH="$HOME/.local/bin:$PATH"', False),
+    ('export PYTHONPATH="$HOME/.local/bin"', False),
+    ('export PATH="$HOME/.local/bin2:$PATH"', False),
+    ("alias e=~/.local/bin/edmars", False),
+    ('if [ -d "$HOME/.local/bin" ] ; then', False),
+]
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_puts_on_path_reads_start_up_lines_without_running_them(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    body = "set -eu\n" + _sh_function("puts_on_path") + (
+        'for f in "$@"; do if puts_on_path "$f" "$HOME/.local/bin"; then echo yes; else echo no; fi; done\n')
+    files = []
+    for i, (line, _) in enumerate(_START_UP_LINES):
+        path = home / f"rc{i}"
+        # A line that ran would print; the function only reads it.
+        path.write_text("echo RAN\n" + line + "\n", encoding="utf-8")
+        files.append(_sh_path(path))
+    script = tmp_path / "probe.sh"
+    script.write_bytes(body.encode("utf-8"))
+    result = subprocess.run([str(SH), _sh_path(script), *files], capture_output=True, text=True,
+                            env=_clean_env(tmp_path, HOME=_sh_path(home)), timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "RAN" not in result.stdout
+    got = result.stdout.split()
+    assert got == ["yes" if expected else "no" for _, expected in _START_UP_LINES], list(
+        zip([line for line, _ in _START_UP_LINES], got))
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+@pytest.mark.parametrize("shell, found", [
+    ("/bin/zsh", ".zshrc"), ("/bin/bash", ".bashrc"), ("/usr/bin/fish", "config.fish"), ("/bin/sh", None)])
+def test_path_setup_file_reads_the_files_of_the_login_shell(tmp_path: Path, shell: str, found: str | None) -> None:
+    home = tmp_path / "home"
+    (home / ".config" / "fish").mkdir(parents=True)
+    line = 'export PATH="$HOME/.local/bin:$PATH"\n'
+    for name in (".zshrc", ".bashrc", ".config/fish/config.fish"):
+        (home / name).write_text(line, encoding="utf-8")
+    body = ("set -eu\n" + _sh_function("puts_on_path") + _sh_function("path_setup_file")
+            + 'path_setup_file "$HOME/.local/bin" || echo none\n')
+    script = tmp_path / "probe.sh"
+    script.write_bytes(body.encode("utf-8"))
+    result = subprocess.run([str(SH), _sh_path(script)], capture_output=True, text=True,
+                            env=_clean_env(tmp_path, HOME=_sh_path(home), SHELL=shell), timeout=60)
+    assert result.returncode == 0, result.stderr
+    out = result.stdout.strip()
+    assert out == ("none" if found is None else _sh_path(home) + "/" + (
+        ".config/fish/config.fish" if found == "config.fish" else found))
 
 
 # --- macOS: an OpenMP library for XGBoost without Homebrew ------------------------------
@@ -632,7 +703,7 @@ _FAKE_ENV_PYTHON = b"""#!/bin/sh
 case "$2" in
     *find_spec*) printf '%s\\n' "$FAKE_SKLEARN_OMP" "$FAKE_PYTHON_HOME" ;;
     'import numpy'*)
-        if [ -e "$FAKE_PYTHON_HOME/lib/libomp.dylib" ]; then exit 0; fi
+        if [ -e "$FAKE_PYTHON_HOME/lib/libomp.dylib" ] || [ -n "${FAKE_HOMEBREW_LIBOMP:-}" ]; then exit 0; fi
         echo "$FAKE_IMPORT_ERROR" >&2
         exit 1
         ;;
@@ -642,10 +713,12 @@ esac
 
 _FAKE_CHECK_OPENMP = """
 check_openmp() {
+    echo checked >>"${FAKE_CHECK_LOG:-/dev/null}"
     if [ "${FAKE_CHECK:-}" = fail ]; then
-        echo "expected one OpenMP library, found 2" >&2
+        echo "expected one OpenMP library, found 2: /opt/homebrew/opt/libomp/lib/libomp.dylib, $FAKE_SKLEARN_OMP" >&2
         return 1
     fi
+    if [ "${FAKE_CHECK:-}" = pass ]; then return 0; fi
     [ "$FAKE_PYTHON_HOME/lib/libomp.dylib" -ef "$FAKE_SKLEARN_OMP" ]
 }
 """
@@ -797,9 +870,10 @@ def _run_step5(lay: _OmpLayout, os_name: str = "Darwin", **env: str) -> subproce
     body = (
         "set -eu\n"
         "say() { printf '%s\\n' \"$*\"; }\n"
+        "warn() { printf '  ! %s\\n' \"$*\"; }\n"
         "die() { printf 'DIE: %s\\n' \"$*\" >&2; exit 1; }\n"
         + _sh_function("link_openmp") + _sh_function("provide_openmp") + _FAKE_CHECK_OPENMP
-        + 'OS=$1\nVENV_PY=$2\nAPP_BASE=$3\nTMP_DIR=$4\n'
+        + 'OS=$1\nVENV_PY=$2\nAPP_BASE=$3\nTMP_DIR=$4\nAPP_DIR="$APP_BASE/app/0.1.0"\n'
         + _step5_check()
         + "printf 'OMP_LINK=%s\\n' \"$OMP_LINK\"\n"
     )
@@ -844,6 +918,33 @@ def test_install_step5_falls_back_to_homebrew_advice_and_leaves_no_link(tmp_path
 
 
 @pytest.mark.skipif(SH is None, reason="sh is not installed")
+@pytest.mark.parametrize("runtimes", [1, 2])
+def test_install_step5_counts_the_openmp_libraries_when_homebrews_libomp_is_there(
+    tmp_path: Path, runtimes: int
+) -> None:
+    # The owner's Mac had Homebrew's libomp: `import xgboost` worked, no
+    # link was made, and nothing counted the OpenMP copies, although XGBoost
+    # loaded Homebrew's and scikit-learn its own. The same one-library check
+    # now runs; two copies are a note (the study there ran fine), not a stop.
+    lay = _OmpLayout(tmp_path)
+    log = tmp_path / "checks.log"
+    result = _run_step5(lay, FAKE_HOMEBREW_LIBOMP="1", FAKE_CHECK="pass" if runtimes == 1 else "fail",
+                        FAKE_CHECK_LOG=_sh_path(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert log.read_text(encoding="utf-8").split() == ["checked"]
+    assert "OMP_LINK=" in result.stdout.splitlines() and not lay.link.exists()
+    note = "XGBoost and scikit-learn load two different OpenMP libraries (found 2: /opt/homebrew/opt/libomp"
+    readme = f"{_sh_path(lay.base)}/app/0.1.0/install/README.md,"
+    if runtimes == 1:
+        assert "OpenMP" not in result.stdout
+    else:
+        assert "  ! " + note in result.stdout
+        assert readme in result.stdout
+        assert 'item "macOS: XGBoost and the OpenMP library"' in result.stdout
+    assert "DIE" not in result.stderr
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
 def test_install_step5_links_nothing_for_other_failures_or_systems(tmp_path: Path) -> None:
     lay = _OmpLayout(tmp_path)
     result = _run_step5(lay, FAKE_IMPORT_ERROR="ModuleNotFoundError: No module named 'fitz'")
@@ -855,6 +956,12 @@ def test_install_step5_links_nothing_for_other_failures_or_systems(tmp_path: Pat
     assert result.returncode == 1
     assert "do not load" in result.stderr and "brew" not in result.stderr
     assert not lay.link.exists()
+
+    # Linux has no dyld to ask: the OpenMP check is macOS-only.
+    log = tmp_path / "checks.log"
+    result = _run_step5(lay, os_name="Linux", FAKE_HOMEBREW_LIBOMP="1", FAKE_CHECK_LOG=_sh_path(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not log.exists()
 
 
 # Not on Windows: the stand-in uname is found first under a local Git Bash
@@ -888,8 +995,34 @@ def test_install_sh_plans_a_mac_install_into_application_support(tmp_path: Path)
     assert "Computer:      macOS (Apple Silicon)" in out
     assert f"Install into:  {_sh_path(home)}/Library/Application Support/edm-ars\n" in out
     assert "link the\n     one that comes with scikit-learn into the private Python" in out
+    assert "packages it needs (about 0.7 GB" in out  # 715 MB measured on an M1 Pro
     assert "Dry run: nothing was downloaded or changed." in out
     assert list(home.iterdir()) == []
+
+
+@pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh whose PATH lookup honours the stand-in uname")
+@pytest.mark.parametrize("machine, size", [("x86_64", "about 2 GB"), ("aarch64", "about 1-2 GB")])
+def test_install_sh_plan_estimates_the_size_for_this_platform(tmp_path: Path, machine: str, size: str) -> None:
+    # The plan said "about 1.5 GB" everywhere; an install measured 715 MB on
+    # an Apple Silicon Mac and about 2.0 GB on Linux x86_64, where XGBoost
+    # brings NVIDIA's NCCL library. Linux on arm64 is not measured yet.
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    (fakebin / "uname").write_bytes(
+        f'#!/bin/sh\nif [ "${{1:-}}" = -m ]; then echo {machine}; else echo Linux; fi\n'.encode())
+    (fakebin / "uname").chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _clean_env(tmp_path, HOME=_sh_path(home))
+    env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
+    result = subprocess.run(
+        [SH, _sh_path(INSTALL_SH), "--dry-run", "--from-local", _sh_path(REPO_ROOT),
+         "--dir", _sh_path(tmp_path / "base"), "--bin-dir", _sh_path(tmp_path / "bin")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, env=env, stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"  5. Install EDM-ARS and the packages it needs ({size}" in result.stdout
 
 
 @pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")
@@ -969,6 +1102,47 @@ def test_install_sh_keeps_its_own_uvs_cache_in_the_install_folder(tmp_path: Path
     assert all(line.endswith(expected) for line in installs), calls
     record = json.loads((base / "install.json").read_text(encoding="utf-8"))
     assert record["uv_private"] is private
+
+
+@pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")
+def test_install_sh_writes_the_path_block_when_only_the_calling_app_had_the_folder(tmp_path: Path) -> None:
+    # The Mac test: the installer ran under an app whose PATH had
+    # ~/.local/bin; the user's zsh start-up files did not. A block now goes
+    # into the start-up files, the output names them and says to open a new
+    # window, and install.json lists them for `edmars uninstall`. Run again
+    # from that new window, it changes nothing and still lists them.
+    base, home = tmp_path / "base", tmp_path / "home"
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    uv = tmp_path / "own" / "uv"
+    uv.parent.mkdir(parents=True)
+    uv.write_text(_FAKE_UV, encoding="utf-8")
+    uv.chmod(0o755)
+    env = {"FAKE_UV_LOG": str(tmp_path / "uv.log"), "FAKE_BASE_PY": str(tmp_path / "python3"),
+           "HOME": str(home), "SHELL": "/bin/zsh",
+           "PATH": f"{bin_dir}{os.pathsep}{uv.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+    args = ("--yes", "--no-onboard", "--from-local", str(REPO_ROOT), "--dir", str(base))
+
+    result = _run_sh(tmp_path, *args, **env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert f"  7. Add {bin_dir} to your PATH (your account only)" in out
+    assert f"Added {bin_dir} to your PATH in:\n      {home}/.profile\n      {home}/.zshrc\n" in out
+    assert "To use EDM-ARS, type:  edmars   (in a NEW terminal window" in out
+    block = (home / ".zshrc").read_text(encoding="utf-8")
+    assert '# >>> edm-ars >>>' in block and 'export PATH="$HOME/.local/bin:$PATH"' in block
+    record = json.loads((base / "install.json").read_text(encoding="utf-8"))
+    assert record["path_modified"] is True
+    assert record["path_files"] == [str(home / ".profile"), str(home / ".zshrc")]
+
+    result = _run_sh(tmp_path, *args, **env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"  7. Leave your PATH as it is: {home}/.zshrc already puts {bin_dir} on it." in result.stdout
+    assert block == (home / ".zshrc").read_text(encoding="utf-8")
+    assert "To use EDM-ARS, type:  edmars\n" in result.stdout
+    record = json.loads((base / "install.json").read_text(encoding="utf-8"))
+    assert record["path_modified"] is True
+    assert record["path_files"] == [str(home / ".profile"), str(home / ".zshrc")]
 
 
 def test_install_ps1_keeps_its_own_uvs_cache_in_the_install_folder() -> None:

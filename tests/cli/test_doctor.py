@@ -485,3 +485,17 @@ def test_system_checks_say_where_keys_are_never_what_they_are(
     assert GOOD_KEY not in keys.detail and S2_KEY not in keys.detail
     assert "Old .env file" in by_name(checks)
     assert "Git Bash" in by_name(checks)["Shell"][0].detail
+
+
+def test_the_literature_hint_does_not_promise_that_arxiv_always_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The hint said "(arXiv and Crossref need no key)"; on the Mac test
+    # every arXiv query got HTTP 406 and the study had no related papers.
+    from edmars import doctor, secrets
+
+    monkeypatch.setattr(secrets, "secret_source", lambda name: None)
+    [check] = doctor.check_semantic_scholar({})
+    assert check.status == "warn"
+    assert "arXiv and Crossref need no key but can refuse or rate-limit requests too" in check.detail
+    assert "A free Semantic Scholar key is the reliable fix" in check.detail
+    assert "edmars setup literature" in (check.fix or "")
+

@@ -27,13 +27,16 @@ from pathlib import Path
 from typing import Any
 
 from edmars.endstates import READY_KINDS, Outcome, classify, gate_skip_text, messages, quote_path
+from edmars.model import EXIT_ERROR, EXIT_NOT_READY, EXIT_READY, EXIT_STOPPED
 from edmars.runstate import (
+    CUT_OFF_NOTE,
     EXPERIMENTAL_LINE,
     EXPERIMENTAL_NOTE,
     EXPERIMENTAL_WHY,
     RunState,
     fmt_ci,
     fmt_num,
+    cost_line,
     fmt_score,
     load_state,
 )
@@ -263,6 +266,12 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
         add(f"What happened: {outcome.headline}")
         if outcome.why:
             add(f"Why: {outcome.why}")
+        if outcome.details:
+            add(outcome.details_heading or "Details:")
+            for line in outcome.details:
+                add(f"  - {line}")
+        if outcome.note:
+            add(outcome.note)
         if outcome.fix:
             add(f"What to do: {outcome.fix}")
         if outcome.commands:
@@ -273,9 +282,20 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
         add()
         add(str(messages().get("saved_note") or "Your finished steps are saved."))
         add(f"Study folder: {run_dir}", "dim")
+    _cost(state, add)
     add()
     add(reminder(), "italic")
     return out
+
+
+def _cost(state: RunState, add: Any) -> None:
+    """The cost, worded as the live view words it, and why it may be low."""
+    if not (state.llm_calls or state.cost_usd is not None):
+        return
+    add()
+    add(cost_line(state), "dim")
+    if state.calls_cut_off:
+        add(CUT_OFF_NOTE, "dim")
 
 
 def _please_check(outcome: Outcome, add: Any, plain: bool) -> None:
@@ -317,8 +337,10 @@ def result_text(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bool
 def show(run_dir: Path | str, open_: str | None = None) -> int:
     """Print the result screen; optionally open the PDF, folder or summary.
 
-    Returns 0 for a ready (or still running) study, 2 when the paper is
-    not ready, 3 when the study stopped, 1 for a bad ``--open`` value.
+    Returns the exit code of edmars.model's scheme: EXIT_READY (0) for a
+    ready or still running study, EXIT_NOT_READY (2) when the paper is not
+    ready, EXIT_STOPPED (3) when the study stopped, and EXIT_ERROR (1) for
+    a bad ``--open`` value.
     """
     from edmars import ui
 
@@ -339,13 +361,14 @@ def show(run_dir: Path | str, open_: str | None = None) -> int:
 
         for text, style in render_result(outcome, state, run_dir, plain=False):
             ui.console.print(Text(text, style=style), highlight=False)
-    code = {"ready": 0, "ready_with_issues": 0, "running": 0, "not_ready": 2, "stopped": 3}.get(outcome.kind, 0)
+    code = {"ready": EXIT_READY, "ready_with_issues": EXIT_READY, "running": EXIT_READY,
+            "not_ready": EXIT_NOT_READY, "stopped": EXIT_STOPPED}.get(outcome.kind, EXIT_READY)
     if open_:
         targets = {"pdf": run_dir / "paper.pdf", "folder": run_dir, "summary": summary or run_dir / "summary.html"}
         target = targets.get(open_)
         if target is None:
             ui.warn(f"Unknown --open value {open_!r}; use pdf, folder or summary.")
-            return 1
+            return EXIT_ERROR
         if not target.exists():
             what = {"pdf": "There is no PDF for this study.", "summary": "There is no summary yet."}
             ui.warn(what.get(open_, f"{target} does not exist."))
@@ -430,6 +453,13 @@ def render_summary_html(outcome: Outcome, state: RunState, run_dir: Path) -> str
     if outcome.kind not in READY_KINDS:
         if outcome.why:
             add(f"<p><strong>Why:</strong> {_e(outcome.why)}</p>")
+        if outcome.details:
+            add(f"<p><strong>{_e(outcome.details_heading or 'Details:')}</strong></p><ul>")
+            for line in outcome.details:
+                add(f"<li>{_e(line)}</li>")
+            add("</ul>")
+        if outcome.note:
+            add(f"<p>{_e(outcome.note)}</p>")
         if outcome.fix:
             add(f"<p><strong>What to do:</strong> {_e(outcome.fix)}</p>")
         if outcome.commands:
@@ -477,10 +507,12 @@ def render_summary_html(outcome: Outcome, state: RunState, run_dir: Path) -> str
         meta.append(f"Dataset: {state.dataset}")
     if state.provider:
         meta.append(f"AI service: {state.provider}")
-    if cost is not None:
-        meta.append(f"Cost: US${cost:.3f} ({state.llm_calls} AI calls)")
+    if cost is not None or state.llm_calls:
+        meta.append(cost_line(state))
     meta.append(f"Summary written {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     add(f'<p class="muted">{_e(" · ".join(meta))}</p>')
+    if state.calls_cut_off:
+        add(f'<p class="muted">{_e(CUT_OFF_NOTE)}</p>')
     add(f'<p class="note">{_e(reminder())}</p>')
     add("</main></body></html>")
     return "\n".join(parts) + "\n"

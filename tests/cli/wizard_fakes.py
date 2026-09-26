@@ -30,6 +30,8 @@ from typing import Any, Callable, Iterable, Literal
 import pytest
 import yaml
 
+from edmars.ui import TransferProgress as _RealTransferProgress
+
 #: Accept whatever default the prompt offers.
 DEFAULT = object()
 
@@ -145,6 +147,8 @@ class FakeUI:
             setattr(mod, name, getattr(self, name))
         mod.console = self.console  # type: ignore[attr-defined]
         mod.NonInteractiveError = NonInteractiveError  # type: ignore[attr-defined]
+        # The real class: it prints only through the say_fn it is given.
+        mod.TransferProgress = _RealTransferProgress  # type: ignore[attr-defined]
         return mod
 
 

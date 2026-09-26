@@ -176,9 +176,103 @@ install folder lists everything this installer created.
 EOF
 }
 
-# Append the PATH block to one shell start-up file (once).
+# puts_on_path FILE DIR: true when a line of the shell start-up file FILE
+# puts DIR on PATH. The file is read, never run. A line counts when it
+# names DIR (written out, or as $HOME/..., ${HOME}/... or ~/...) and either
+# sets PATH (or zsh's path array, or calls fish_add_path) or sources
+# DIR/env, the file uv's and cargo's installers add. Comment lines do not
+# count; neither does a longer name such as DIR2.
+puts_on_path() {
+    pp_rel=""
+    case "$2" in "$HOME"/*) pp_rel=${2#"$HOME"/} ;; esac
+    # The $HOME in this program is awk text, not a shell expansion.
+    # shellcheck disable=SC2016
+    awk -v dir="$2" -v rel="$pp_rel" '
+        function names(line, s,   i, rest) {
+            if (s == "") return 0
+            rest = line
+            while ((i = index(rest, s)) > 0) {
+                if (substr(rest, i + length(s), 1) !~ /[A-Za-z0-9_.-]/) return 1
+                rest = substr(rest, i + length(s))
+            }
+            return 0
+        }
+        {
+            line = $0
+            sub(/^[ \t]+/, "", line)
+            if (substr(line, 1, 1) == "#") next
+            named = names(line, dir)
+            if (!named && rel != "")
+                named = names(line, "$HOME/" rel) || names(line, "${HOME}/" rel) || names(line, "~/" rel)
+            if (!named) next
+            if (line ~ /(^|[^A-Za-z0-9_])(PATH|path)([^A-Za-z0-9_]|$)/ || index(line, "fish_add_path")) {
+                found = 1
+                exit
+            }
+            if (line ~ /(^|[;&|{ \t])(\.|source)[ \t]/ && index(line, "/env")) {
+                found = 1
+                exit
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$1"
+}
+
+# path_setup_file DIR: print the first start-up file that already puts
+# DIR on PATH, and succeed; fail when there is none. The files are the
+# ones a new terminal window reads for the login shell $SHELL names, plus
+# ~/.profile: zsh reads ~/.zshenv, ~/.zprofile, ~/.zshrc and ~/.zlogin;
+# bash reads ~/.bash_profile (or ~/.bash_login, or ~/.profile) and, in a
+# window that is not a login shell, ~/.bashrc; fish reads its config.fish
+# and conf.d files.
+path_setup_file() {
+    psf_dir=$1
+    case "${SHELL:-}" in
+        zsh | */zsh) set -- .zshenv .zprofile .zshrc .zlogin .profile ;;
+        bash | */bash) set -- .bash_profile .bash_login .profile .bashrc ;;
+        fish | */fish) set -- .config/fish/config.fish .profile ;;
+        *) set -- .profile ;;
+    esac
+    for psf_name in "$@"; do
+        if [ -f "$HOME/$psf_name" ] && puts_on_path "$HOME/$psf_name" "$psf_dir"; then
+            printf '%s\n' "$HOME/$psf_name"
+            return 0
+        fi
+    done
+    case "${SHELL:-}" in
+        fish | */fish)
+            for psf_file in "$HOME"/.config/fish/conf.d/*.fish; do
+                if [ -f "$psf_file" ] && puts_on_path "$psf_file" "$psf_dir"; then
+                    printf '%s\n' "$psf_file"
+                    return 0
+                fi
+            done
+            ;;
+    esac
+    return 1
+}
+
+# The start-up files step 7 adds the PATH block to, relative to $HOME and
+# separated by spaces: ~/.profile always, ~/.bashrc and ~/.bash_profile
+# when they exist, ~/.zshrc when it exists or zsh is the login shell, and
+# a fish conf.d file when fish is set up or is the login shell.
+path_block_targets() {
+    pbt=".profile"
+    if [ -f "$HOME/.bashrc" ]; then pbt="$pbt .bashrc"; fi
+    if [ -f "$HOME/.bash_profile" ]; then pbt="$pbt .bash_profile"; fi
+    if [ -f "$HOME/.zshrc" ] || [ "${SHELL##*/}" = "zsh" ]; then pbt="$pbt .zshrc"; fi
+    if [ -d "$HOME/.config/fish" ] || [ "${SHELL##*/}" = "fish" ]; then
+        pbt="$pbt .config/fish/conf.d/edm-ars.fish"
+    fi
+    printf '%s' "$pbt"
+}
+
+# Append the PATH block to one shell start-up file (once). A file that
+# already has it is only recorded, so install.json keeps listing it for
+# `edmars uninstall`.
 add_path_block() {
     if grep -qs '>>> edm-ars >>>' "$1"; then
+        PATH_JSON="$PATH_JSON${PATH_JSON:+, }$(json_str "$1")"
         return 0
     fi
     # The block is written for the shell that later reads the file, so the
@@ -493,12 +587,32 @@ main() {
     fi
 
     # ---- the plan --------------------------------------------------------------
-    # Step 7 decides the same way, so the plan never promises a PATH change
-    # the install then skips.
+    # Step 7 acts on this decision, so the plan never promises a PATH change
+    # the install then skips. It comes from the user's shell start-up files,
+    # not only from this process's PATH: a program that runs the installer
+    # (an editor, a desktop app) can have the folder on its own PATH while a
+    # new terminal window does not, and then `edmars` was not found there.
+    # The block is also added when a file names the folder but this PATH
+    # lacks it (Ubuntu's ~/.profile adds ~/.local/bin only if it existed at
+    # login); the block checks PATH first, so a second copy does nothing.
     case ":$PATH:" in
         *":$BIN_DIR:"*) BIN_ON_PATH=1 ;;
         *) BIN_ON_PATH=0 ;;
     esac
+    PATH_FILE=$(path_setup_file "$BIN_DIR") || PATH_FILE=""
+    if [ -n "$PATH_FILE" ] && [ "$BIN_ON_PATH" = 1 ]; then PATH_READY=1; else PATH_READY=0; fi
+    PATH_TARGETS=$(path_block_targets)
+    # Disk use right after an install, without uv's download cache: 715 MB
+    # on an Apple Silicon Mac, about 2.0 GB on Linux x86_64, where XGBoost
+    # brings NVIDIA's NCCL library, and about 950 MB on Windows. Linux on
+    # arm64 has no NCCL wheel but has not been measured.
+    case "$PLATFORM" in
+        "macOS (Apple Silicon)") PKG_SIZE="about 0.7 GB" ;;
+        "Linux (x86_64)") PKG_SIZE="about 2 GB" ;;
+        *) PKG_SIZE="about 1-2 GB" ;;
+    esac
+    if [ -z "$UV" ]; then PKG_SIZE="$PKG_SIZE, plus uv's download cache"; fi
+    PATH_TARGETS_TEXT=$(printf '%s' "$PATH_TARGETS" | sed -e 's|^|~/|' -e 's| |, ~/|g')
     say ""
     say "EDM-ARS installer"
     say "================="
@@ -526,18 +640,20 @@ main() {
     else
         say "  4. Download EDM-ARS from GitHub and check its SHA-256 fingerprint."
     fi
-    say "  5. Install EDM-ARS and the packages it needs (about 1.5 GB)."
+    say "  5. Install EDM-ARS and the packages it needs ($PKG_SIZE)."
     if [ "$OS" = "Darwin" ]; then
         say "     If XGBoost then finds no OpenMP library (Homebrew's libomp), link the"
-        say "     one that comes with scikit-learn into the private Python for it."
+        say "     one that comes with scikit-learn into the private Python for it. Either"
+        say "     way, check that XGBoost and scikit-learn load only one OpenMP library."
     fi
     say "  6. Create the command $BIN_DIR/edmars."
     if [ "$NO_MODIFY_PATH" = 1 ]; then
         say "  7. Leave your PATH alone (--no-modify-path)."
-    elif [ "$BIN_ON_PATH" = 1 ]; then
-        say "  7. Leave your PATH as it is: $BIN_DIR is already on it."
+    elif [ "$PATH_READY" = 1 ]; then
+        say "  7. Leave your PATH as it is: $PATH_FILE already puts $BIN_DIR on it."
     else
-        say "  7. Add $BIN_DIR to your PATH (your shell start-up files, your account only)."
+        say "  7. Add $BIN_DIR to your PATH (your account only), in a marked block at"
+        say "     the end of $PATH_TARGETS_TEXT."
     fi
     if [ "$NO_ONBOARD" = 1 ]; then
         say "  8. Stop there (--no-onboard); run 'edmars setup' when you are ready."
@@ -760,6 +876,22 @@ main() {
             die "the packages were installed but do not load (see the lines above)."
         fi
     fi
+    if [ "$OS" = "Darwin" ] && [ -z "$OMP_LINK" ]; then
+        # XGBoost found an OpenMP library of its own, usually Homebrew's
+        # libomp, so no link was made and nothing has counted the copies
+        # yet. Two in one process can stop a study with "OMP: Error #15";
+        # studies usually run fine, so this is a note, not a failure.
+        if ! check_openmp "$VENV_PY" 2>"$TMP_DIR/openmp.err"; then
+            if grep -q "expected one OpenMP library" "$TMP_DIR/openmp.err"; then
+                warn "XGBoost and scikit-learn load two different OpenMP libraries ($(sed -n '$s/^expected one OpenMP library, //p' "$TMP_DIR/openmp.err"))."
+                say "    Studies usually run fine like this. If one stops with 'OMP: Error #15', see"
+                say "    $APP_DIR/install/README.md,"
+                say "    section \"Troubleshooting\", item \"macOS: XGBoost and the OpenMP library\"."
+            else
+                warn "Could not count the OpenMP libraries XGBoost and scikit-learn load: $(sed -n '$p' "$TMP_DIR/openmp.err")"
+            fi
+        fi
+    fi
 
     # EDM-ARS itself is not a pip package: the app folder goes on the
     # environment's import path through a .pth file, so `python -m edmars`
@@ -815,34 +947,52 @@ main() {
     step "7/8" "PATH"
     if [ "$NO_MODIFY_PATH" = 1 ]; then
         say "Left unchanged (--no-modify-path)."
-    elif [ "$BIN_ON_PATH" = 1 ]; then
-        say "$BIN_DIR is already on your PATH."
+        if [ "$PATH_READY" = 0 ]; then
+            say "A new terminal window may not find 'edmars'; type $LAUNCHER instead,"
+            say "or add $BIN_DIR to your PATH yourself."
+        fi
+    elif [ "$PATH_READY" = 1 ]; then
+        say "$PATH_FILE already puts $BIN_DIR on your PATH; nothing was changed."
+        # A block an earlier install wrote stays listed in install.json.
+        # shellcheck disable=SC2086
+        for target in $PATH_TARGETS; do
+            if grep -qs '>>> edm-ars >>>' "$HOME/$target"; then
+                PATH_JSON="$PATH_JSON${PATH_JSON:+, }$(json_str "$HOME/$target")"
+            fi
+        done
+        if [ -n "$PATH_JSON" ]; then PATH_MODIFIED=true; fi
     else
         case "$BIN_DIR" in
             "$HOME"/*) PATH_EXPR="\$HOME/${BIN_DIR#"$HOME"/}" ;;
             *) PATH_EXPR=$BIN_DIR ;;
         esac
-        add_path_block "$HOME/.profile"
-        if [ -f "$HOME/.bashrc" ]; then add_path_block "$HOME/.bashrc"; fi
-        if [ -f "$HOME/.bash_profile" ]; then add_path_block "$HOME/.bash_profile"; fi
-        if [ -f "$HOME/.zshrc" ] || [ "${SHELL##*/}" = "zsh" ]; then
-            add_path_block "$HOME/.zshrc"
-        fi
-        if [ -d "$HOME/.config/fish" ] || [ "${SHELL##*/}" = "fish" ]; then
-            FISH_FILE="$HOME/.config/fish/conf.d/edm-ars.fish"
-            mkdir -p "$HOME/.config/fish/conf.d"
-            # shellcheck disable=SC2016
-            {
-                printf '# >>> edm-ars >>> (added by the EDM-ARS installer; delete this file to undo)\n'
-                printf 'if not contains -- "%s" $PATH\n    set -gx PATH "%s" $PATH\nend\n' "$BIN_DIR" "$BIN_DIR"
-                printf '# <<< edm-ars <<<\n'
-            } >"$FISH_FILE"
-            PATH_JSON="$PATH_JSON${PATH_JSON:+, }$(json_str "$FISH_FILE")"
-            PATH_LIST="$PATH_LIST
+        # The names are fixed file names without spaces; split them.
+        # shellcheck disable=SC2086
+        for target in $PATH_TARGETS; do
+            case "$target" in
+                *.fish)
+                    FISH_FILE="$HOME/$target"
+                    mkdir -p "$(dirname "$FISH_FILE")"
+                    # shellcheck disable=SC2016
+                    {
+                        printf '# >>> edm-ars >>> (added by the EDM-ARS installer; delete this file to undo)\n'
+                        printf 'if not contains -- "%s" $PATH\n    set -gx PATH "%s" $PATH\nend\n' "$BIN_DIR" "$BIN_DIR"
+                        printf '# <<< edm-ars <<<\n'
+                    } >"$FISH_FILE"
+                    PATH_JSON="$PATH_JSON${PATH_JSON:+, }$(json_str "$FISH_FILE")"
+                    PATH_LIST="$PATH_LIST
       $FISH_FILE"
-        fi
+                    ;;
+                *) add_path_block "$HOME/$target" ;;
+            esac
+        done
         PATH_MODIFIED=true
-        say "Added $BIN_DIR to your PATH in:$PATH_LIST"
+        if [ -n "$PATH_LIST" ]; then
+            say "Added $BIN_DIR to your PATH in:$PATH_LIST"
+        else
+            say "Your start-up files already have the EDM-ARS PATH block: $PATH_TARGETS_TEXT."
+        fi
+        say "Terminal windows that are already open keep their old PATH; open a new one."
     fi
 
     # ---- record the install ------------------------------------------------------
@@ -906,11 +1056,11 @@ EOF
     say ""
     say "EDM-ARS $VERSION is installed."
     RUN_NOTE=""
-    if [ "$BIN_ON_PATH" = 1 ]; then
+    if [ -n "$PATH_LIST" ] || { [ "$PATH_READY" = 0 ] && [ "$PATH_MODIFIED" = true ]; }; then
         RUN_CMD="edmars"
-    elif [ "$PATH_MODIFIED" = true ]; then
+        RUN_NOTE="   (in a NEW terminal window: open one first, so it reads the new PATH)"
+    elif [ "$PATH_READY" = 1 ]; then
         RUN_CMD="edmars"
-        RUN_NOTE="   (open a new terminal window first, so it picks up the new PATH)"
     else
         RUN_CMD=$(shell_quote "$LAUNCHER")
     fi

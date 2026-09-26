@@ -15,6 +15,23 @@ CheckStatus = Literal["ok", "warn", "fail", "info"]
 
 CHECK_STATUSES: tuple[str, ...] = ("ok", "warn", "fail", "info")
 
+#: Exit codes of every command that ends on a result screen (`edmars
+#: results`, `edmars status`, and `new`, `run` and `resume` while they
+#: watch): one scheme, so a script reads them the same way everywhere.
+EXIT_READY = 0  # the paper is ready (with or without issues), or it is still running
+EXIT_ERROR = 1  # something went wrong: no matching study, a bad option
+EXIT_NOT_READY = 2  # the study ran to its end, but the paper is not ready
+EXIT_STOPPED = 3  # the study stopped before it finished
+
+#: The same scheme in words, for those commands' --help.
+EXIT_CODES_HELP = (
+    "Exit codes: 0 the paper is ready, or the study is still running (you "
+    "left the view); 2 the study finished but the paper is not ready; 3 the "
+    "study stopped before it finished, also when you stop it from the view; "
+    "1 something went wrong, such as no matching study. A command line that "
+    "could not be read (a mistyped option) gives 2, as with most commands."
+)
+
 #: Task types the pipeline can run, in the order menus show them.
 TASK_TYPES: tuple[str, ...] = (
     "prediction",

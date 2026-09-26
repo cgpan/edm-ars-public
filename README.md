@@ -240,7 +240,11 @@ section says `edmars`.
 | `edmars version` / `edmars update` / `edmars uninstall` | Version; check for a newer release; remove settings, stored keys, the automated reviewer and caches (asks about datasets and studies; lists TinyTeX, if setup installed it, for you to delete). |
 
 Every command takes `--plain` (no colour or animation; for screen readers and
-logs). Studies still run the AI-written code on your computer without a
+logs). `edmars status`, `results`, and `new`, `run` and `resume` while they
+watch, exit with one scheme: `0` the paper is ready (with or without issues to
+check) or the study is still running, `2` it finished but the paper is not
+ready, `3` it stopped before it finished (also when you stop it from the live
+view), `1` something went wrong, such as no matching study. Studies still run the AI-written code on your computer without a
 sandbox, exactly as described in [Disclaimer and privacy](#disclaimer-and-privacy);
 `edmars` asks you to accept that notice before the first study.
 

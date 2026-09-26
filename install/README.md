@@ -145,8 +145,17 @@ the whole folder, or run `edmars uninstall` first.
 folder is added to your PATH for your account only: on Windows in your user
 environment variables, on macOS and Linux in a clearly marked block at the
 end of `~/.profile`, `~/.bashrc` and `~/.zshrc` (and a fish `conf.d` file if
-you use fish). Nothing is added when the folder is already there, and
-running the installer again does not add it twice.
+you use fish). The plan and the PATH step name the files. On macOS and
+Linux the installer decides from your shell's start-up files (for zsh
+`~/.zshenv`, `~/.zprofile`, `~/.zshrc` and `~/.zlogin`; for bash
+`~/.bash_profile`, `~/.bash_login`, `~/.profile` and `~/.bashrc`; always
+`~/.profile`), which it reads but never runs, and not only from the PATH of
+the program that started it: an app that runs the installer can have the
+folder on its own PATH while a new terminal window does not. Nothing is
+added when a start-up file already puts the folder on PATH and the current
+PATH has it too, and running the installer again does not add it twice.
+Open a new terminal window afterwards; windows that are already open keep
+their old PATH.
 
 **Cloud-sync folders.** The installer refuses to install inside OneDrive,
 Google Drive, Dropbox or iCloud Drive folders: syncing thousands of package
@@ -194,6 +203,15 @@ Nothing is sent except ordinary download requests. EDM-ARS has no telemetry.
     install [Homebrew](https://brew.sh), run `brew install libomp`, then run
     the installer again. XGBoost then uses Homebrew's copy while
     scikit-learn keeps its own; `edmars doctor` warns about such a pair.
+  - *If the installer or `edmars doctor` says two OpenMP libraries load*
+    (a Mac that already has Homebrew's libomp): XGBoost uses Homebrew's
+    copy, scikit-learn its own, and the installer links nothing. Studies
+    usually run fine like this; a study on such a Mac trained XGBoost and
+    scikit-learn models together without an error. If a study stops with
+    "OMP: Error #15", resume it with `edmars resume`. If it stops again,
+    remove Homebrew's copy with `brew uninstall libomp` (Homebrew refuses
+    when another program you installed needs it) and run the installer
+    again, which then links scikit-learn's copy.
   - *To undo it,* delete that `libomp.dylib` link; it also goes when you
     delete `<dir>/python`.
 - **Behind a proxy** — set `HTTPS_PROXY` before running the installer. uv

@@ -8,6 +8,7 @@ give and checks what was saved, what was said, and what was never shown.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -352,7 +353,11 @@ def test_semantic_scholar_key_is_checked_and_saved(fx: Fakes) -> None:
     assert run("literature") == 0
     assert fx.secrets.store["SEMANTIC_SCHOLAR_API_KEY"] == "s2-fake-key-0123456789"
     assert fx.saved()["literature"]["semantic_scholar_key_set"] is True
-    assert "arXiv and Crossref need no key" in fx.ui.output
+    # arXiv refused every query on the Mac test (HTTP 406): "need no key"
+    # must not read as "always works".
+    out = " ".join(fx.ui.output.split())
+    assert "arXiv and Crossref need no key, but they can refuse or rate-limit requests too" in out
+    assert "Semantic Scholar key is the reliable way" in out
 
 
 def test_dataset_download_records_terms_and_shows_progress(fx: Fakes) -> None:
@@ -364,9 +369,11 @@ def test_dataset_download_records_terms_and_shows_progress(fx: Fakes) -> None:
     assert saved["sha256"]  # the fingerprint install() records on first download
     assert "Cite NCES" in fx.ui.output
     # Plain mode: the check and the conversion after the download get their
-    # own lines, so the 2 GB conversion does not look like a hang.
-    assert "Checking:" in fx.ui.output
-    assert "Converting:" in fx.ui.output
+    # own lines, so the 2 GB conversion does not look like a hang, each with
+    # the MB done (ui.TransferProgress).
+    lines = fx.ui.output.splitlines()
+    for word in ("downloaded", "checked", "converted"):
+        assert any(re.fullmatch(rf"  {word} \d+% \(\d+\.\d of \d+\.\d MB.*\)", line) for line in lines), word
 
 
 def test_dataset_download_failure_is_explained(fx: Fakes) -> None:
@@ -636,6 +643,12 @@ def test_noninteractive_full_setup_with_the_standard_key_variable(
     # Nothing was saved, so a later terminal without the variable has no
     # key; setup says so instead of only "Using the key".
     assert "The key was not saved" in fx.ui.output and "--key-env" in fx.ui.output
+    # The Mac test's `setup --yes` opened with the interactive welcome:
+    # "Setup takes about 10-20 minutes", "you'll paste a key", "Download the
+    # HSLS:09 dataset (about 300 MB)", with the data already installed.
+    assert "Setting up EDM-ARS without questions (--yes)" in fx.ui.output
+    for interactive in ("10-20 minutes", "paste a key", "about 300 MB", "Welcome to EDM-ARS"):
+        assert interactive not in fx.ui.output
 
 
 def test_noninteractive_key_in_the_variable_and_already_saved_needs_no_warning(

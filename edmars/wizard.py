@@ -608,6 +608,14 @@ class _Wizard:
     # S0 Welcome
     # =========================================================================
     def screen_s0(self) -> None:
+        if self.ni:
+            # The welcome screen describes the questions (how long they take,
+            # pasting a key, a 300 MB download); `setup --yes` asks none, and
+            # the Mac test's run took 76 s with the dataset already in place.
+            self.info("Setting up EDM-ARS without questions (--yes). Each step uses the options "
+                      "given (`edmars setup --list-options` lists them) or keeps what is already "
+                      "set up; a dataset or reviewer that is already installed is not installed again.")
+            return
         body = (
             "EDM-ARS turns a research question into a complete draft research paper, using public "
             "education datasets and an AI service you choose.\n\n"
@@ -620,8 +628,6 @@ class _Wizard:
             "You can stop at any time and continue later with `edmars setup`."
         )
         self.header("S0", body, title="Welcome to EDM-ARS")
-        if self.ni:
-            return
         self.choose("Ready?", [("continue", "Continue")], default="continue", back=False)
 
     # =========================================================================
@@ -1332,7 +1338,8 @@ class _Wizard:
             "works without a key but often turns away keyless requests. When that happens your paper may end "
             "up with few real citations.\n\n"
             f"A free key is available from {SEMANTIC_SCHOLAR_FORM} (approval can take a few days).\n\n"
-            "arXiv and Crossref need no key."
+            "arXiv and Crossref need no key, but they can refuse or rate-limit requests too, so the "
+            "Semantic Scholar key is the reliable way to get real citations."
         )
         self.header("S5", body, title="Literature search (recommended)")
         while True:
@@ -2278,76 +2285,26 @@ class _Wizard:
 
 
 class _DownloadProgress:
-    """Progress callback for ``datasets.download``.
+    """Progress callback for ``datasets.download``: ui.TransferProgress
+    (a rich bar, or plain lines with MB done, speed and time left) printing
+    through the wizard.
 
-    Accepts ``(done, total)`` in bytes, or keyword ``done=``/``total=``.
-    Draws a rich bar, or prints a line every 10% in plain mode.
+    Accepts ``(done, total[, phase])`` in bytes, or keyword ``done=``/``total=``.
     """
 
     def __init__(self, wizard: _Wizard) -> None:
-        self.wizard = wizard
-        self.plain = _plain()
-        self._bar: Any = None
-        self._task: Any = None
-        self._last_decile = -1
-        self._last_mb = 0
-        self._phase = "download"
+        from edmars import ui
 
-    _PHASES = {"download": "Downloading", "extract": "Unpacking", "convert": "Converting",
-               "verify": "Checking"}
+        self._progress = ui.TransferProgress(plain=_plain(), say_fn=wizard.say)
 
     def __call__(self, *args: Any, **kwargs: Any) -> None:
-        try:
-            done = args[0] if args else kwargs.get("done", kwargs.get("downloaded", 0))
-            total = args[1] if len(args) > 1 else kwargs.get("total")
-            phase = str(args[2] if len(args) > 2 else kwargs.get("phase", "download"))
-            done_i = int(done or 0)
-            total_i = int(total) if total else None
-        except (TypeError, ValueError):
-            return
-        if phase != self._phase:
-            # datasets reports download, then extract (the 2 GB unzip), then
-            # verify: each gets its own bar or its own 10% lines.
-            self.close()
-            self._last_decile = -1
-            self._last_mb = 0
-            self._phase = phase
-            if self.plain:
-                self.wizard.say(f"  {self._PHASES.get(phase, phase.capitalize())}:")
-        if self.plain:
-            if total_i:
-                decile = min(10, done_i * 10 // max(total_i, 1))
-                if decile != self._last_decile:
-                    self._last_decile = decile
-                    self.wizard.say(f"  {decile * 10}% ({done_i / 1024 ** 2:.0f} of {total_i / 1024 ** 2:.0f} MB)")
-            elif done_i // (50 * 1024 ** 2) != self._last_mb:
-                self._last_mb = done_i // (50 * 1024 ** 2)
-                self.wizard.say(f"  {done_i / 1024 ** 2:.0f} MB")
-            return
-        try:
-            if self._bar is None:
-                from rich.progress import BarColumn, DownloadColumn, Progress, TimeRemainingColumn, \
-                    TransferSpeedColumn
-
-                from edmars import ui
-
-                label = self._PHASES.get(self._phase, "Working")
-                # A rich Progress needs the real Console, not ui.console's proxy.
-                self._bar = Progress(label, BarColumn(), DownloadColumn(), TransferSpeedColumn(),
-                                     TimeRemainingColumn(), console=ui.get_console(), transient=False)
-                self._bar.start()
-                self._task = self._bar.add_task("download", total=total_i)
-            self._bar.update(self._task, completed=done_i, total=total_i)
-        except Exception:
-            self.plain = True
+        done = args[0] if args else kwargs.get("done", kwargs.get("downloaded", 0))
+        total = args[1] if len(args) > 1 else kwargs.get("total")
+        phase = str(args[2] if len(args) > 2 else kwargs.get("phase", "download"))
+        self._progress(done, total, phase)
 
     def close(self) -> None:
-        if self._bar is not None:
-            try:
-                self._bar.stop()
-            except Exception:
-                pass
-            self._bar = None
+        self._progress.close()
 
 
 # ---------------------------------------------------------------------------

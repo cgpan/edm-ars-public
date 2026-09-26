@@ -65,6 +65,12 @@ class Outcome:
     final_state: str | None = None
     resumable: bool | None = None
     run_dir: str = ""
+    #: For a study the checks or the reviewer stopped: what they found, one
+    #: plain line each, and the heading to show above them.
+    details: list[str] = field(default_factory=list)
+    details_heading: str = ""
+    #: A further line, such as the question as the study worded it.
+    note: str = ""
 
     @property
     def commands(self) -> list[str]:
@@ -493,6 +499,105 @@ def step_words(stage: str | None) -> str | None:
     return title[:1].lower() + title[1:]
 
 
+#: Abort codes whose message is a check's or the reviewer's finding, worth
+#: showing in full on the result screen.
+_REVIEW_ABORTS = frozenset({"PRE_CRITIC_ABORT", "CRITIC_ABORT", "LEAKAGE_SUSPECTED"})
+
+_CHECK_MESSAGE = re.compile(r"^(pcc_[a-z0-9]+):\s*(.+)$", re.DOTALL)
+_REVIEW_SECTIONS = ("problem_formulation_review", "data_preparation_review",
+                    "analysis_review", "substantive_review")
+
+
+def _latest_review(run_dir: Path) -> dict[str, Any] | None:
+    """The review the run ended with: the checkpoint's copy (it also holds
+    the automatic checks' short-circuit report, which is never written to
+    review_report.json), else review_report.json."""
+    checkpoint = load_json(run_dir / "checkpoint.json")
+    review = checkpoint.get("review_report") if isinstance(checkpoint, dict) else None
+    if isinstance(review, dict):
+        return review
+    review = load_json(run_dir / "review_report.json")
+    return review if isinstance(review, dict) else None
+
+
+def review_findings(run_dir: Path | str, code: str, message: str) -> tuple[list[str], list[str]]:
+    """(check ids, plain lines) saying what stopped a study at the review.
+
+    The abort record keeps only the first critical finding; the review the
+    run ended with has all of them. Lines are the checks' and the
+    reviewer's own sentences, without their "pcc_07:" or "Critic ABORT:"
+    prefix, at most five.
+    """
+    ids: list[str] = []
+    lines: list[str] = []
+
+    def add(check_id: Any, text: Any) -> None:
+        flat = " ".join(str(text or "").split())
+        if not flat:
+            return
+        if flat not in lines:
+            lines.append(flat)
+        if isinstance(check_id, str) and check_id.startswith("pcc_") and check_id not in ids:
+            ids.append(check_id)
+
+    found = _CHECK_MESSAGE.match((message or "").strip())
+    if found:
+        add(found.group(1), found.group(2))
+    elif message:
+        add(None, re.sub(r"^Critic ABORT:\s*", "", message.strip()))
+    review = _latest_review(Path(run_dir))
+    if review is not None:
+        automatic = review.get("_source") == "pre_critic_short_circuit"
+        if automatic == (code == "PRE_CRITIC_ABORT"):
+            for section in _REVIEW_SECTIONS:
+                block = review.get(section)
+                for issue in (block.get("issues") or []) if isinstance(block, dict) else []:
+                    if isinstance(issue, dict) and str(issue.get("severity") or "").lower() == "critical":
+                        add(issue.get("category") if automatic else None,
+                            redact(str(issue.get("description") or "")))
+    return ids, lines[:5]
+
+
+def _reworded_question(run_dir: Path, state: RunState) -> str | None:
+    """The research question the study worked from, when it differs from
+    the one the user typed (the first step rewrites it)."""
+    for name in ("research_spec.json", "research_spec.locked.json"):
+        spec = load_json(run_dir / name)
+        worked = spec.get("research_question") if isinstance(spec, dict) else None
+        if isinstance(worked, str) and worked.strip():
+            if " ".join(worked.split()).casefold() != " ".join(state.question.split()).casefold():
+                return " ".join(worked.split())
+            return None
+    return None
+
+
+def _review_abort_advice(run_dir: Path, state: RunState, code: str, message: str,
+                         entry: dict[str, str], ctx: dict[str, Any], resumable: bool,
+                         ) -> tuple[list[str], str, str, str, str | None]:
+    """(details, heading, note, fix, command) for a study the automatic
+    checks or the reviewer stopped: what they found, and advice that fits
+    the check instead of "start again with a simpler question"."""
+    ids, details = review_findings(run_dir, code, message)
+    heading = ("What the automatic checks found:" if code == "PRE_CRITIC_ABORT"
+               else "What the reviewer found:")
+    advice = messages().get("pre_critic_checks") or {}
+    fixes = [str(advice[i]["fix"]) for i in ids
+             if isinstance(advice, dict) and isinstance(advice.get(i), dict) and advice[i].get("fix")]
+    fix = " ".join(" ".join(f.split()) for f in fixes) or fill(entry.get("fix"), **ctx)
+    command = fill(entry.get("command"), **ctx) or None
+    note = ""
+    if "pcc_07" in ids:
+        worded = _reworded_question(run_dir, state)
+        if worded:
+            note = f'The study worded your question as: "{worded}"'
+    if resumable:
+        # The pipeline recorded that a resume can deal with it (run_status.json).
+        fix = ("Resume the study to let it try again from the step that failed. If it "
+               f"stops the same way again: {fix[:1].lower()}{fix[1:]}")
+        command = f"edmars resume {ctx['run']}"
+    return details, heading, note, fix, command
+
+
 def _stopped(run_dir: Path, state: RunState, code: str, message: str,
              stage: str | None, final: str | None,
              status: dict[str, Any] | None = None) -> Outcome:
@@ -505,18 +610,28 @@ def _stopped(run_dir: Path, state: RunState, code: str, message: str,
     headline = title
     if step:
         headline = f"{title} (during: {step})"
+    fix = fill(entry.get("fix"), **ctx)
+    command = fill(entry.get("command"), **ctx) or None
+    details: list[str] = []
+    heading = note = ""
+    if code in _REVIEW_ABORTS:
+        details, heading, note, fix, command = _review_abort_advice(
+            run_dir, state, code, message, entry, ctx, resumable)
     return Outcome(
         label=str(labels.get("stopped", "Stopped")),
         headline=headline,
         why=fill(entry.get("why"), **ctx),
-        fix=fill(entry.get("fix"), **ctx),
-        command=fill(entry.get("command"), **ctx) or None,
+        fix=fix,
+        command=command,
         kind="stopped",
         code=code,
         title=title,
         final_state=final,
         resumable=resumable,
         run_dir=str(run_dir),
+        details=details,
+        details_heading=heading,
+        note=note,
     )
 
 
@@ -809,4 +924,5 @@ __all__ = [
     "quote_path",
     "step_words",
     "redact",
+    "review_findings",
 ]

@@ -1,6 +1,7 @@
 """End-state classification over synthetic run folders, and the catalog."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -449,3 +450,89 @@ def test_data_missing_names_a_command_that_works(run_home: Path, dataset: str,
     out = classify(run)
     assert out.commands[0] == first_command
     assert out.commands[-1].startswith("edmars resume")
+
+
+
+# ---------------------------------------------------------------------------
+# A study the automatic checks or the reviewer stopped: say what they found
+# ---------------------------------------------------------------------------
+
+PCC_07 = ("pcc_07: The research question says 'above and beyond', which commits the paper to an "
+          "incremental-validity / nested-model comparison, but no such analysis appears in "
+          "results.json. Either run it, or change the research question so it does not promise a "
+          "test the study never performed.")
+USER_Q = ("Which ninth-grade factors predict whether a student enrolls in college by 2016, and is "
+          "the prediction equally accurate across sex and socioeconomic groups?")
+WORKED_Q = ("Do ninth-grade non-cognitive factors predict college enrollment by February 2016 "
+            "ABOVE AND BEYOND academic achievement and socioeconomic status?")
+
+
+def _pre_critic_run(run_home: Path, *, resumable: bool = False, second: bool = True) -> Path:
+    issues = [{"severity": "critical", "category": "pcc_07", "description": PCC_07.split(": ", 1)[1],
+               "recommendation": "x", "target_agent": "Analyst"}]
+    if second:
+        issues.append({"severity": "critical", "category": "pcc_02",
+                       "description": "No individual models are present in results.json.",
+                       "recommendation": "x", "target_agent": "Analyst"})
+    issues.append({"severity": "major", "category": "pcc_05", "description": "subgroup gap",
+                   "recommendation": "x", "target_agent": "Analyst"})
+    report = {"overall_verdict": "ABORT", "overall_quality_score": 1, "_source": "pre_critic_short_circuit",
+              "analysis_review": {"score": 1, "issues": issues}}
+    return make_run(run_home, pdf=False, question=USER_Q,
+                    status=v2_status("ABORTED", released=False, reason_code="ABORTED",
+                                     abort={"stage": "CRITIQUING", "code": "PRE_CRITIC_ABORT",
+                                            "message": PCC_07, "resumable": resumable}),
+                    checkpoint={"current_state": "ABORTED", "review_report": report},
+                    extra={"research_spec.json": json.dumps({"research_question": WORKED_Q})})
+
+
+def test_a_pre_critic_abort_says_what_the_checks_found_and_advice_that_fits(run_home: Path) -> None:
+    # The Mac study: the screen gave only a generic reason and advised
+    # "Start a new study, possibly with a simpler question", although the
+    # researcher's question was simple and pcc_07's sentence said exactly
+    # what was missing.
+    out = classify(_pre_critic_run(run_home))
+    assert out.code == "PRE_CRITIC_ABORT" and out.resumable is False
+    assert out.details_heading == "What the automatic checks found:"
+    assert out.details[0] == PCC_07.split(": ", 1)[1]  # in full, without "pcc_07:"
+    assert out.details[1] == "No individual models are present in results.json."
+    assert len(out.details) == 2  # a major finding did not stop the study
+    assert out.note == f'The study worded your question as: "{WORKED_Q}"'
+    assert "simpler question" not in out.fix
+    assert out.fix.startswith("The question the study worked from promised a comparison")
+    assert "no trained models" in out.fix  # pcc_02's advice too
+    assert out.command == "edmars new"
+
+
+def test_a_pre_critic_abort_the_pipeline_calls_resumable_says_resume(run_home: Path) -> None:
+    out = classify(_pre_critic_run(run_home, resumable=True, second=False))
+    assert out.resumable is True
+    assert out.command is not None and out.command.startswith("edmars resume ")
+    assert out.fix.startswith("Resume the study to let it try again")
+    assert "the question the study worked from promised" in out.fix
+
+
+def test_a_critic_abort_lists_the_reviewers_critical_notes(run_home: Path) -> None:
+    review = {"overall_verdict": "ABORT", "overall_quality_score": 2,
+              "problem_formulation_review": {"issues": [
+                  {"severity": "critical", "description": "The outcome is measured before the predictors."},
+                  {"severity": "minor", "description": "Wording."}]}}
+    run = make_run(run_home, pdf=False, review=review,
+                   status=v2_status("ABORTED", released=False, reason_code="ABORTED",
+                                    abort={"stage": "CRITIQUING", "code": "CRITIC_ABORT",
+                                           "message": "Critic ABORT: The outcome is measured before the predictors.",
+                                           "resumable": False}))
+    out = classify(run)
+    assert out.code == "CRITIC_ABORT"
+    assert out.details == ["The outcome is measured before the predictors."]
+    assert out.details_heading == "What the reviewer found:"
+    assert out.note == "" and out.command == "edmars new"
+
+
+def test_other_stops_carry_no_review_details(run_home: Path) -> None:
+    run = make_run(run_home, pdf=False,
+                   status=v2_status("ABORTED", released=False, reason_code="ABORTED",
+                                    abort={"stage": "ENGINEERING", "code": "NO_CREDIT", "message": "m",
+                                           "resumable": True}))
+    out = classify(run)
+    assert out.details == [] and out.note == ""

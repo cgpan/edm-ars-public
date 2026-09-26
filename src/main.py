@@ -15,6 +15,7 @@ Exit codes, for a batch harness or the ``edmars`` front end:
 import argparse
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -651,7 +652,31 @@ def _quote(path: str) -> str:
     return f'"{path}"' if any(c.isspace() for c in path) else path
 
 
+#: Set by the edmars app for every study it starts (edmars/runner.py).
+_EDMARS_RUN_ID_ENV = "EDMARS_RUN_ID"
+
+
+def _edmars_quote(path: str) -> str:
+    """A folder as it should be typed after `edmars resume`: bare when it is
+    plainly safe, double-quoted on Windows (Git Bash drops bare
+    backslashes), shell-quoted elsewhere. Mirrors edmars.endstates.quote_path;
+    the pipeline does not import the app."""
+    if re.fullmatch(r"[A-Za-z0-9_./:-]+", path):
+        return path
+    if os.name == "nt":
+        return f'"{path}"'
+    import shlex
+
+    return shlex.quote(path)
+
+
 def _resume_command(plan: "_Plan") -> str:
+    if os.environ.get(_EDMARS_RUN_ID_ENV, "").strip():
+        # Started by `edmars`, whose resume rebuilds the command and the
+        # config from the user's settings: the pipeline's own
+        # `python -m src.main ... --resume` line (which the Mac test's
+        # console.log showed) is for developers, not for that user.
+        return f"edmars resume {_edmars_quote(plan.output_dir)}"
     parts = ["python -m src.main"]
     if os.path.normcase(os.path.abspath(plan.config_path)) != os.path.normcase(
         str(PROJECT_ROOT / "config.yaml")
@@ -1522,7 +1547,7 @@ def _run(plan: _Plan, args: argparse.Namespace) -> int:
     invocation_start = datetime.now().timestamp()
     try:
         print(f"Run folder: {plan.output_dir}", file=_human_stream(args))
-        with _console_progress(args):
+        with _console_progress(args), _diagnostics_in_pipeline_log(plan.output_dir):
             result_ctx = orchestrator.run(user_prompt=args.prompt)
     except KeyboardInterrupt as exc:
         return _interrupted(plan, args, orchestrator, exc, invocation_start)
@@ -1617,6 +1642,51 @@ def _console_progress(args: argparse.Namespace) -> Iterator[None]:
         yield
     finally:
         events.set_echo(previous)
+
+
+class _PipelineLogHandler(logging.Handler):
+    """Appends log records to <run>/pipeline.log, in that file's own
+    ``<UTC time> [<name>] <message>`` line format, one line per record."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(logging.DEBUG)
+        self.path = path
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            stamp = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+            text = " ".join(self.format(record).split())
+            with open(self.path, "a", encoding="utf-8") as fh:
+                fh.write(f"{stamp} [{record.name}] {record.levelname.lower()}: {text}\n")
+        except Exception:  # noqa: BLE001 - logging must never stop a run
+            self.handleError(record)
+
+
+@contextlib.contextmanager
+def _diagnostics_in_pipeline_log(output_dir: str) -> Iterator[None]:
+    """For a study the edmars app started (EDMARS_RUN_ID set), send the
+    ``src.*`` loggers' records to pipeline.log instead of stderr.
+
+    Nothing configures logging in the pipeline, so Python's last-resort
+    handler printed their warnings (such as "format_skills_for_prompt:
+    dropped non-mandatory skill ...") to stderr, which edmars saves as the
+    user's console.log. They are operator diagnostics: pipeline.log keeps
+    them, and so does the support bundle. Runs started by hand, and the
+    tests, keep the old behaviour. The handler is removed afterwards.
+    """
+    if not os.environ.get(_EDMARS_RUN_ID_ENV, "").strip():
+        yield
+        return
+    logger = logging.getLogger("src")
+    handler = _PipelineLogHandler(os.path.join(output_dir, "pipeline.log"))
+    propagate = logger.propagate
+    logger.addHandler(handler)
+    logger.propagate = False
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = propagate
 
 
 # ---------------------------------------------------------------------------

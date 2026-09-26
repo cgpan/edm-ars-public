@@ -1164,7 +1164,24 @@ if sys.platform == "darwin":
 print(json.dumps(out))
 """
 
-_OPENMP_README = "install/README.md, Troubleshooting: macOS, XGBoost and the OpenMP library"
+#: The install/README.md item about XGBoost's OpenMP library on a Mac.
+OPENMP_README_SECTION = 'section "Troubleshooting", item "macOS: XGBoost and the OpenMP library"'
+
+
+def openmp_readme() -> str:
+    """Where to read about XGBoost's OpenMP library: the installed copy of
+    install/README.md (under the app folder) and the item in it.
+
+    A bare "install/README.md" sent Mac users looking for a file that sits
+    deep inside ~/Library/Application Support.
+    """
+    try:
+        from edmars import paths
+
+        readme = str(Path(paths.app_root()) / "install" / "README.md")
+    except Exception:  # noqa: BLE001 - the relative name still helps
+        readme = "install/README.md"
+    return f"{readme}, {OPENMP_README_SECTION}"
 
 
 def _load_error(text: str) -> str:
@@ -1216,7 +1233,7 @@ def xgboost_checks(timeout_s: float = 180) -> list[Check]:
                 f"XGBoost does not load: it found no OpenMP library ({_load_error(error)}). "
                 "Every study that trains XGBoost would stop.",
                 fix=("Run the EDM-ARS installer again: on a Mac without Homebrew's libomp it links "
-                     f"scikit-learn's OpenMP library for XGBoost ({_OPENMP_README}). "
+                     f"scikit-learn's OpenMP library for XGBoost (see {openmp_readme()}). "
                      "Or install Homebrew and run: brew install libomp"),
             )]
         return [Check(title, "fail", f"XGBoost does not load: {_load_error(error)}",
@@ -1228,8 +1245,8 @@ def xgboost_checks(timeout_s: float = 180) -> list[Check]:
             title, "warn",
             f"XGBoost {version} loads, but XGBoost and scikit-learn use two different OpenMP "
             f"libraries ({', '.join(openmp)}). A study that runs both at once can stop with "
-            "'OMP: Error #15'.",
-            fix=f"See {_OPENMP_README}.",
+            "'OMP: Error #15'. Studies usually run fine this way.",
+            fix=f"If a study stops with 'OMP: Error #15', see {openmp_readme()}.",
         )]
     detail = f"XGBoost {version} loads together with scikit-learn"
     if openmp:
