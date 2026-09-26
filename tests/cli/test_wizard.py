@@ -639,6 +639,12 @@ def test_noninteractive_full_setup_with_the_standard_key_variable(
     # Nothing was saved, so a later terminal without the variable has no
     # key; setup says so instead of only "Using the key".
     assert "The key was not saved" in fx.ui.output and "--key-env" in fx.ui.output
+    # The Mac test's `setup --yes` opened with the interactive welcome:
+    # "Setup takes about 10-20 minutes", "you'll paste a key", "Download the
+    # HSLS:09 dataset (about 300 MB)", with the data already installed.
+    assert "Setting up EDM-ARS without questions (--yes)" in fx.ui.output
+    for interactive in ("10-20 minutes", "paste a key", "about 300 MB", "Welcome to EDM-ARS"):
+        assert interactive not in fx.ui.output
 
 
 def test_noninteractive_key_in_the_variable_and_already_saved_needs_no_warning(

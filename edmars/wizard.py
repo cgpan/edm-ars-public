@@ -608,6 +608,14 @@ class _Wizard:
     # S0 Welcome
     # =========================================================================
     def screen_s0(self) -> None:
+        if self.ni:
+            # The welcome screen describes the questions (how long they take,
+            # pasting a key, a 300 MB download); `setup --yes` asks none, and
+            # the Mac test's run took 76 s with the dataset already in place.
+            self.info("Setting up EDM-ARS without questions (--yes). Each step uses the options "
+                      "given (`edmars setup --list-options` lists them) or keeps what is already "
+                      "set up; a dataset or reviewer that is already installed is not installed again.")
+            return
         body = (
             "EDM-ARS turns a research question into a complete draft research paper, using public "
             "education datasets and an AI service you choose.\n\n"
@@ -620,8 +628,6 @@ class _Wizard:
             "You can stop at any time and continue later with `edmars setup`."
         )
         self.header("S0", body, title="Welcome to EDM-ARS")
-        if self.ni:
-            return
         self.choose("Ready?", [("continue", "Continue")], default="continue", back=False)
 
     # =========================================================================
