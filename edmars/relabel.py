@@ -30,8 +30,7 @@ row with the wrong number of fields stops the conversion. A source
 checkout can run it with the pipeline's own requirements (none of the
 CLI's packages are needed)::
 
-    python -m edmars.relabel HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip \
-        data/raw/hsls_17_student_pets_sr_v1_0.csv
+    python -m edmars.relabel hsls.zip data/raw/hsls_17_student_pets_sr_v1_0.csv
 """
 
 from __future__ import annotations
