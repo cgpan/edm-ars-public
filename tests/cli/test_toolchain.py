@@ -460,3 +460,95 @@ def test_tools_never_receive_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc, "run", run)
     toolchain.probe_r("Rscript")
     assert seen and "DEEPSEEK_API_KEY" not in seen[0] and "PATH" in {k.upper() for k in seen[0]}
+
+
+# ---------------------------------------------------------------------------
+# XGBoost and its OpenMP library (what `edmars doctor` reports)
+# ---------------------------------------------------------------------------
+
+_MAC_LOAD_ERROR = (
+    "XGBoostError: XGBoost Library (libxgboost.dylib) could not be loaded.\n"
+    "Error message(s): [\"dlopen(/x/venv/lib/python3.11/site-packages/xgboost/lib/libxgboost.dylib, 0x0006): "
+    "Library not loaded: @rpath/libomp.dylib\\n  Referenced from: <89AD> /x/libxgboost.dylib\\n  Reason: "
+    "tried: '/opt/homebrew/opt/libomp/lib/libomp.dylib' (no such file)\"]"
+)
+
+
+def _probe_reply(monkeypatch: pytest.MonkeyPatch, report: dict[str, Any] | None, *,
+                 returncode: int = 0, stderr: str = "", timeout: bool = False) -> list[list[str]]:
+    import json
+    import sys
+
+    calls: list[list[str]] = []
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        assert args[0] == sys.executable and args[1] == "-c"
+        assert "DEEPSEEK_API_KEY" not in kwargs["env"]
+        if timeout:
+            raise subprocess.TimeoutExpired(args, kwargs.get("timeout"))
+        out = "some warning\n" + (json.dumps(report) + "\n" if report is not None else "")
+        return completed(args, returncode, out, stderr)
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "not-for-the-probe")
+    monkeypatch.setattr(proc, "run", run)
+    return calls
+
+
+def test_xgboost_that_loads_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _probe_reply(monkeypatch, {"ok": True, "error": None, "version": "2.1.4", "openmp": None})
+    [check] = toolchain.xgboost_checks()
+    assert (check.name, check.status) == ("XGBoost", "ok")
+    assert check.detail == "XGBoost 2.1.4 loads together with scikit-learn"
+    assert len(calls) == 1 and "import xgboost, sklearn" in calls[0][2]
+
+    lib = "/x/python/cpython-3.11.14-macos-aarch64-none/lib/libomp.dylib"
+    _probe_reply(monkeypatch, {"ok": True, "error": None, "version": "2.1.4", "openmp": [lib]})
+    [check] = toolchain.xgboost_checks()
+    assert check.status == "ok" and f"one OpenMP library ({lib})" in check.detail
+
+
+def test_xgboost_without_an_openmp_library_fails_and_says_how_to_fix_it(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # What CI's macos-14 job hit: the package is installed, find_spec is
+    # happy, and every study that trains XGBoost would stop.
+    _probe_reply(monkeypatch, {"ok": False, "error": _MAC_LOAD_ERROR, "version": None, "openmp": []})
+    [check] = toolchain.xgboost_checks()
+    assert check.status == "fail"
+    assert "found no OpenMP library (Library not loaded: @rpath/libomp.dylib)" in check.detail
+    assert "Run the EDM-ARS installer again" in check.fix and "brew install libomp" in check.fix
+    assert "install/README.md" in check.fix
+
+
+def test_two_openmp_libraries_in_one_process_are_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    both = ["/opt/homebrew/opt/libomp/lib/libomp.dylib", "/x/site-packages/sklearn/.dylibs/libomp.dylib"]
+    _probe_reply(monkeypatch, {"ok": True, "error": None, "version": "2.1.4", "openmp": both})
+    [check] = toolchain.xgboost_checks()
+    assert check.status == "warn"
+    assert "OMP: Error #15" in check.detail and both[0] in check.detail and both[1] in check.detail
+
+
+def test_xgboost_probe_failures_are_reported_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    _probe_reply(monkeypatch, {"ok": False, "error": "ModuleNotFoundError: No module named 'xgboost'",
+                               "version": None, "openmp": None})
+    [check] = toolchain.xgboost_checks()
+    assert check.status == "fail" and "No module named 'xgboost'" in check.detail
+    assert check.fix == "Reinstall EDM-ARS with the installer."
+
+    # A native crash while loading leaves no report.
+    _probe_reply(monkeypatch, None, returncode=-6, stderr="OMP: Error #15: Initializing libomp.dylib")
+    [check] = toolchain.xgboost_checks()
+    assert check.status == "fail" and "exit code -6" in check.detail and "Error #15" in check.detail
+
+    _probe_reply(monkeypatch, None, timeout=True)
+    [check] = toolchain.xgboost_checks(timeout_s=5)
+    assert check.status == "warn" and "timed out" in check.detail
+
+
+def test_xgboost_probe_runs_for_real_in_this_python() -> None:
+    # The probe script itself, in a real child process of this interpreter
+    # (the test environment has the locked xgboost and scikit-learn).
+    [check] = toolchain.xgboost_checks()
+    assert check.status in ("ok", "warn"), check.detail
+    assert check.detail.startswith("XGBoost ")

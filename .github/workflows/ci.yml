@@ -104,6 +104,7 @@ jobs:
               assert len(omp) == 1, omp
           print("xgboost", xgboost.__version__, "sklearn", sklearn.__version__, "shap", shap.__version__, "ok")
           EOF
+          "$RUNNER_TEMP/bin/edmars" doctor --quick --plain
       # Windows PowerShell 5.1 on purpose: it is what a new Windows user has.
       - name: Install (Windows)
         if: runner.os == 'Windows'

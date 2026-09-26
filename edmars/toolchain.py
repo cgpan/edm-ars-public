@@ -29,6 +29,7 @@ Every process is started through ``edmars.proc``.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -959,6 +960,114 @@ def install_r_packages(
 def remember_rscript(settings: dict[str, Any], rscript: str | None, packages_ok: bool) -> None:
     """Save the chosen Rscript (the runner passes it on as EDM_ARS_RSCRIPT)."""
     _settings_set_and_save(settings, {"r.rscript": rscript, "r.packages_ok": bool(packages_ok)})
+
+
+# ---------------------------------------------------------------------------
+# XGBoost and its OpenMP library
+# ---------------------------------------------------------------------------
+
+#: Run in a fresh Python, as a study's analysis step is: import XGBoost and
+#: scikit-learn together, start scikit-learn's OpenMP runtime and, on
+#: macOS, list the libomp images dyld has loaded. Prints one JSON line.
+_XGBOOST_PROBE = """
+import json, sys
+out = {"ok": False, "error": None, "version": None, "openmp": None}
+try:
+    import xgboost, sklearn
+    out["version"] = xgboost.__version__
+    try:
+        from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
+        _openmp_effective_n_threads()
+    except ImportError:
+        pass
+    out["ok"] = True
+except Exception as exc:
+    out["error"] = type(exc).__name__ + ": " + str(exc)
+if sys.platform == "darwin":
+    try:
+        import ctypes
+        dyld = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        dyld._dyld_image_count.restype = ctypes.c_uint32
+        dyld._dyld_get_image_name.restype = ctypes.c_char_p
+        dyld._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+        names = [dyld._dyld_get_image_name(i) or b"" for i in range(dyld._dyld_image_count())]
+        out["openmp"] = [n.decode("utf-8", "replace") for n in names if n.endswith(b"/libomp.dylib")]
+    except Exception:
+        pass
+print(json.dumps(out))
+"""
+
+_OPENMP_README = "install/README.md, Troubleshooting: macOS, XGBoost and the OpenMP library"
+
+
+def _load_error(text: str) -> str:
+    """The telling part of an import error ("Library not loaded: ...").
+
+    XGBoost quotes dyld's messages as a Python list, so a line break in
+    them arrives as the two characters backslash and n.
+    """
+    match = re.search(r"Library not loaded: [^\s\\\"']+", text)
+    if match:
+        return match.group(0)
+    first = (text or "").strip().splitlines()
+    return first[0][:300] if first else "unknown error"
+
+
+def xgboost_checks(timeout_s: float = 180) -> list[Check]:
+    """Does XGBoost load next to scikit-learn in a fresh Python, as in a study?
+
+    ``find_spec`` (the package check) only sees that XGBoost is installed.
+    On macOS its compiled library also needs an OpenMP library at load
+    time: Homebrew's, or scikit-learn's copy that the installer links for
+    it. And two different OpenMP copies in one process can stop a study
+    with "OMP: Error #15", so on macOS the loaded copies are counted too.
+    """
+    title = "XGBoost"
+    result = _run([sys.executable, "-c", _XGBOOST_PROBE], timeout=timeout_s)
+    if result.error:
+        return [Check(title, "warn", f"Could not check whether XGBoost loads: {result.error}.",
+                      fix="edmars doctor")]
+    report: dict[str, Any] | None = None
+    for line in reversed(result.stdout.strip().splitlines()):
+        try:
+            loaded = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(loaded, dict):
+            report = loaded
+            break
+    if report is None or result.returncode != 0:
+        return [Check(title, "fail",
+                      f"Python stopped while loading XGBoost (exit code {result.returncode}): "
+                      f"{_tail(result.output) or 'no output'}",
+                      fix="Reinstall EDM-ARS with the installer.")]
+    if not report.get("ok"):
+        error = str(report.get("error") or "")
+        if "libomp" in error:  # macOS: XGBoost found no OpenMP library
+            return [Check(
+                title, "fail",
+                f"XGBoost does not load: it found no OpenMP library ({_load_error(error)}). "
+                "Every study that trains XGBoost would stop.",
+                fix=("Run the EDM-ARS installer again: on a Mac without Homebrew's libomp it links "
+                     f"scikit-learn's OpenMP library for XGBoost ({_OPENMP_README}). "
+                     "Or install Homebrew and run: brew install libomp"),
+            )]
+        return [Check(title, "fail", f"XGBoost does not load: {_load_error(error)}",
+                      fix="Reinstall EDM-ARS with the installer.")]
+    version = report.get("version") or "?"
+    openmp = [str(p) for p in (report.get("openmp") or [])]
+    if len(openmp) > 1:
+        return [Check(
+            title, "warn",
+            f"XGBoost {version} loads, but XGBoost and scikit-learn use two different OpenMP "
+            f"libraries ({', '.join(openmp)}). A study that runs both at once can stop with "
+            "'OMP: Error #15'.",
+            fix=f"See {_OPENMP_README}.",
+        )]
+    detail = f"XGBoost {version} loads together with scikit-learn"
+    if openmp:
+        detail += f"; one OpenMP library ({openmp[0]})"
+    return [Check(title, "ok", detail)]
 
 
 # ---------------------------------------------------------------------------

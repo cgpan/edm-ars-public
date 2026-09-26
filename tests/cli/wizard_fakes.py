@@ -518,6 +518,7 @@ class FakeToolchain:
         self.tinytex_installed = False
         self.latex_error: BaseException | None = None
         self.compile_calls = 0
+        self.xgboost: list[Check] = [Check("XGBoost", "ok", "XGBoost 2.1.4 loads together with scikit-learn")]
 
     def latex_checks(self, settings: dict[str, Any] | None = None) -> list[Check]:
         if self.latex_error is not None:
@@ -570,6 +571,9 @@ class FakeToolchain:
 
     def docker_info(self) -> Check:
         return Check("Docker", "info", "Docker is not running")
+
+    def xgboost_checks(self, timeout_s: float = 180) -> list[Check]:
+        return list(self.xgboost)
 
 
 class FakeLsar:
@@ -717,7 +721,7 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fakes:
         "toolchain": _module("toolchain", fakes.toolchain, ("latex_checks", "test_compile", "install_tinytex",
                                                              "tinytex_bin_dirs", "find_tex_tool",
                                                              "find_rscript", "r_checks", "install_r_packages",
-                                                             "docker_info")),
+                                                             "docker_info", "xgboost_checks")),
         "lsar": _module("lsar", fakes.lsar, ("LSAR_REPO", "LSAR_REF", "checks", "install", "verify",
                                                     "benchmark_for")),
         "runner": _module("runner", fakes.runner, ("latest_run",)),

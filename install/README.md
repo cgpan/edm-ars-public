@@ -180,7 +180,7 @@ Nothing is sent except ordinary download requests. EDM-ARS has no telemetry.
   recorded as `openmp_link` in `install.json`), then checks in one Python
   process that XGBoost and scikit-learn load and share one OpenMP library.
   Nothing outside the install folder changes; no Homebrew or administrator
-  rights are needed.
+  rights are needed. `edmars doctor` checks that XGBoost loads.
   - *Why one library:* the link leads to the very file scikit-learn loads,
     so macOS loads it once. Two different OpenMP copies in one process can
     stop a study with "OMP: Error #15".
@@ -193,7 +193,7 @@ Nothing is sent except ordinary download requests. EDM-ARS has no telemetry.
   - *If the installer still stops* with "XGBoost needs the OpenMP library",
     install [Homebrew](https://brew.sh), run `brew install libomp`, then run
     the installer again. XGBoost then uses Homebrew's copy while
-    scikit-learn keeps its own.
+    scikit-learn keeps its own; `edmars doctor` warns about such a pair.
   - *To undo it,* delete that `libomp.dylib` link; it also goes when you
     delete `<dir>/python`.
 - **Behind a proxy** — set `HTTPS_PROXY` before running the installer. uv
