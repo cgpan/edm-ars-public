@@ -653,6 +653,11 @@ def tinytex_missing_tools() -> list[str]:
     return missing
 
 
+def _and(names: Sequence[str]) -> str:
+    """"a", "a and b", "a, b and c"."""
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
 def _perl_on_path() -> bool:
     from edmars import proc
 
@@ -728,7 +733,7 @@ def install_tinytex(
     missing = tinytex_missing_tools()
     if missing:
         return Check(title, "fail",
-                     "TinyTeX needs " + ", ".join(missing) + ", which this computer does not have"
+                     "TinyTeX needs " + _and(missing) + ", which this computer does not have"
                      + (" (only the minimal Perl without its standard modules was found)"
                         if "Perl" in missing and _perl_on_path() else "") + ".",
                      fix=_linux_install_hint(missing))

@@ -519,7 +519,7 @@ def test_install_tinytex_says_what_to_install_before_downloading_anything(
     check = toolchain.install_tinytex(settings=_load_settings(), session=session)
 
     assert check.status == "fail"
-    assert "Perl" in check.detail and "xz" in check.detail
+    assert check.detail.startswith("TinyTeX needs Perl and xz,")
     assert "minimal Perl" in check.detail
     assert check.fix is not None
     assert "sudo apt install perl xz-utils" in check.fix
