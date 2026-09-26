@@ -252,3 +252,9 @@ def test_an_error_in_the_recent_list_is_wrapped_not_cut(plain: bool) -> None:
     assert message in joined
     warning = next(text for text in lines if "A warning" in text)
     assert warning.endswith("..." if plain else "\u2026")  # other lines still fit on one line
+
+
+
+def test_the_view_docstring_says_its_codes_are_not_exit_codes() -> None:
+    doc = " ".join((view.__doc__ or "").split())
+    assert "not exit codes" in doc and "edmars.model.EXIT_" in doc

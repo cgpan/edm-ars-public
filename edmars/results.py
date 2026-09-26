@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from edmars.endstates import READY_KINDS, Outcome, classify, gate_skip_text, messages, quote_path
+from edmars.model import EXIT_ERROR, EXIT_NOT_READY, EXIT_READY, EXIT_STOPPED
 from edmars.runstate import (
     EXPERIMENTAL_LINE,
     EXPERIMENTAL_NOTE,
@@ -323,8 +324,10 @@ def result_text(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bool
 def show(run_dir: Path | str, open_: str | None = None) -> int:
     """Print the result screen; optionally open the PDF, folder or summary.
 
-    Returns 0 for a ready (or still running) study, 2 when the paper is
-    not ready, 3 when the study stopped, 1 for a bad ``--open`` value.
+    Returns the exit code of edmars.model's scheme: EXIT_READY (0) for a
+    ready or still running study, EXIT_NOT_READY (2) when the paper is not
+    ready, EXIT_STOPPED (3) when the study stopped, and EXIT_ERROR (1) for
+    a bad ``--open`` value.
     """
     from edmars import ui
 
@@ -345,13 +348,14 @@ def show(run_dir: Path | str, open_: str | None = None) -> int:
 
         for text, style in render_result(outcome, state, run_dir, plain=False):
             ui.console.print(Text(text, style=style), highlight=False)
-    code = {"ready": 0, "ready_with_issues": 0, "running": 0, "not_ready": 2, "stopped": 3}.get(outcome.kind, 0)
+    code = {"ready": EXIT_READY, "ready_with_issues": EXIT_READY, "running": EXIT_READY,
+            "not_ready": EXIT_NOT_READY, "stopped": EXIT_STOPPED}.get(outcome.kind, EXIT_READY)
     if open_:
         targets = {"pdf": run_dir / "paper.pdf", "folder": run_dir, "summary": summary or run_dir / "summary.html"}
         target = targets.get(open_)
         if target is None:
             ui.warn(f"Unknown --open value {open_!r}; use pdf, folder or summary.")
-            return 1
+            return EXIT_ERROR
         if not target.exists():
             what = {"pdf": "There is no PDF for this study.", "summary": "There is no summary yet."}
             ui.warn(what.get(open_, f"{target} does not exist."))

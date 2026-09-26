@@ -34,6 +34,7 @@ import click
 import typer
 
 from edmars import __version__, ui
+from edmars.model import EXIT_CODES_HELP, EXIT_ERROR, EXIT_READY, EXIT_STOPPED
 
 ISSUES_URL = "https://github.com/cgpan/edm-ars-public/issues"
 
@@ -368,7 +369,12 @@ def _resolve_run(
 
 
 def _watch_then_results(run_dir: Path) -> None:
-    """Show the live view; when the study ends, show its results."""
+    """Show the live view; when the study ends, show its results.
+
+    Exits with the result screen's code (edmars.model.EXIT_CODES_HELP);
+    the view's own return values (10 left running, 11 stopped from the
+    view) never reach the shell.
+    """
     view = _module("view")
     code = view.watch(run_dir, plain=ui.is_plain())
     if code == 0:
@@ -379,9 +385,11 @@ def _watch_then_results(run_dir: Path) -> None:
             "The study was stopped. Your finished steps are saved; continue it later "
             "with `edmars resume`."
         )
-    else:
-        ui.info("The study keeps running in the background. Check on it with `edmars status`.")
-    raise typer.Exit(0)
+        raise typer.Exit(EXIT_STOPPED)
+    if code == 1:
+        raise typer.Exit(EXIT_ERROR)
+    ui.info("The study keeps running in the background. Check on it with `edmars status`.")
+    raise typer.Exit(EXIT_READY)
 
 
 def _after_start(run_dir: Path, watch: bool) -> None:
@@ -706,7 +714,7 @@ def doctor_cmd(
     raise _exit(doctor.main(deep=deep and not quick, json_out=json_out, bundle=bundle, quick=quick))
 
 
-@app.command("new")
+@app.command("new", epilog=EXIT_CODES_HELP)
 @_friendly
 def new_cmd(
     no_watch: NoWatchOpt = False,
@@ -737,7 +745,7 @@ def new_cmd(
     _launch(settings, plan, watch=not no_watch)
 
 
-@app.command("run")
+@app.command("run", epilog=EXIT_CODES_HELP)
 @_friendly
 def run_cmd(
     type_: Annotated[
@@ -818,7 +826,7 @@ def run_cmd(
     _preflight_confirm_launch(settings, plan, yes=non_interactive, watch=not no_watch)
 
 
-@app.command("status")
+@app.command("status", epilog=EXIT_CODES_HELP)
 @_friendly
 def status_cmd(run: RunArg = None, plain: PlainOpt = False, yes: YesOpt = False) -> None:
     """Watch a study's progress (the running one, or the latest)."""
@@ -875,7 +883,7 @@ def _local_time(value: str) -> str:
     return ts.astimezone().strftime("%Y-%m-%d %H:%M") if ts is not None else value
 
 
-@app.command("results")
+@app.command("results", epilog=EXIT_CODES_HELP)
 @_friendly
 def results_cmd(
     run: RunArg = None,
@@ -917,7 +925,7 @@ def stop_cmd(run: RunArg = None, plain: PlainOpt = False, yes: YesOpt = False) -
     ui.ok("Stopped. Continue it later with `edmars resume`.")
 
 
-@app.command("resume")
+@app.command("resume", epilog=EXIT_CODES_HELP)
 @_friendly
 def resume_cmd(
     run: RunArg = None,

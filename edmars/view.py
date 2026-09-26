@@ -15,6 +15,11 @@ running (the default) or stop it.
 
 ``watch()`` returns 0 when the study ended, 10 when the person left it
 running, 11 when they stopped it, and 1 when there is no such folder.
+These are for the caller only, not exit codes: ``edmars status`` (and
+``new``, ``run`` and ``resume`` while they watch) turns them into the
+result screen's exit codes, ``edmars.model.EXIT_*``: 0 ready or still
+running (left running), 2 finished but not ready, 3 stopped (also when
+stopped from the view), 1 no matching study.
 """
 from __future__ import annotations
 
