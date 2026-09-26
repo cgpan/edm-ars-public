@@ -55,6 +55,9 @@ _ASCII = {
 #: Print a "still working" line in plain mode after this much silence.
 PLAIN_HEARTBEAT_S = 300.0
 
+#: An error in the "Recent" list is wrapped, up to this many lines.
+RECENT_ERROR_LINES = 8
+
 Line = tuple[str, str]  # (text, rich style)
 
 
@@ -214,8 +217,19 @@ def render_screen(
     recent = state.recent[-3:]
     if recent:
         add("Recent:", "dim")
+        errors = {" ".join(e.split()) for e in state.errors}
         for line in recent:
-            add(f"  {line}", "dim")
+            if line not in errors:
+                add(f"  {line}", "dim")
+                continue
+            # An error is the one line a person needs whole (why the study
+            # stopped): wrap it instead of cutting it at the screen's edge.
+            wrapped = _wrap(to_ascii(line) if plain else line, width - 2, indent="  ")
+            if len(wrapped) > RECENT_ERROR_LINES:
+                wrapped = wrapped[:RECENT_ERROR_LINES]
+                wrapped[-1] = _truncate(wrapped[-1] + " ...", width - 2, plain)
+            for text in wrapped:
+                add(f"  {text}", "red")
     if not state.finished:
         add("Ctrl+C: leave or stop", "dim")
     return out

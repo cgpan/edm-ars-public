@@ -229,3 +229,26 @@ def test_an_experimental_plan_is_labelled_on_the_live_view(run_home: Path) -> No
     tested = make_run(run_home, name="2026-09-25_1400_tested_ef01", log=FULL_LOG)
     assert "EXPERIMENTAL" not in view.screen_text(load_state(tested), width=80,
                                                   plain=True, now=NOW)
+
+
+
+@pytest.mark.parametrize("plain", [True, False])
+def test_an_error_in_the_recent_list_is_wrapped_not_cut(plain: bool) -> None:
+    # The Mac study's live view cut pcc_07's sentence (why the study
+    # stopped) at the screen's edge: "... which commits the pa...".
+    message = ("pcc_07: The research question says 'above and beyond', which commits the paper to an "
+               "incremental-validity / nested-model comparison, but no such analysis appears in results.json.")
+    state = fold([
+        event(1, "run.start", 0, task_type="prediction", dataset="hsls09_public", provider="deepseek"),
+        event(2, "stage.start", 0, stage="CRITIQUING"),
+        event(3, "warning", 1, plain="A warning that is long enough to be cut at the edge of an eighty column screen."),
+        event(4, "error", 1, stage="CRITIQUING", code="PRE_CRITIC_ABORT", message=message),
+        event(5, "run.end", 1, state="ABORTED"),
+    ])
+    lines = [text for text, _ in view.render_screen(state, width=80, plain=plain, now=NOW)]
+    assert all(cell_len(text) <= 80 for text in lines)
+    start = next(i for i, text in enumerate(lines) if text.startswith("  pcc_07:"))
+    joined = " ".join(text.strip() for text in lines[start:start + 3])
+    assert message in joined
+    warning = next(text for text in lines if "A warning" in text)
+    assert warning.endswith("..." if plain else "\u2026")  # other lines still fit on one line
