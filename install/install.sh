@@ -30,7 +30,10 @@
 # rights are needed and nothing system-wide changes. What goes where:
 #   <dir>/app/<version>     EDM-ARS itself (the previous version is kept)
 #   <dir>/venv-<version>    its private Python packages
-#   <dir>/python            a private Python 3.11 (your own Python is untouched)
+#   <dir>/python            a private Python 3.11 (your own Python is untouched;
+#                           on a Mac without Homebrew's libomp, its lib/ also
+#                           gets a link to scikit-learn's OpenMP library for
+#                           XGBoost, see link_openmp below)
 #   <dir>/uv                the uv tool, only if you do not have it already
 #   ~/.local/bin/edmars     the command you type
 # Default <dir>: ~/Library/Application Support/edm-ars (macOS) or
@@ -189,6 +192,86 @@ add_path_block() {
     PATH_JSON="$PATH_JSON${PATH_JSON:+, }$(json_str "$1")"
     PATH_LIST="$PATH_LIST
       $1"
+}
+
+# macOS: an OpenMP library for XGBoost without Homebrew.
+#
+# XGBoost's macOS wheel loads OpenMP as @rpath/libomp.dylib. Its only
+# rpath is Homebrew's /opt/homebrew/opt/libomp/lib; after that dyld tries
+# the rpath of the running python, @executable_path/../lib, which is the
+# lib/ folder of the private Python this script installs. So on a Mac
+# without Homebrew's libomp, `import xgboost` fails.
+#
+# scikit-learn's macOS wheel ships an LLVM OpenMP library of its own,
+# sklearn/.dylibs/libomp.dylib, which exports every OpenMP function
+# XGBoost uses. A symbolic link to that file from the private Python's
+# lib/ gives XGBoost its library, and because the link resolves to the
+# very file scikit-learn loads, dyld maps it once: one OpenMP runtime per
+# process. (Two different copies in one process can stop a study with
+# "OMP: Error #15"; check_openmp counts them to make sure.)
+#
+# link_openmp PYTHON PYROOT MODE: make the link and print its path. MODE
+# "create" makes it; "refresh" only re-points a link an earlier install
+# made, which still points into that install's environment. Nothing is
+# written outside PYROOT (the private Python this script installed) or
+# over a real file, and nothing at all when scikit-learn has no copy.
+link_openmp() {
+    lo_out=$("$1" -c 'import importlib.util, os, sys
+spec = importlib.util.find_spec("sklearn")
+print(os.path.join(list(spec.submodule_search_locations)[0], ".dylibs", "libomp.dylib"))
+print(os.path.dirname(os.path.dirname(os.path.realpath(sys.executable))))' 2>/dev/null) || return 1
+    lo_src=$(printf '%s\n' "$lo_out" | sed -n 1p)
+    lo_lib="$(printf '%s\n' "$lo_out" | sed -n 2p)/lib"
+    lo_root=$(CDPATH='' cd -- "$2" 2>/dev/null && pwd -P) || return 1
+    case "$lo_lib" in
+        "$lo_root"/*) ;;
+        *) return 1 ;;
+    esac
+    if [ ! -f "$lo_src" ] || [ ! -d "$lo_lib" ]; then
+        return 1
+    fi
+    lo_link="$lo_lib/libomp.dylib"
+    if [ -L "$lo_link" ]; then
+        rm -f "$lo_link" || return 1
+    elif [ -e "$lo_link" ] || [ "$3" = "refresh" ]; then
+        return 1
+    fi
+    ln -s "$lo_src" "$lo_link" || return 1
+    printf '%s\n' "$lo_link"
+}
+
+# check_openmp PYTHON: in one process, import XGBoost and scikit-learn,
+# start scikit-learn's OpenMP runtime and count the libomp images dyld
+# has loaded. Exactly one passes.
+check_openmp() {
+    "$1" -c 'import ctypes, sys
+import xgboost, sklearn
+try:
+    from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
+    _openmp_effective_n_threads()
+except ImportError:
+    pass
+dyld = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+dyld._dyld_image_count.restype = ctypes.c_uint32
+dyld._dyld_get_image_name.restype = ctypes.c_char_p
+dyld._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+names = [dyld._dyld_get_image_name(i) or b"" for i in range(dyld._dyld_image_count())]
+omp = [n.decode("utf-8", "replace") for n in names if n.endswith(b"/libomp.dylib")]
+if len(omp) != 1:
+    sys.exit("expected one OpenMP library, found %d: %s" % (len(omp), ", ".join(omp) or "none"))'
+}
+
+# provide_openmp PYTHON PYROOT MODE ERRFILE: link_openmp, then prove it
+# with check_openmp (its messages go to ERRFILE). Prints the link and
+# succeeds, or removes the link again and fails.
+provide_openmp() {
+    po_link=$(link_openmp "$1" "$2" "$3") || return 1
+    if check_openmp "$1" 2>"$4"; then
+        printf '%s\n' "$po_link"
+        return 0
+    fi
+    rm -f "$po_link"
+    return 1
 }
 
 # --------------------------------------------------------------------------
@@ -640,12 +723,31 @@ main() {
     "$UV" pip install --python "$VENV_PY" "$@" \
         || die "installing the packages failed (see the messages above). Check your internet connection and run the installer again."
     say "Checking that the main packages load..."
-    if ! "$VENV_PY" -c "import numpy, pandas, scipy, sklearn, matplotlib, xgboost, shap, fitz, yaml, requests" 2>"$TMP_DIR/import.err"; then
-        tail -n 5 "$TMP_DIR/import.err" >&2
-        if [ "$OS" = "Darwin" ] && grep -q "libomp" "$TMP_DIR/import.err"; then
-            die "XGBoost needs the OpenMP library on macOS. Install Homebrew (https://brew.sh), run 'brew install libomp', then run this installer again."
+    IMPORTS="import numpy, pandas, scipy, sklearn, matplotlib, xgboost, shap, fitz, yaml, requests"
+    OMP_LINK=""
+    if [ "$OS" = "Darwin" ]; then
+        # A link an earlier install made (see link_openmp) still points into
+        # that install's environment; point it at this one's scikit-learn.
+        OMP_LINK=$(provide_openmp "$VENV_PY" "$APP_BASE/python" refresh "$TMP_DIR/openmp.err") || OMP_LINK=""
+    fi
+    if ! "$VENV_PY" -c "$IMPORTS" 2>"$TMP_DIR/import.err"; then
+        if [ "$OS" = "Darwin" ] && [ -z "$OMP_LINK" ] && grep -q "libomp" "$TMP_DIR/import.err"; then
+            say "XGBoost found no OpenMP library (Homebrew's libomp is not installed); linking the one that comes with scikit-learn..."
+            : >"$TMP_DIR/openmp.err"
+            if ! OMP_LINK=$(provide_openmp "$VENV_PY" "$APP_BASE/python" create "$TMP_DIR/openmp.err"); then
+                tail -n 5 "$TMP_DIR/import.err" >&2
+                tail -n 5 "$TMP_DIR/openmp.err" >&2
+                die "XGBoost needs the OpenMP library on macOS, and linking the copy that comes with scikit-learn did not work (see the lines above). Install Homebrew (https://brew.sh), run 'brew install libomp', then run this installer again."
+            fi
+            say "Linked $OMP_LINK to scikit-learn's OpenMP library; XGBoost and scikit-learn share it."
+            if ! "$VENV_PY" -c "$IMPORTS" 2>"$TMP_DIR/import.err"; then
+                tail -n 5 "$TMP_DIR/import.err" >&2
+                die "the packages were installed but do not load (see the lines above)."
+            fi
+        else
+            tail -n 5 "$TMP_DIR/import.err" >&2
+            die "the packages were installed but do not load (see the lines above)."
         fi
-        die "the packages were installed but do not load (see the lines above)."
     fi
 
     # EDM-ARS itself is not a pip package: the app folder goes on the
@@ -761,6 +863,7 @@ main() {
         PREVIOUS_JSON=null
     fi
     if [ "$UV_PRIVATE" = 1 ]; then UV_PRIVATE_JSON=true; else UV_PRIVATE_JSON=false; fi
+    if [ -n "$OMP_LINK" ]; then OMP_LINK_JSON=$(json_str "$OMP_LINK"); else OMP_LINK_JSON=null; fi
     cat >"$APP_BASE/install.json" <<EOF
 {
   "schema": 1,
@@ -776,6 +879,7 @@ main() {
   "pth": $(json_str "$PTH"),
   "uv": $(json_str "$UV"),
   "uv_private": $UV_PRIVATE_JSON,
+  "openmp_link": $OMP_LINK_JSON,
   "bin_dir": $(json_str "$BIN_DIR"),
   "launcher": $(json_str "$LAUNCHER"),
   "path_modified": $PATH_MODIFIED,

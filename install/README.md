@@ -172,9 +172,30 @@ Nothing is sent except ordinary download requests. EDM-ARS has no telemetry.
 - **"the install folder path is too long for Windows"** — Windows limits
   most programs to 260-character paths, and some package files sit deep in
   the install folder. Choose a short folder, for example `-Dir C:\edm-ars`.
-- **macOS: XGBoost needs the OpenMP library** — install
-  [Homebrew](https://brew.sh), run `brew install libomp`, then run the
-  installer again.
+- **macOS: XGBoost and the OpenMP library.** XGBoost's Mac build looks for
+  the OpenMP library (`libomp.dylib`) only where Homebrew puts it, and a new
+  Mac has no Homebrew. scikit-learn, which EDM-ARS also installs, ships its
+  own copy. So when XGBoost finds none, the installer links scikit-learn's
+  copy into its private Python (`<dir>/python/cpython-3.11.../lib/libomp.dylib`,
+  recorded as `openmp_link` in `install.json`), then checks in one Python
+  process that XGBoost and scikit-learn load and share one OpenMP library.
+  Nothing outside the install folder changes; no Homebrew or administrator
+  rights are needed.
+  - *Why one library:* the link leads to the very file scikit-learn loads,
+    so macOS loads it once. Two different OpenMP copies in one process can
+    stop a study with "OMP: Error #15".
+  - *Risk:* XGBoost then runs on scikit-learn's OpenMP build instead of
+    Homebrew's. It provides every OpenMP function XGBoost 2.1.4 uses, and CI
+    trains XGBoost and scikit-learn together on it. When you install a new
+    EDM-ARS version, the link moves to the new version's packages, so a
+    study that was already running from the previous version can stop with
+    "OMP: Error #15" at a later step; resume it with `edmars resume`.
+  - *If the installer still stops* with "XGBoost needs the OpenMP library",
+    install [Homebrew](https://brew.sh), run `brew install libomp`, then run
+    the installer again. XGBoost then uses Homebrew's copy while
+    scikit-learn keeps its own.
+  - *To undo it,* delete that `libomp.dylib` link; it also goes when you
+    delete `<dir>/python`.
 - **Behind a proxy** — set `HTTPS_PROXY` before running the installer. uv
   uses it everywhere; on Windows the installer's own downloads follow your
   system proxy settings.

@@ -69,6 +69,41 @@ jobs:
             --dir "$RUNNER_TEMP/edm-ars" --bin-dir "$RUNNER_TEMP/bin" \
             --no-modify-path --no-onboard --yes
           "$RUNNER_TEMP/bin/edmars" version
+      # The runners have no Homebrew libomp at /opt/homebrew/opt/libomp, like
+      # a new Mac, so on macOS XGBoost runs on the scikit-learn OpenMP
+      # library install.sh links for it. Import the three together, then
+      # train with both libraries' parallel code in one process: two OpenMP
+      # runtimes there would stop it with "OMP: Error #15".
+      - name: XGBoost, scikit-learn and SHAP load and run together
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          py=$(ls -d "$RUNNER_TEMP"/edm-ars/venv-*/bin/python | head -n 1)
+          "$py" -c "import xgboost, sklearn, shap"
+          grep '"openmp_link"' "$RUNNER_TEMP/edm-ars/install.json"
+          "$py" - <<'EOF'
+          import ctypes, sys
+          import numpy as np
+          import shap, sklearn, xgboost
+          from sklearn.cluster import KMeans
+
+          rng = np.random.default_rng(42)
+          X = rng.normal(size=(2000, 8))
+          y = (X[:, 0] + X[:, 1] > 0).astype(int)
+          KMeans(n_clusters=4, n_init=2, random_state=42).fit(X)
+          model = xgboost.XGBClassifier(n_estimators=20, max_depth=3, n_jobs=2).fit(X, y)
+          shap.TreeExplainer(model).shap_values(X[:50])
+          if sys.platform == "darwin":
+              dyld = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+              dyld._dyld_image_count.restype = ctypes.c_uint32
+              dyld._dyld_get_image_name.restype = ctypes.c_char_p
+              dyld._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+              names = [dyld._dyld_get_image_name(i) or b"" for i in range(dyld._dyld_image_count())]
+              omp = [n.decode() for n in names if n.endswith(b"/libomp.dylib")]
+              print("OpenMP libraries loaded:", omp)
+              assert len(omp) == 1, omp
+          print("xgboost", xgboost.__version__, "sklearn", sklearn.__version__, "shap", shap.__version__, "ok")
+          EOF
       # Windows PowerShell 5.1 on purpose: it is what a new Windows user has.
       - name: Install (Windows)
         if: runner.os == 'Windows'
