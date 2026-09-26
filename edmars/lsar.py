@@ -25,6 +25,7 @@ Versions kept outside LSAR's pins are recorded and reported by
 
 from __future__ import annotations
 
+import copy
 import importlib.metadata
 import importlib.util
 import json
@@ -356,10 +357,14 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
 def _safe_extract(archive: Path, dest: Path) -> tuple[Path, str | None]:
     """Unpack a GitHub source archive into ``dest``; refuse anything unsafe.
 
-    Returns (the single top-level folder, the commit id GitHub records in
-    the archive's pax header, if any). Absolute paths, ``..`` components,
-    drive letters and backslashes are refused outright; links, devices and
-    FIFOs are skipped (LSAR has none).
+    The archive's single top-level folder (``LSAR-public-<40-hex commit>``)
+    is dropped: its contents land directly in ``dest``, which is returned
+    with the commit id GitHub records in the archive's pax header, if any.
+    That folder name is 52 characters, and on Windows (260-character path
+    limit unless long paths are turned on) it pushed LSAR's deepest file
+    past the limit under a data folder that was only moderately deep.
+    Absolute paths, ``..`` components, drive letters and backslashes are
+    refused outright; links, devices and FIFOs are skipped (LSAR has none).
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -389,11 +394,19 @@ def _safe_extract(archive: Path, dest: Path) -> tuple[Path, str | None]:
             raise LsarInstallError(
                 f"The LSAR archive should hold one folder; it holds {sorted(tops)[:5]}."
             )
+        inner: list[tarfile.TarInfo] = []
+        for member in members:
+            rest = PurePosixPath(member.name).parts[1:]
+            if not rest:
+                continue  # the top-level folder itself; dest stands in for it
+            moved = copy.copy(member)
+            moved.name = "/".join(rest)
+            inner.append(moved)
         if hasattr(tarfile, "data_filter"):
-            tf.extractall(root, members=members, filter="data")
+            tf.extractall(root, members=inner, filter="data")
         else:  # pragma: no cover - Python < 3.11.4
-            tf.extractall(root, members=members)
-    return root / tops.pop(), commit
+            tf.extractall(root, members=inner)
+    return root, commit
 
 
 # ---------------------------------------------------------------------------
