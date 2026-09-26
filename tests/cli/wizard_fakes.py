@@ -563,9 +563,10 @@ class FakeToolchain:
                                                        "Run `edmars setup r`.")]
         return [Check("R", "ok", "R 4.5.1"), Check("R packages", "ok", "all installed")]
 
-    def install_r_packages(self, rscript: str, packages: Any = None, *, repo: str = "",
-                           timeout_s: float = 1800) -> Check:
+    def install_r_packages(self, rscript: str, packages: Any = None, *, repo: str | None = None,
+                           timeout_s: float = 1800, settings: dict[str, Any] | None = None) -> Check:
         self.packages_missing = False
+        self.install_settings = settings
         return Check("R packages", "ok", "installed")
 
     def docker_info(self) -> Check:

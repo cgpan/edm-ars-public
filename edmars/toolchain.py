@@ -102,6 +102,7 @@ R_REPO_SNAPSHOT = R_REPO_SNAPSHOTS[0]
 R_MIN_VERSION: tuple[int, int] = (4, 4)
 R_DOWNLOAD_PAGE = "https://cran.r-project.org/"
 
+_R_NAME = re.compile(r"[A-Za-z][A-Za-z0-9.]*")
 _R_VERSION_DIR = re.compile(r"R-(\d+)\.(\d+)(?:\.(\d+))?", re.IGNORECASE)
 
 TEST_BIB = r"""@article{edmarstest2026,
@@ -865,7 +866,9 @@ def _install_code(packages: Sequence[str], repos: Sequence[str]) -> str:
     read for this R version (``.Platform$pkgType``) and the first one that
     has every needed package and dependency not already installed is used;
     it prints ``EDMARS_REPO <url>`` so the caller can name it. Where R only
-    builds from source (Linux), the first snapshot is used.
+    builds from source (Linux), the first snapshot is used. Afterwards it
+    prints ``EDMARS_LIB <library>`` and ``EDMARS_ADDED <names>``: every
+    package the install put into that library, dependencies included.
     """
     pkgs = ", ".join(f"'{p}'" for p in packages)
     candidates = ", ".join(f"'{r}'" for r in repos)
@@ -892,7 +895,10 @@ def _install_code(packages: Sequence[str], repos: Sequence[str]) -> str:
         "  }\n"
         "}\n"
         "cat('EDMARS_REPO', repo, '\\n')\n"
+        "had <- rownames(installed.packages(lib.loc = lib))\n"
         "install.packages(pkgs, lib = lib, repos = c(CRAN = repo))\n"
+        "cat('EDMARS_LIB', lib, '\\n')\n"
+        "cat('EDMARS_ADDED', setdiff(rownames(installed.packages(lib.loc = lib)), had), '\\n')\n"
         "for (p in pkgs) if (!requireNamespace(p, quietly = TRUE)) cat('MISSING', p, '\\n')\n"
     )
 
@@ -967,12 +973,16 @@ def install_r_packages(
     *,
     repo: str | None = None,
     timeout_s: float = 1800,
+    settings: dict[str, Any] | None = None,
 ) -> Check:
     """Install the missing R packages into the user's R library (consent first).
 
     ``repo`` pins one repository; by default the first of
     :data:`R_REPO_SNAPSHOTS` that has binaries of everything needed for
-    this R version is used.
+    this R version is used. With ``settings``, every package the install
+    added (dependencies included, even when the install then fails) is
+    saved under ``r.added_packages`` by library, so ``edmars uninstall``
+    can say exactly what it leaves in the user's R library.
     """
     title = "R packages"
     wanted = list(packages) if packages is not None else list(R_PACKAGES)
@@ -987,9 +997,16 @@ def install_r_packages(
         result = _run([rscript, "--vanilla", str(script)], timeout=timeout_s, cwd=tmp)
     chosen = re.search(r"^EDMARS_REPO\s+(\S+)", result.stdout, flags=re.MULTILINE)
     used = chosen.group(1) if chosen else repos[0]
+    library, added = _added_packages(result.stdout)
+    if settings is not None and library and added:
+        record = dict(_settings_get(settings, "r.added_packages") or {})
+        record[library] = sorted(set(record.get(library) or []) | set(added), key=str.lower)
+        _settings_set_and_save(settings, {"r.added_packages": record})
     after = probe_r(rscript, wanted)
     if not after.error and not after.missing:
-        return Check(title, "ok", "Installed: " + ", ".join(before.missing) + f" (from {used})")
+        where = (f"; {len(added)} packages in all, with what they need, into {library}"
+                 if library and added else "")
+        return Check(title, "ok", "Installed: " + ", ".join(before.missing) + f" (from {used}{where})")
     why = result.error or _tail(result.output, 4)
     still = ", ".join(after.missing) if after.missing else "unknown"
     return Check(
@@ -998,6 +1015,14 @@ def install_r_packages(
         fix=(f"In R, run install.packages(c({', '.join(repr(p) for p in after.missing)}), "
              f"repos = '{used}')"),
     )
+
+
+def _added_packages(stdout: str) -> tuple[str | None, list[str]]:
+    """(library, packages added to it) from the install script's report lines."""
+    lib = re.search(r"^EDMARS_LIB (.+?)\s*$", stdout or "", flags=re.MULTILINE)
+    added = re.search(r"^EDMARS_ADDED(.*)$", stdout or "", flags=re.MULTILINE)
+    names = [n for n in (added.group(1).split() if added else []) if _R_NAME.fullmatch(n)]
+    return (lib.group(1) if lib else None), names
 
 
 def remember_rscript(settings: dict[str, Any], rscript: str | None, packages_ok: bool) -> None:

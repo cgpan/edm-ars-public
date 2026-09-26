@@ -1823,7 +1823,7 @@ class _Wizard:
             if install_packages:
                 self.info("Installing R packages (this can take several minutes)\u2026")
                 try:
-                    result = toolchain.install_r_packages(rscript)
+                    result = toolchain.install_r_packages(rscript, settings=self.s)
                 except Exception as exc:  # noqa: BLE001
                     self._report(f"Installing R packages failed: {_doctor.redact(str(exc))}")
                     result = None

@@ -110,11 +110,13 @@ class FakeR:
     """Answers Rscript --vanilla <file>.R the way the probe/install scripts expect."""
 
     def __init__(self, missing: list[str], version: str = "4.4.1",
-                 installable: bool = True, chosen: str | None = None) -> None:
+                 installable: bool = True, chosen: str | None = None,
+                 added: tuple[str, list[str]] | None = None) -> None:
         self.missing = list(missing)
         self.version = version
         self.installable = installable
         self.chosen = chosen
+        self.added = added
         self.scripts: list[str] = []
 
     def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -123,6 +125,8 @@ class FakeR:
         self.scripts.append(script)
         if "install.packages" in script:
             said = f"EDMARS_REPO {self.chosen} \n" if self.chosen else ""
+            if self.added:
+                said += f"EDMARS_LIB {self.added[0]} \nEDMARS_ADDED {' '.join(self.added[1])} \n"
             if self.installable:
                 self.missing = []
                 return completed(args, 0, said, "installing *binary* package 'mirt'")
@@ -217,6 +221,33 @@ def test_the_snapshot_r_chose_is_named_in_the_result_and_the_fix(
     failed = toolchain.install_r_packages("Rscript")
     assert failed.status == "fail"
     assert f"repos = '{older}'" in (failed.fix or "")
+
+
+def test_the_install_records_every_package_it_added_for_uninstall(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A real install of the four packages into an empty library added 74
+    # (their dependencies included). Uninstall leaves them in the user's
+    # R library, so it must be able to say which and where, also when the
+    # install stopped halfway.
+    code = toolchain._install_code(["mirt"], toolchain.R_REPO_SNAPSHOTS)
+    assert "had <- rownames(installed.packages(lib.loc = lib))" in code
+    assert "setdiff(rownames(installed.packages(lib.loc = lib)), had)" in code
+    assert code.index("had <-") < code.index("install.packages(pkgs")
+
+    lib = "C:/Users/Jane Doe/AppData/Local/R/win-library/4.4"
+    settings_dict = _load_settings()
+    monkeypatch.setattr(proc, "run", FakeR(["mirt", "CDM"], added=(lib, ["mirt", "CDM", "Deriv"])))
+    ok = toolchain.install_r_packages("Rscript", settings=settings_dict)
+    assert ok.status == "ok" and lib in ok.detail and "3 packages" in ok.detail
+
+    monkeypatch.setattr(proc, "run", FakeR(["lavaan"], installable=False,
+                                           added=(lib, ["pbivnorm", "mnormt"])))
+    toolchain.install_r_packages("Rscript", settings=settings_dict)
+    from edmars import settings
+
+    saved = settings.load()["r"]["added_packages"]
+    assert saved == {lib: ["CDM", "Deriv", "mirt", "mnormt", "pbivnorm"]}
 
 
 def test_a_repo_passed_in_is_the_only_one_tried(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -420,6 +420,8 @@ def test_r_folder_path_is_normalized_and_packages_installed(fx: Fakes, tmp_path:
     saved = fx.saved()["r"]
     assert Path(saved["rscript"]) == r_home / "bin" / exe
     assert saved["packages_ok"] is True
+    # The install gets the settings, so it can record what it adds for uninstall.
+    assert fx.toolchain.install_settings is not None
 
 
 def test_reviewer_asks_for_a_deepseek_key_even_with_another_service(fx: Fakes) -> None:
