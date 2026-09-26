@@ -154,9 +154,19 @@ class TestRetiredModels:
         used = RETIRED_MODEL_IDS.intersection(_strings(data))
         assert not used, f"{path.name} routes to retired model id(s) {sorted(used)}"
 
-    def test_unverified_rates_are_marked(self, config: dict) -> None:
-        rates = config["pricing"]["per_million_tokens"]
-        assert rates["deepseek-flash"].get("verified") is False
+    def test_every_rate_says_whether_it_was_verified(self, config: dict) -> None:
+        """A rate nobody checked must say so (``verified: false``, which
+        labels the run's cost an estimate), and a checked one must say when
+        and against what. deepseek-v4-pro carried no flag at all, so its
+        stale flat rate read as verified and priced the 2026-09-26 macOS
+        study at a third of its off-peak cost."""
+        import datetime
+
+        for model, rates in config["pricing"]["per_million_tokens"].items():
+            assert isinstance(rates.get("verified"), bool), model
+            if rates["verified"]:
+                datetime.date.fromisoformat(str(rates["verified_on"]))
+                assert str(rates["source"]).startswith("https://"), model
 
 
 # ---------------------------------------------------------------------------

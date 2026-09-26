@@ -500,3 +500,52 @@ class TestTimeOfDayRates:
              "timestamp": "2026-09-26T13:50:00"}]}), encoding="utf-8")
         rows = load_usage_from_checkpoint(str(tmp_path))
         assert summarize(rows, TOD).cost_usd == OFF_PEAK
+
+
+class TestShippedDeepSeekRates:
+    """The rates config.yaml ships, checked against how DeepSeek states them
+    (https://api-docs.deepseek.com/quick_start/pricing, 2026-09-26)."""
+
+    @staticmethod
+    def _pricing() -> dict:
+        import yaml
+
+        cfg = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "config.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        return load_pricing(cfg)
+
+    def test_off_peak_is_half_of_peak(self) -> None:
+        for model, rates in self._pricing().items():
+            if "off_peak" not in rates:
+                continue
+            for key in ("input", "cached_input", "output"):
+                assert rates["off_peak"][key] * 2 == rates[key], (model, key)
+
+    def test_every_time_of_day_entry_has_a_readable_schedule(self) -> None:
+        """An unreadable schedule would charge every call the peak rate."""
+        from src.cost import rate_period
+
+        for model, rates in self._pricing().items():
+            if "off_peak" not in rates:
+                continue
+            probe = TokenUsage("a", model, "deepseek", 1, 1,
+                               timestamp="2026-09-26T13:50:00")
+            assert rate_period(probe, rates) == "off_peak", model
+
+    def test_the_macos_study_is_priced_off_peak(self) -> None:
+        """The 2026-09-26 macOS study: 232,105 prompt tokens (114,560 cached)
+        and 42,175 completion tokens on deepseek-v4-pro, on a Saturday.
+        The old flat rates said US$0.0538; the account balance fell by
+        about US$0.20, which also paid for one call cut off by a stop."""
+        u = TokenUsage("x", "deepseek-v4-pro", "deepseek", 232_105, 42_175,
+                       114_560, timestamp="2026-09-26T13:50:00")
+        pricing = self._pricing()
+        rates = pricing["deepseek-v4-pro"]["off_peak"]
+        expected = ((232_105 - 114_560) * rates["input"]
+                    + 114_560 * rates["cached_input"]
+                    + 42_175 * rates["output"]) / 1_000_000
+        assert cost_usd(u, pricing) == expected
+        assert 0.10 < expected < 0.20
