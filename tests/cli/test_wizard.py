@@ -353,7 +353,11 @@ def test_semantic_scholar_key_is_checked_and_saved(fx: Fakes) -> None:
     assert run("literature") == 0
     assert fx.secrets.store["SEMANTIC_SCHOLAR_API_KEY"] == "s2-fake-key-0123456789"
     assert fx.saved()["literature"]["semantic_scholar_key_set"] is True
-    assert "arXiv and Crossref need no key" in fx.ui.output
+    # arXiv refused every query on the Mac test (HTTP 406): "need no key"
+    # must not read as "always works".
+    out = " ".join(fx.ui.output.split())
+    assert "arXiv and Crossref need no key, but they can refuse or rate-limit requests too" in out
+    assert "Semantic Scholar key is the reliable way" in out
 
 
 def test_dataset_download_records_terms_and_shows_progress(fx: Fakes) -> None:

@@ -1338,7 +1338,8 @@ class _Wizard:
             "works without a key but often turns away keyless requests. When that happens your paper may end "
             "up with few real citations.\n\n"
             f"A free key is available from {SEMANTIC_SCHOLAR_FORM} (approval can take a few days).\n\n"
-            "arXiv and Crossref need no key."
+            "arXiv and Crossref need no key, but they can refuse or rate-limit requests too, so the "
+            "Semantic Scholar key is the reliable way to get real citations."
         )
         self.header("S5", body, title="Literature search (recommended)")
         while True:

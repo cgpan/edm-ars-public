@@ -579,8 +579,9 @@ def check_semantic_scholar(settings: dict[str, Any], *, deep: bool = False) -> l
     source = secrets.secret_source(SEMANTIC_SCHOLAR_ENV)
     if source is None:
         return [make_check("Literature search", "warn",
-                           "No Semantic Scholar key. Keyless searches are often turned away, and papers can end up "
-                           "with few real citations (arXiv and Crossref need no key)",
+                           "No Semantic Scholar key. Semantic Scholar often turns away keyless searches; arXiv and "
+                           "Crossref need no key but can refuse or rate-limit requests too, so papers can end up "
+                           "with few real citations. A free Semantic Scholar key is the reliable fix",
                            "Request a free key at https://www.semanticscholar.org/product/api#api-key-form, "
                            "then run `edmars setup literature`.")]
     out = [make_check("Literature search", "ok", f"Semantic Scholar key found in {store_label(source, SEMANTIC_SCHOLAR_ENV)}")]
