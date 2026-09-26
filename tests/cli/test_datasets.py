@@ -499,6 +499,29 @@ def test_installing_an_installed_copy_does_not_say_downloading(
     assert "Downloading" not in again.output and "converted" not in again.output
 
 
+def test_a_source_checkout_can_convert_the_zip_with_python_m_edmars_relabel(
+    fake_nces: bytes, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The README's command for users who run the pipeline from a checkout."""
+    from edmars import relabel
+
+    zip_file = tmp_path / "hsls.zip"
+    zip_file.write_bytes(fake_nces)
+    out = tmp_path / "data" / "raw" / "hsls_17_student_pets_sr_v1_0.csv"
+    assert relabel.main([str(zip_file), str(out)]) == 0
+    assert out.read_bytes() == LABELLED_CSV
+    assert "checked" in capsys.readouterr().out
+
+    other = tmp_path / "other.zip"
+    other.write_bytes(_zip({MEMBER: LABELLED_CSV}))
+    elsewhere = tmp_path / "elsewhere.csv"
+    assert relabel.main([str(other), str(elsewhere)]) == 1
+    assert "did not convert" in capsys.readouterr().err
+    assert not elsewhere.exists()
+    assert relabel.main([]) == 2
+    assert "usage: python -m edmars.relabel" in capsys.readouterr().out
+
+
 REAL_ZIP_ENV = "EDMARS_REAL_HSLS_ZIP"
 
 

@@ -198,9 +198,11 @@ failures:
   DATA_WRONG_FORMAT:
     title: "The dataset file is not in the expected format"
     why: >-
-      EDM-ARS expects the NCES public-use CSV with text labels (for
-      example "Male" and "Female"). The file it found looks different: a
-      numeric-code extract, another release, or a damaged download.
+      EDM-ARS expects the public-use CSV with text labels (for example
+      "Male" and "Female"), which `edmars data install` makes from the
+      NCES download. The file it found looks different: the numeric-code
+      CSV as it comes in the NCES zip, another release, or a damaged
+      download.
     fix: "Check the file, then download or import it again."
     command: |-
       edmars data verify

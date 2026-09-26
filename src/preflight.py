@@ -76,11 +76,15 @@ _ALL_R_PACKAGES = ("jsonlite", "lavaan", "mirt", "CDM", "MASS")
 
 #: Where each dataset comes from, for the missing-data message.
 _DATA_SOURCES: dict[str, str] = {
+    # The NCES zip holds the numeric-code CSV; the labelled one the
+    # pipeline needs is made from it (edmars.relabel, checked by SHA-256).
     "hsls09_public": (
-        "Download the HSLS:09 public-use student file (CSV, labelled "
-        "values; about 297 MB) from https://nces.ed.gov/EDAT/Data/Zip/"
-        "HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip, take "
-        "hsls_17_student_pets_sr_v1_0.csv out of the zip"
+        "Download the HSLS:09 public-use zip (about 297 MB) from "
+        "https://nces.ed.gov/EDAT/Data/Zip/"
+        "HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip, convert the numeric-code "
+        "CSV in it to the labelled CSV EDM-ARS needs (python -m "
+        "edmars.relabel <the zip> <output .csv>, or edmars data install "
+        "hsls09_public)"
     ),
     "els_2002": (
         "Download the ELS:2002 public-use BY-F3 student file as CSV from "

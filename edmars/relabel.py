@@ -239,6 +239,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0 if args[:1] in (["-h"], ["--help"]) else 2
     from edmars import datasets
 
+    print(f"Checking {args[0]} and converting the CSV in it (about a minute)...", flush=True)
     try:
         digest = datasets.convert_zip("hsls09_public", Path(args[0]), Path(args[1]))
     except datasets.DatasetError as exc:
