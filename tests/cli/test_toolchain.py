@@ -394,6 +394,7 @@ def test_install_tinytex_installs_then_fills_in_whatever_a_test_compile_misses(
 ) -> None:
     root = tmp_path / "TinyTeX"
     monkeypatch.setattr(toolchain, "tinytex_root", lambda: root)
+    monkeypatch.setattr(toolchain, "tinytex_missing_tools", lambda: [])
     bin_dir = root / "bin" / "windows"
     tlmgr_name = "tlmgr.bat" if toolchain.os.name == "nt" else "tlmgr"
     pdflatex_name = "pdflatex.exe" if toolchain.os.name == "nt" else "pdflatex"
@@ -460,3 +461,67 @@ def test_tools_never_receive_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc, "run", run)
     toolchain.probe_r("Rscript")
     assert seen and "DEEPSEEK_API_KEY" not in seen[0] and "PATH" in {k.upper() for k in seen[0]}
+
+
+def _linux_tools(monkeypatch: pytest.MonkeyPatch, on_path: set[str], perl_modules: bool) -> list[list[str]]:
+    """Pretend to be Linux with ``on_path`` programs; returns the commands run."""
+    from types import SimpleNamespace
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(toolchain, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(proc, "which", lambda name: f"/usr/bin/{name}" if name in on_path else None)
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        ran.append(list(args))
+        if perl_modules:
+            return completed(args, 0)
+        return completed(args, 2, "", "Can't locate File/Find.pm in @INC")
+
+    monkeypatch.setattr(proc, "run", run)
+    return ran
+
+
+def test_tinytex_needs_full_perl_xz_and_a_downloader_on_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A bare Ubuntu 24.04 (a container, WSL, a server) has only perl-base:
+    # `perl` runs, but the TinyTeX installer's `perl -mFile::Find` fails.
+    ran = _linux_tools(monkeypatch, {"perl", "curl"}, perl_modules=False)
+    assert toolchain.tinytex_missing_tools() == ["Perl", "xz"]
+    assert ran == [["/usr/bin/perl", "-MFile::Find", "-e", "1"]]
+
+    _linux_tools(monkeypatch, {"perl", "xz", "wget"}, perl_modules=True)
+    assert toolchain.tinytex_missing_tools() == []
+
+    _linux_tools(monkeypatch, set(), perl_modules=True)
+    assert toolchain.tinytex_missing_tools() == ["Perl", "xz", "curl"]
+
+
+def test_tinytex_needs_nothing_extra_off_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    for platform in ("win32", "darwin"):
+        monkeypatch.setattr(toolchain, "sys", SimpleNamespace(platform=platform))
+        monkeypatch.setattr(proc, "which", lambda name: pytest.fail("nothing to look for"))
+        assert toolchain.tinytex_missing_tools() == []
+
+
+def test_install_tinytex_says_what_to_install_before_downloading_anything(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # It used to download and run the installer, which stopped with "perl is
+    # required but not found", and the fix it showed was the command the
+    # user had just run.
+    monkeypatch.setattr(toolchain, "tinytex_root", lambda: tmp_path / "TinyTeX")
+    _linux_tools(monkeypatch, {"perl", "curl"}, perl_modules=False)
+    session = serve_bytes(b"echo installer")
+
+    check = toolchain.install_tinytex(settings=_load_settings(), session=session)
+
+    assert check.status == "fail"
+    assert "Perl" in check.detail and "xz" in check.detail
+    assert "minimal Perl" in check.detail
+    assert check.fix is not None
+    assert "sudo apt install perl xz-utils" in check.fix
+    assert "sudo dnf install perl xz" in check.fix
+    assert "edmars setup pdf" in check.fix
+    assert session.calls == []  # nothing downloaded
+    assert not (tmp_path / "TinyTeX").exists()
