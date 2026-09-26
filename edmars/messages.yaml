@@ -247,14 +247,29 @@ failures:
       Resume to try again; the prepared data is kept. The last error is in
       console.log in the study folder.
     command: "edmars resume {run}"
+  # {checks}: what the checks found, in the words of pre_critic_checks
+  # below ("what"), or "a problem with these results (listed below)".
   PRE_CRITIC_ABORT:
     title: "Automatic checks stopped the study"
     why: >-
-      Built-in checks that run before the methods review found a problem
-      a revision cannot fix, so writing a paper from these results would
-      mislead.
+      Built-in checks that run before the methods review found {checks},
+      so a paper written from these results would mislead.
     # Used when the check is not in pre_critic_checks below.
     fix: "Read what the checks found, then start a new study that avoids it."
+    command: "edmars new"
+  # A finding the study sent back for revision was still there when its
+  # revision rounds ran out; no paper is written, and a resume would find
+  # no rounds left (the count is restored from the checkpoint).
+  PRE_CRITIC_UNRESOLVED:
+    title: "Automatic checks stopped the study after its revisions"
+    why: >-
+      Built-in checks that run before the methods review found {checks}.
+      The study sent the work back to be fixed and used all its revision
+      rounds, but the problem was still there, so no paper was written.
+    # Used when the check is not in pre_critic_checks below.
+    fix: >-
+      Resuming would not help, because no revision rounds are left. Read
+      what the checks found, then start a new study that avoids it.
     command: "edmars new"
   CRITIC_ABORT:
     title: "The internal reviewer stopped the study"
@@ -390,24 +405,30 @@ failures:
 
 # Advice for the automatic pre-review checks (src/pre_critic_checks.py)
 # that stop a study: the result screen shows the check's own sentence,
-# then this. Only critical checks stop a study.
+# then "fix". "what" is what the check found, as it fills {checks} in the
+# PRE_CRITIC_ABORT and PRE_CRITIC_UNRESOLVED "why" ("found ... , so").
+# Only critical checks stop a study.
 pre_critic_checks:
   pcc_01:
+    what: "the outcome among the predictors (data leakage)"
     fix: >-
       The outcome itself ended up among the predictors (data leakage), so
       no result of this run can be trusted. Start a new study; if the same
       question stops this way again, run `edmars doctor --bundle` and
       report it.
   pcc_02:
+    what: "no trained model in the results"
     fix: >-
       The analysis produced no trained models at all. This is usually a
       one-off failure of the AI-written analysis code, so starting the
       same study again is reasonable.
   pcc_06:
+    what: "prepared data that failed its own checks"
     fix: >-
       The prepared data did not pass its own checks. Start a new study with
       fewer variables, or an outcome that more students answered.
   pcc_07:
+    what: "a test the question promises missing from the analysis"
     fix: >-
       The question the study worked from promised a comparison (or another
       test) that the analysis did not run, and a paper would have claimed

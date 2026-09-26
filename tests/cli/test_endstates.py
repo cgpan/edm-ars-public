@@ -101,6 +101,12 @@ def test_fill_leaves_unknown_placeholders() -> None:
         ("ANALYZING failed: something odd", "ANALYSIS_FAILED"),
         ("openai.APIConnectionError: Connection error.", "NETWORK"),
         ("Critic issued ABORT verdict: {...}", "CRITIC_ABORT"),
+        ("Pre-Critic guard found critical failures → short-circuit verdict: ABORT", "PRE_CRITIC_ABORT"),
+        # fix/pcc-revise's last-cycle stop also logs the short-circuit line.
+        ("Pre-Critic guard found critical failures → short-circuit verdict: ABORT\n"
+         "Pre-Critic guard stopped the run [PRE_CRITIC_UNRESOLVED]: pcc_07 was still failing",
+         "PRE_CRITIC_UNRESOLVED"),
+        ("pcc_07 was still failing when the revision cycles ran out (2 of 2 used): x", "PRE_CRITIC_UNRESOLVED"),
         ('{"code": "NO_CREDIT", "message": "x"}', "NO_CREDIT"),
         ("Error in library(mirt) : there is no package called 'mirt'", "R_PACKAGES_MISSING"),
         ("nothing recognisable here", None),
@@ -497,7 +503,9 @@ WORKED_Q = ("Do ninth-grade non-cognitive factors predict college enrollment by 
             "ABOVE AND BEYOND academic achievement and socioeconomic status?")
 
 
-def _pre_critic_run(run_home: Path, *, resumable: bool = False, second: bool = True) -> Path:
+def _pre_critic_run(run_home: Path, *, resumable: bool = False, second: bool = True,
+                    code: str = "PRE_CRITIC_ABORT", message: str = PCC_07,
+                    status: bool = True) -> Path:
     issues = [{"severity": "critical", "category": "pcc_07", "description": PCC_07.split(": ", 1)[1],
                "recommendation": "x", "target_agent": "Analyst"}]
     if second:
@@ -508,11 +516,15 @@ def _pre_critic_run(run_home: Path, *, resumable: bool = False, second: bool = T
                    "recommendation": "x", "target_agent": "Analyst"})
     report = {"overall_verdict": "ABORT", "overall_quality_score": 1, "_source": "pre_critic_short_circuit",
               "analysis_review": {"score": 1, "issues": issues}}
-    return make_run(run_home, pdf=False, question=USER_Q,
-                    status=v2_status("ABORTED", released=False, reason_code="ABORTED",
-                                     abort={"stage": "CRITIQUING", "code": "PRE_CRITIC_ABORT",
-                                            "message": PCC_07, "resumable": resumable}),
-                    checkpoint={"current_state": "ABORTED", "review_report": report},
+    run_status = v2_status("ABORTED", released=False, reason_code="ABORTED",
+                           abort={"stage": "CRITIQUING", "code": code,
+                                  "message": message, "resumable": resumable})
+    log = log_lines((9, "Pre-Critic guard found critical failures → short-circuit verdict: ABORT"),
+                    (9, f"Pre-Critic guard stopped the run [{code}]: {message}"))
+    return make_run(run_home, pdf=False, question=USER_Q, log=log,
+                    status=run_status if status else None,
+                    checkpoint={"current_state": "ABORTED", "review_report": report,
+                                "errors": [f"Pre-Critic guard: {code} with 2 of 2 revision cycles used"]},
                     extra={"research_spec.json": json.dumps({"research_question": WORKED_Q})})
 
 
@@ -532,6 +544,60 @@ def test_a_pre_critic_abort_says_what_the_checks_found_and_advice_that_fits(run_
     assert out.fix.startswith("The question the study worked from promised a comparison")
     assert "no trained models" in out.fix  # pcc_02's advice too
     assert out.command == "edmars new"
+
+
+def test_a_pre_critic_abort_says_what_was_found_in_its_why(run_home: Path) -> None:
+    # The "why" claimed "a problem a revision cannot fix" for every check,
+    # although pcc_07 is one a revision can fix (fix/pcc-revise sends it
+    # back to the Analyst). It now names what the checks found.
+    out = classify(_pre_critic_run(run_home))
+    assert out.why == ("Built-in checks that run before the methods review found a test the question "
+                       "promises missing from the analysis and no trained model in the results, so a "
+                       "paper written from these results would mislead.")
+    assert "cannot fix" not in out.why and "{" not in out.why
+    only_07 = classify(_pre_critic_run(run_home / "b", second=False))
+    assert "found a test the question promises missing from the analysis, so" in only_07.why
+
+
+def test_an_unknown_check_is_pointed_to_not_invented(run_home: Path) -> None:
+    run = _pre_critic_run(run_home, second=False, message="pcc_99: something new")
+    review = json.loads((run / "checkpoint.json").read_text(encoding="utf-8"))
+    review["review_report"]["analysis_review"]["issues"][0]["category"] = "pcc_99"
+    (run / "checkpoint.json").write_text(json.dumps(review), encoding="utf-8")
+    out = classify(run)
+    assert "found a problem with these results (listed below)" in out.why
+    assert out.fix == "Read what the checks found, then start a new study that avoids it."
+
+
+UNRESOLVED = ("pcc_07 was still failing when the revision cycles ran out (2 of 2 used): "
+              + PCC_07.split(": ", 1)[1])
+
+
+def test_a_finding_still_failing_after_the_revisions_is_not_resumable(run_home: Path) -> None:
+    # fix/pcc-revise: pcc_07 goes back to the Analyst; when the revision
+    # rounds run out it stops as PRE_CRITIC_UNRESOLVED, with no paper.
+    # Without an entry the CLI fell back to UNKNOWN: "Resume once".
+    out = classify(_pre_critic_run(run_home, code="PRE_CRITIC_UNRESOLVED", message=UNRESOLVED,
+                                   second=False))
+    assert out.code == "PRE_CRITIC_UNRESOLVED" and out.resumable is False
+    assert out.title == "Automatic checks stopped the study after its revisions"
+    assert "a test the question promises missing from the analysis." in out.why
+    assert "used all its revision rounds" in out.why and "no paper was written" in out.why
+    assert out.details_heading == "What the automatic checks found:"
+    assert out.details == [PCC_07.split(": ", 1)[1]]  # without the "pcc_07 was still failing" lead
+    assert out.fix.startswith("Resuming would not help, because no revision rounds are left. "
+                              "The question the study worked from promised")
+    assert out.command == "edmars new"
+    assert out.note == f'The study worded your question as: "{WORKED_Q}"'
+
+
+def test_an_unresolved_stop_read_from_the_log_alone_is_not_resumable(run_home: Path) -> None:
+    # No run_status.json: the code comes from checkpoint errors and
+    # pipeline.log, and resumability from _NOT_RESUMABLE.
+    out = classify(_pre_critic_run(run_home, code="PRE_CRITIC_UNRESOLVED", message=UNRESOLVED,
+                                   second=False, status=False))
+    assert out.code == "PRE_CRITIC_UNRESOLVED"
+    assert out.resumable is False and out.command == "edmars new"
 
 
 def test_a_pre_critic_abort_the_pipeline_calls_resumable_says_resume(run_home: Path) -> None:

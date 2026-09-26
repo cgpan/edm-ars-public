@@ -149,6 +149,9 @@ _PIPELINE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("SAMPLE_TOO_SMALL", re.compile(r"analytic_n=\d+ < 1000")),
     ("DATA_CONTRACT_FAILED", re.compile(r"causal data contract", re.I)),
     ("DE_VALIDATION_FAILED", re.compile(r"validation_passed=False")),
+    # Before PRE_CRITIC_ABORT: such a run also logs "short-circuit verdict: ABORT".
+    ("PRE_CRITIC_UNRESOLVED", re.compile(
+        r"PRE_CRITIC_UNRESOLVED|still failing when the revision cycles ran out")),
     ("PRE_CRITIC_ABORT", re.compile(r"Pre-Critic guard issued ABORT|short-circuit verdict: ABORT")),
     ("CRITIC_ABORT", re.compile(r"Critic issued ABORT verdict|Critic verdict: ABORT")),
 ]
@@ -475,8 +478,11 @@ def _ctx(run_dir: Path, state: RunState, **extra: Any) -> dict[str, Any]:
 #: Codes a resume cannot fix: the question or the data must change.
 #: Mirrors ``resumable: False`` in src/errors.py, plus the CLI-only
 #: LEAKAGE_SUSPECTED; kept here so the CLI works without importing the
-#: pipeline package.
-_NOT_RESUMABLE = frozenset({"SAMPLE_TOO_SMALL", "PRE_CRITIC_ABORT", "CRITIC_ABORT", "LEAKAGE_SUSPECTED"})
+#: pipeline package. PRE_CRITIC_UNRESOLVED (a revisable pre-review finding
+#: still failing when the revision rounds ran out) is here before the
+#: pipeline has it, so a log-only reading never tells the user to resume.
+_NOT_RESUMABLE = frozenset({"SAMPLE_TOO_SMALL", "PRE_CRITIC_ABORT", "PRE_CRITIC_UNRESOLVED",
+                            "CRITIC_ABORT", "LEAKAGE_SUSPECTED"})
 
 
 def _resumable(code: str, status: dict[str, Any] | None) -> bool:
@@ -502,9 +508,14 @@ def step_words(stage: str | None) -> str | None:
 
 #: Abort codes whose message is a check's or the reviewer's finding, worth
 #: showing in full on the result screen.
-_REVIEW_ABORTS = frozenset({"PRE_CRITIC_ABORT", "CRITIC_ABORT", "LEAKAGE_SUSPECTED"})
+_REVIEW_ABORTS = frozenset({"PRE_CRITIC_ABORT", "PRE_CRITIC_UNRESOLVED", "CRITIC_ABORT", "LEAKAGE_SUSPECTED"})
 
-_CHECK_MESSAGE = re.compile(r"^(pcc_[a-z0-9]+):\s*(.+)$", re.DOTALL)
+#: The stops the automatic pre-review checks make (src/pre_critic_checks.py).
+_PRE_CRITIC_CODES = frozenset({"PRE_CRITIC_ABORT", "PRE_CRITIC_UNRESOLVED"})
+
+#: "pcc_07: <sentence>", or "pcc_07 was still failing when the revision
+#: cycles ran out (2 of 2 used): <sentence>" for PRE_CRITIC_UNRESOLVED.
+_CHECK_MESSAGE = re.compile(r"^(pcc_[a-z0-9]+)\b[^:]*:\s*(.+)$", re.DOTALL)
 _REVIEW_SECTIONS = ("problem_formulation_review", "data_preparation_review",
                     "analysis_review", "substantive_review")
 
@@ -549,7 +560,7 @@ def review_findings(run_dir: Path | str, code: str, message: str) -> tuple[list[
     review = _latest_review(Path(run_dir))
     if review is not None:
         automatic = review.get("_source") == "pre_critic_short_circuit"
-        if automatic == (code == "PRE_CRITIC_ABORT"):
+        if automatic == (code in _PRE_CRITIC_CODES):
             for section in _REVIEW_SECTIONS:
                 block = review.get(section)
                 for issue in (block.get("issues") or []) if isinstance(block, dict) else []:
@@ -572,19 +583,39 @@ def _reworded_question(run_dir: Path, state: RunState) -> str | None:
     return None
 
 
+def checks_in_words(ids: list[str]) -> str:
+    """What the automatic checks found, for ``{checks}`` in the
+    PRE_CRITIC_* "why": each check's ``what`` from messages.yaml, joined
+    ("the outcome among the predictors (data leakage) and no trained model
+    in the results"), or a pointer to the list for an unknown check."""
+    advice = messages().get("pre_critic_checks") or {}
+    whats = [str(advice[i]["what"]) for i in ids
+             if isinstance(advice, dict) and isinstance(advice.get(i), dict) and advice[i].get("what")]
+    if not whats:
+        return "a problem with these results (listed below)"
+    return whats[0] if len(whats) == 1 else ", ".join(whats[:-1]) + " and " + whats[-1]
+
+
 def _review_abort_advice(run_dir: Path, state: RunState, code: str, message: str,
                          entry: dict[str, str], ctx: dict[str, Any], resumable: bool,
                          ) -> tuple[list[str], str, str, str, str | None]:
     """(details, heading, note, fix, command) for a study the automatic
     checks or the reviewer stopped: what they found, and advice that fits
-    the check instead of "start again with a simpler question"."""
+    the check instead of "start again with a simpler question".
+
+    For the automatic checks it also sets ``ctx["checks"]``, which the
+    "why" names."""
     ids, details = review_findings(run_dir, code, message)
-    heading = ("What the automatic checks found:" if code == "PRE_CRITIC_ABORT"
+    heading = ("What the automatic checks found:" if code in _PRE_CRITIC_CODES
                else "What the reviewer found:")
+    if code in _PRE_CRITIC_CODES:
+        ctx["checks"] = checks_in_words(ids)
     advice = messages().get("pre_critic_checks") or {}
     fixes = [str(advice[i]["fix"]) for i in ids
              if isinstance(advice, dict) and isinstance(advice.get(i), dict) and advice[i].get("fix")]
     fix = " ".join(" ".join(f.split()) for f in fixes) or fill(entry.get("fix"), **ctx)
+    if fixes and code == "PRE_CRITIC_UNRESOLVED":
+        fix = f"Resuming would not help, because no revision rounds are left. {fix}"
     command = fill(entry.get("command"), **ctx) or None
     note = ""
     if "pcc_07" in ids:
@@ -948,4 +979,5 @@ __all__ = [
     "step_words",
     "redact",
     "review_findings",
+    "checks_in_words",
 ]

@@ -815,6 +815,10 @@ _RE_VERIFY_BLOCKED = re.compile(r"^VERIFYING: release BLOCKED\s*" + _ARROW + r"\
 _RE_ABORTED = re.compile(r"^ABORTED: (.*)")
 _RE_VERDICT = re.compile(r"^Critic verdict: (PASS \(UNVERIFIED\)|PASS|REVISE|ABORT)\b(.*)")
 _RE_PRECRITIC = re.compile(r"^Pre-Critic guard found critical failures\s*" + _ARROW + r"\s*short-circuit verdict: (\w+)")
+#: fix/pcc-revise names the stop's code: "Pre-Critic guard stopped the run
+#: [PRE_CRITIC_UNRESOLVED]: pcc_07 was still failing ...", after the
+#: short-circuit line (which alone reads as PRE_CRITIC_ABORT).
+_RE_PRECRITIC_STOP = re.compile(r"^Pre-Critic guard stopped the run \[([A-Z_]+)\]:\s*(.*)")
 _RE_COST = re.compile(r"^Run cost: (?:\$([\d.]+)|not priced) over (\d+) LLM calls")
 _RE_RESUMED = re.compile(r"^Resumed from checkpoint \(state=(?:PipelineState\.)?(\w+)\)")
 _RE_GATE = re.compile(r"^LSAR review gate: passed=(\w+), cycles=(\d+), score=([\d.]+)")
@@ -873,6 +877,13 @@ def parse_log_line(line: str) -> list[dict[str, Any]]:
         return [
             make("error", message=mm.group(1)),
             make("run.end", state="ABORTED", message=mm.group(1)),
+        ]
+    mm = _RE_PRECRITIC_STOP.match(msg)
+    if mm:
+        return [
+            make("error", stage="CRITIQUING", code=mm.group(1), message=mm.group(2)),
+            make("run.end", state="ABORTED",
+                 abort={"code": mm.group(1), "stage": "CRITIQUING", "message": mm.group(2)}),
         ]
     mm = _RE_PRECRITIC.match(msg)
     if mm:
