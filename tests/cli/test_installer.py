@@ -857,7 +857,11 @@ def test_install_step5_links_nothing_for_other_failures_or_systems(tmp_path: Pat
     assert not lay.link.exists()
 
 
-@pytest.mark.skipif(SH is None, reason="sh is not installed")
+# Not on Windows: the stand-in uname is found first under a local Git Bash
+# but not on the GitHub windows-2022 runner, whose sh reports MINGW from the
+# real uname. The Ubuntu tests job runs this, and the macos-14 installer job
+# exercises the real Mac path end to end.
+@pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh whose PATH lookup honours the stand-in uname")
 def test_install_sh_plans_a_mac_install_into_application_support(tmp_path: Path) -> None:
     # Stand-in uname and sysctl make install.sh see an Apple Silicon Mac.
     # The macOS default folder has a space in it, and the plan must say
