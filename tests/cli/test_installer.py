@@ -615,35 +615,6 @@ def test_install_sh_plan_does_not_promise_a_path_change_when_the_folder_is_on_pa
     assert list(home.iterdir()) == []
 
 
-@pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")
-def test_install_sh_refuses_bad_input_before_changing_anything(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    result = _run_sh(tmp_path, "--bogus", HOME=str(home))
-    assert result.returncode == 1
-    assert "unknown option '--bogus'" in result.stderr
-
-    result = _run_sh(tmp_path, "--help", HOME=str(home))
-    assert result.returncode == 0 and "--from-local" in result.stdout
-
-    # No terminal and no --yes: stop and say how, instead of hanging.
-    result = _run_sh(tmp_path, "--from-local", str(REPO_ROOT), "--dir", str(tmp_path / "b"),
-                     HOME=str(home))
-    if "not supported" not in result.stderr:
-        assert result.returncode == 1
-        assert "--yes" in result.stderr
-        assert not (tmp_path / "b").exists()
-
-    # The default folder inside a sync service is refused unless --dir is given.
-    synced_home = tmp_path / "Dropbox" / "home"
-    synced_home.mkdir(parents=True)
-    result = _run_sh(tmp_path, "--yes", "--from-local", str(REPO_ROOT), HOME=str(synced_home))
-    if "not supported" not in result.stderr:
-        assert result.returncode == 1
-        assert "Dropbox" in result.stderr
-        assert list(synced_home.iterdir()) == []
-
-
 # --- macOS: an OpenMP library for XGBoost without Homebrew ------------------------------
 #
 # XGBoost's macOS wheel needs @rpath/libomp.dylib and finds it only in
@@ -884,3 +855,32 @@ def test_install_step5_links_nothing_for_other_failures_or_systems(tmp_path: Pat
     assert result.returncode == 1
     assert "do not load" in result.stderr and "brew" not in result.stderr
     assert not lay.link.exists()
+
+
+@pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")
+def test_install_sh_refuses_bad_input_before_changing_anything(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    result = _run_sh(tmp_path, "--bogus", HOME=str(home))
+    assert result.returncode == 1
+    assert "unknown option '--bogus'" in result.stderr
+
+    result = _run_sh(tmp_path, "--help", HOME=str(home))
+    assert result.returncode == 0 and "--from-local" in result.stdout
+
+    # No terminal and no --yes: stop and say how, instead of hanging.
+    result = _run_sh(tmp_path, "--from-local", str(REPO_ROOT), "--dir", str(tmp_path / "b"),
+                     HOME=str(home))
+    if "not supported" not in result.stderr:
+        assert result.returncode == 1
+        assert "--yes" in result.stderr
+        assert not (tmp_path / "b").exists()
+
+    # The default folder inside a sync service is refused unless --dir is given.
+    synced_home = tmp_path / "Dropbox" / "home"
+    synced_home.mkdir(parents=True)
+    result = _run_sh(tmp_path, "--yes", "--from-local", str(REPO_ROOT), HOME=str(synced_home))
+    if "not supported" not in result.stderr:
+        assert result.returncode == 1
+        assert "Dropbox" in result.stderr
+        assert list(synced_home.iterdir()) == []

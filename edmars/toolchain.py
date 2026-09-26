@@ -698,6 +698,7 @@ def install_tinytex(
     ``latex.pdflatex`` are saved.
     """
     title = "TinyTeX"
+    path_note = ""
 
     def step(text: str) -> None:
         if on_step is not None:
@@ -706,7 +707,6 @@ def install_tinytex(
             except Exception:  # noqa: BLE001 - a status line is not fatal
                 pass
 
-    path_note = ""
     tlmgr = find_tlmgr()
     if not tlmgr:
         key = "windows" if os.name == "nt" else "unix"

@@ -501,19 +501,6 @@ def test_install_tinytex_runs_the_installer_without_a_terminal_and_says_where_it
     assert "not added to your PATH" in check.detail and str(bin_dir) in check.detail
 
 
-def test_tools_never_receive_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "not-for-r")
-    seen: list[dict[str, str]] = []
-
-    def run(args: list[str], **kwargs: Any) -> Any:
-        seen.append(kwargs["env"])
-        return completed(args, 0, "R_VERSION 4.5.1 \n")
-
-    monkeypatch.setattr(proc, "run", run)
-    toolchain.probe_r("Rscript")
-    assert seen and "DEEPSEEK_API_KEY" not in seen[0] and "PATH" in {k.upper() for k in seen[0]}
-
-
 # ---------------------------------------------------------------------------
 # XGBoost and its OpenMP library (what `edmars doctor` reports)
 # ---------------------------------------------------------------------------
@@ -604,3 +591,16 @@ def test_xgboost_probe_runs_for_real_in_this_python() -> None:
     [check] = toolchain.xgboost_checks()
     assert check.status in ("ok", "warn"), check.detail
     assert check.detail.startswith("XGBoost ")
+
+
+def test_tools_never_receive_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "not-for-r")
+    seen: list[dict[str, str]] = []
+
+    def run(args: list[str], **kwargs: Any) -> Any:
+        seen.append(kwargs["env"])
+        return completed(args, 0, "R_VERSION 4.5.1 \n")
+
+    monkeypatch.setattr(proc, "run", run)
+    toolchain.probe_r("Rscript")
+    assert seen and "DEEPSEEK_API_KEY" not in seen[0] and "PATH" in {k.upper() for k in seen[0]}

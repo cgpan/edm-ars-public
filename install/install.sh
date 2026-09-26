@@ -30,10 +30,7 @@
 # rights are needed and nothing system-wide changes. What goes where:
 #   <dir>/app/<version>     EDM-ARS itself (the previous version is kept)
 #   <dir>/venv-<version>    its private Python packages
-#   <dir>/python            a private Python 3.11 (your own Python is untouched;
-#                           on a Mac without Homebrew's libomp, its lib/ also
-#                           gets a link to scikit-learn's OpenMP library for
-#                           XGBoost, see link_openmp below)
+#   <dir>/python            a private Python 3.11 (your own Python is untouched)
 #   <dir>/uv                the uv tool, only if you do not have it already
 #   ~/.local/bin/edmars     the command you type
 # Default <dir>: ~/Library/Application Support/edm-ars (macOS) or
@@ -42,6 +39,8 @@
 # program files it lists (app, venv-*, python, uv in <dir>), the command
 # and the PATH block this script added. Not all of <dir>: your data folder
 # is the same folder. <dir>/install.json lists everything it created.
+# On a Mac without Homebrew's libomp, <dir>/python also gets a link to
+# scikit-learn's OpenMP library for XGBoost (see link_openmp below).
 #
 # The whole script runs from main() at the very end, so a download that
 # is cut off halfway cannot run half an installer.
