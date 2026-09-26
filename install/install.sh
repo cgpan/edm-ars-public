@@ -602,6 +602,16 @@ main() {
     PATH_FILE=$(path_setup_file "$BIN_DIR") || PATH_FILE=""
     if [ -n "$PATH_FILE" ] && [ "$BIN_ON_PATH" = 1 ]; then PATH_READY=1; else PATH_READY=0; fi
     PATH_TARGETS=$(path_block_targets)
+    # Disk use right after an install, without uv's download cache: 715 MB
+    # on an Apple Silicon Mac, about 2.0 GB on Linux x86_64, where XGBoost
+    # brings NVIDIA's NCCL library, and about 950 MB on Windows. Linux on
+    # arm64 has no NCCL wheel but has not been measured.
+    case "$PLATFORM" in
+        "macOS (Apple Silicon)") PKG_SIZE="about 0.7 GB" ;;
+        "Linux (x86_64)") PKG_SIZE="about 2 GB" ;;
+        *) PKG_SIZE="about 1-2 GB" ;;
+    esac
+    if [ -z "$UV" ]; then PKG_SIZE="$PKG_SIZE, plus uv's download cache"; fi
     PATH_TARGETS_TEXT=$(printf '%s' "$PATH_TARGETS" | sed -e 's|^|~/|' -e 's| |, ~/|g')
     say ""
     say "EDM-ARS installer"
@@ -630,7 +640,7 @@ main() {
     else
         say "  4. Download EDM-ARS from GitHub and check its SHA-256 fingerprint."
     fi
-    say "  5. Install EDM-ARS and the packages it needs (about 1.5 GB)."
+    say "  5. Install EDM-ARS and the packages it needs ($PKG_SIZE)."
     if [ "$OS" = "Darwin" ]; then
         say "     If XGBoost then finds no OpenMP library (Homebrew's libomp), link the"
         say "     one that comes with scikit-learn into the private Python for it. Either"

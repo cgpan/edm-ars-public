@@ -1,6 +1,6 @@
 """install/install.sh and install/install.ps1, offline.
 
-A real install downloads uv, Python and ~1.5 GB of packages, so it runs in
+A real install downloads uv, Python and 0.7-2 GB of packages, so it runs in
 CI (.github/workflows/ci.yml, job `installer`), not here. These tests pin
 what can be checked without the network: the scripts parse, agree with
 each other and with install/README.md, never `exit` a PowerShell session,
@@ -367,6 +367,7 @@ def test_ps1_dry_run_changes_nothing(tmp_path: Path) -> None:
     assert "Dry run: nothing was downloaded or changed." in result.stdout
     assert "This will:" in result.stdout
     assert f"  7. Add {bin_dir} to your user PATH" in result.stdout
+    assert "  5. Install EDM-ARS and the packages it needs (about 1 GB" in result.stdout  # 950 MB measured
     assert not base.exists() and not bin_dir.exists()
     # GNU spellings are the same options.
     result = _run_ps1(tmp_path, "--dry-run", f"--dir={base}", "--bin-dir", str(bin_dir),
@@ -994,8 +995,34 @@ def test_install_sh_plans_a_mac_install_into_application_support(tmp_path: Path)
     assert "Computer:      macOS (Apple Silicon)" in out
     assert f"Install into:  {_sh_path(home)}/Library/Application Support/edm-ars\n" in out
     assert "link the\n     one that comes with scikit-learn into the private Python" in out
+    assert "packages it needs (about 0.7 GB" in out  # 715 MB measured on an M1 Pro
     assert "Dry run: nothing was downloaded or changed." in out
     assert list(home.iterdir()) == []
+
+
+@pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh whose PATH lookup honours the stand-in uname")
+@pytest.mark.parametrize("machine, size", [("x86_64", "about 2 GB"), ("aarch64", "about 1-2 GB")])
+def test_install_sh_plan_estimates_the_size_for_this_platform(tmp_path: Path, machine: str, size: str) -> None:
+    # The plan said "about 1.5 GB" everywhere; an install measured 715 MB on
+    # an Apple Silicon Mac and about 2.0 GB on Linux x86_64, where XGBoost
+    # brings NVIDIA's NCCL library. Linux on arm64 is not measured yet.
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    (fakebin / "uname").write_bytes(
+        f'#!/bin/sh\nif [ "${{1:-}}" = -m ]; then echo {machine}; else echo Linux; fi\n'.encode())
+    (fakebin / "uname").chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _clean_env(tmp_path, HOME=_sh_path(home))
+    env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
+    result = subprocess.run(
+        [SH, _sh_path(INSTALL_SH), "--dry-run", "--from-local", _sh_path(REPO_ROOT),
+         "--dir", _sh_path(tmp_path / "base"), "--bin-dir", _sh_path(tmp_path / "bin")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, env=env, stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"  5. Install EDM-ARS and the packages it needs ({size}" in result.stdout
 
 
 @pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")

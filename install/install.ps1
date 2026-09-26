@@ -578,7 +578,12 @@
         } else {
             Say '  4. Download EDM-ARS from GitHub and check its SHA-256 fingerprint.'
         }
-        Say '  5. Install EDM-ARS and the packages it needs (about 1.5 GB).'
+        # Disk use right after an install on Windows, without uv's download cache: about 950 MB.
+        if ($uv) {
+            Say '  5. Install EDM-ARS and the packages it needs (about 1 GB).'
+        } else {
+            Say "  5. Install EDM-ARS and the packages it needs (about 1 GB, plus uv's download cache)."
+        }
         Say "  6. Create the command $(Join-Path $bin 'edmars.cmd') (and $(Join-Path $bin 'edmars') for Git Bash)."
         Say (Get-PathPlanLine (Get-RawUserPath) $bin ([bool]$NoModifyPath))
         if ($NoOnboard) {
