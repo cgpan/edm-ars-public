@@ -10,7 +10,6 @@ naming the tool.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -161,7 +160,7 @@ def test_the_existing_keys_are_still_there(
         assert set(step) == {"cmd", "returncode", "stdout", "stderr"}
 
 
-@pytest.mark.skipif(shutil.which("pdflatex") is None, reason="pdflatex not installed")
+@pytest.mark.requires_tools("pdflatex", "bibtex")
 def test_real_fatal_abort_is_not_success(tmp_path: Path) -> None:
     """The reproduction from the verification: a missing \\input."""
     _tex(

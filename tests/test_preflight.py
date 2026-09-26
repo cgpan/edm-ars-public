@@ -262,6 +262,10 @@ def test_the_configured_rscript_path_is_used(
         raise rb.RBridgeError("not there")
 
     monkeypatch.setattr(rb, "find_rscript", _find)
+    # An operator's EDM_ARS_RSCRIPT outranks the config path, so with it
+    # set in the shell running pytest (the README's way to point at an R
+    # that is not on PATH) this test saw None instead of the config path.
+    monkeypatch.delenv("EDM_ARS_RSCRIPT", raising=False)
     config["r_bridge"] = {"rscript_path": "/opt/R/bin/Rscript"}
     check_run_prerequisites(config, "psychometrics", "hsls09_public", data_file, False)
     assert seen == ["/opt/R/bin/Rscript"]

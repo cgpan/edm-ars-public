@@ -10,7 +10,6 @@ generated Python and R already ran without the keys; LaTeX did not.
 """
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -98,7 +97,7 @@ def test_argv_keeps_the_mode_every_caller_relies_on() -> None:
     assert "-no-shell-escape" in argv
 
 
-@pytest.mark.skipif(shutil.which("pdflatex") is None, reason="pdflatex not installed")
+@pytest.mark.requires_tools("pdflatex", "bibtex")
 @pytest.mark.parametrize("var", ["FAKE_TEST_API_KEY", "EDMARS_PROBE_VALUE"])
 def test_a_real_compile_cannot_read_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, var: str

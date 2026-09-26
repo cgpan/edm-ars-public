@@ -173,12 +173,7 @@ class TestReconciliation:
 class TestStrippedCitationStillCompiles:
     """A stripped \\cite must leave compilable LaTeX, not a wrecked sentence."""
 
-    @pytest.mark.skipif(
-        subprocess.run(
-            ["pdflatex", "--version"], capture_output=True
-        ).returncode != 0,
-        reason="pdflatex not available",
-    )
+    @pytest.mark.requires_tools("pdflatex")
     def test_compiles_after_reconciliation(self, tmp_path: Path) -> None:
         papers = [_paper("real1", venue="Journal of Learning Analytics")]
         tex = (

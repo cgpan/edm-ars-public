@@ -631,8 +631,9 @@ mypy src/                                        # type check (not yet clean)
 ```
 
 The suite never makes a live API call — provider clients are faked in
-`tests/conftest.py`. Tests that need R and its packages are skipped when those
-are not installed.
+`tests/conftest.py`. Tests that need R and its packages, or a TeX distribution
+(`pdflatex`, `bibtex`), are skipped when those are not installed; `-rs` lists
+each skip with what was missing.
 
 ---
 
