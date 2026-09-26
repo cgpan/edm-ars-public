@@ -1092,9 +1092,16 @@ class _Wizard:
 
         where = getattr(secrets, "secrets_file", None)
         path = str(where()) if callable(where) else "a file in your EDM-ARS settings folder"
-        text = (f"This computer's credential store did not keep the key ({_doctor.redact(str(problem))}). "
-                f"EDM-ARS can keep it in {path} instead: a plain-text file that only your user account can "
-                "read. Anyone who can sign in as you, or a program you run, could read it.")
+        # The error's own message already offers the file; only its cause
+        # belongs in this sentence.
+        reason = str(getattr(problem, "reason", "") or "") or _doctor.redact(str(problem))
+        if reason == "NoKeyringError":
+            first = ("This computer has no credential store EDM-ARS can use (usual on Linux without "
+                     "a desktop session).")
+        else:
+            first = f"This computer's credential store did not keep the key ({reason})."
+        text = (f"{first} EDM-ARS can keep it in {path} instead: a plain-text file that only your user "
+                "account can read. Anyone who can sign in as you, or a program you run, could read it.")
         if self.ni:
             if _truthy(self.opt("allow_key_file", False)):
                 self.warn(text + " Using it because allow_key_file was given.")

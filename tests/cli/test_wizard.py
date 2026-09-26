@@ -735,9 +735,16 @@ def test_noninteractive_key_file_needs_the_option(fx: Fakes, monkeypatch: pytest
     from tests.cli.wizard_fakes import SecretStoreError
 
     monkeypatch.setenv("CI_DEEPSEEK", GOOD_KEY)
-    fx.secrets.fail_on_set = SecretStoreError("no credential store")
+    error = SecretStoreError("Could not save DEEPSEEK_API_KEY in this computer's credential store "
+                             "(NoKeyringError). EDM-ARS can keep it in a file readable only by your "
+                             "user account instead, if you agree to that.")
+    error.reason = "NoKeyringError"  # type: ignore[attr-defined]
+    fx.secrets.fail_on_set = error
     options = {"accept_disclosure": True, "key_env": "CI_DEEPSEEK"}
     assert run(non_interactive=True, options=options) == 1
+    # One explanation, not the error's own offer followed by the wizard's.
+    assert "no credential store EDM-ARS can use" in fx.ui.output
+    assert "if you agree to that" not in fx.ui.output
     assert "allow_key_file=yes" in fx.ui.output
     assert "DEEPSEEK_API_KEY" not in fx.secrets.store
     assert run(non_interactive=True, options={**options, "allow_key_file": True}) == 0

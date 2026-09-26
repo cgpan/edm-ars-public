@@ -94,7 +94,15 @@ _WARNED: set[str] = set()
 
 
 class SecretStoreError(RuntimeError):
-    """The credential store could not keep a key and no fallback was allowed."""
+    """The credential store could not keep a key and no fallback was allowed.
+
+    ``reason`` is the short cause (an error class name such as
+    ``NoKeyringError``), for callers that write their own sentence.
+    """
+
+    def __init__(self, message: str, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _keyring() -> Any:
@@ -344,7 +352,8 @@ def set_secret(name: str, value: str, *, allow_file: bool = False) -> str:
         raise SecretStoreError(
             f"Could not save {name} in this computer's credential store ({problem}). "
             "EDM-ARS can keep it in a file readable only by your user account instead, "
-            "if you agree to that."
+            "if you agree to that.",
+            reason=problem,
         )
     values = _file_read()
     values[name] = value

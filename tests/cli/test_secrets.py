@@ -106,6 +106,7 @@ def test_set_secret_without_consent_refuses_the_file(monkeypatch: pytest.MonkeyP
     with pytest.raises(secrets.SecretStoreError) as info:
         secrets.set_secret(NAME, KEYRING_VALUE)
     assert KEYRING_VALUE not in str(info.value)
+    assert info.value.reason and info.value.reason in str(info.value)
     assert not secrets.secrets_file().exists()
 
 
