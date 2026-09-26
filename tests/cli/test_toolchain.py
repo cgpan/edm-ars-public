@@ -637,7 +637,7 @@ def test_xgboost_without_an_openmp_library_fails_and_says_how_to_fix_it(
     assert check.status == "fail"
     assert "found no OpenMP library (Library not loaded: @rpath/libomp.dylib)" in check.detail
     assert "Run the EDM-ARS installer again" in check.fix and "brew install libomp" in check.fix
-    assert "install/README.md" in check.fix
+    assert _readme_named_in(check.fix)
 
 
 def test_two_openmp_libraries_in_one_process_are_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -646,6 +646,29 @@ def test_two_openmp_libraries_in_one_process_are_a_warning(monkeypatch: pytest.M
     [check] = toolchain.xgboost_checks()
     assert check.status == "warn"
     assert "OMP: Error #15" in check.detail and both[0] in check.detail and both[1] in check.detail
+    assert _readme_named_in(check.fix)
+
+
+def _readme_named_in(fix: str) -> bool:
+    """The fix names the installed README by its full path and the item in it.
+
+    "See install/README.md" left a Mac user looking for a file deep inside
+    ~/Library/Application Support.
+    """
+    from edmars import paths
+
+    readme = Path(paths.app_root()) / "install" / "README.md"
+    assert readme.is_file()
+    return (f"{readme}, section \"Troubleshooting\", item \"macOS: XGBoost and the OpenMP library\""
+            in fix)
+
+
+def test_the_readme_item_the_doctor_names_exists() -> None:
+    from edmars import paths
+
+    text = (Path(paths.app_root()) / "install" / "README.md").read_text(encoding="utf-8")
+    assert "\n## Troubleshooting\n" in text
+    assert "- **macOS: XGBoost and the OpenMP library.**" in text
 
 
 def test_xgboost_probe_failures_are_reported_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:

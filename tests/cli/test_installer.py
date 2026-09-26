@@ -702,7 +702,7 @@ _FAKE_ENV_PYTHON = b"""#!/bin/sh
 case "$2" in
     *find_spec*) printf '%s\\n' "$FAKE_SKLEARN_OMP" "$FAKE_PYTHON_HOME" ;;
     'import numpy'*)
-        if [ -e "$FAKE_PYTHON_HOME/lib/libomp.dylib" ]; then exit 0; fi
+        if [ -e "$FAKE_PYTHON_HOME/lib/libomp.dylib" ] || [ -n "${FAKE_HOMEBREW_LIBOMP:-}" ]; then exit 0; fi
         echo "$FAKE_IMPORT_ERROR" >&2
         exit 1
         ;;
@@ -712,10 +712,12 @@ esac
 
 _FAKE_CHECK_OPENMP = """
 check_openmp() {
+    echo checked >>"${FAKE_CHECK_LOG:-/dev/null}"
     if [ "${FAKE_CHECK:-}" = fail ]; then
-        echo "expected one OpenMP library, found 2" >&2
+        echo "expected one OpenMP library, found 2: /opt/homebrew/opt/libomp/lib/libomp.dylib, $FAKE_SKLEARN_OMP" >&2
         return 1
     fi
+    if [ "${FAKE_CHECK:-}" = pass ]; then return 0; fi
     [ "$FAKE_PYTHON_HOME/lib/libomp.dylib" -ef "$FAKE_SKLEARN_OMP" ]
 }
 """
@@ -867,9 +869,10 @@ def _run_step5(lay: _OmpLayout, os_name: str = "Darwin", **env: str) -> subproce
     body = (
         "set -eu\n"
         "say() { printf '%s\\n' \"$*\"; }\n"
+        "warn() { printf '  ! %s\\n' \"$*\"; }\n"
         "die() { printf 'DIE: %s\\n' \"$*\" >&2; exit 1; }\n"
         + _sh_function("link_openmp") + _sh_function("provide_openmp") + _FAKE_CHECK_OPENMP
-        + 'OS=$1\nVENV_PY=$2\nAPP_BASE=$3\nTMP_DIR=$4\n'
+        + 'OS=$1\nVENV_PY=$2\nAPP_BASE=$3\nTMP_DIR=$4\nAPP_DIR="$APP_BASE/app/0.1.0"\n'
         + _step5_check()
         + "printf 'OMP_LINK=%s\\n' \"$OMP_LINK\"\n"
     )
@@ -914,6 +917,33 @@ def test_install_step5_falls_back_to_homebrew_advice_and_leaves_no_link(tmp_path
 
 
 @pytest.mark.skipif(SH is None, reason="sh is not installed")
+@pytest.mark.parametrize("runtimes", [1, 2])
+def test_install_step5_counts_the_openmp_libraries_when_homebrews_libomp_is_there(
+    tmp_path: Path, runtimes: int
+) -> None:
+    # The owner's Mac had Homebrew's libomp: `import xgboost` worked, no
+    # link was made, and nothing counted the OpenMP copies, although XGBoost
+    # loaded Homebrew's and scikit-learn its own. The same one-library check
+    # now runs; two copies are a note (the study there ran fine), not a stop.
+    lay = _OmpLayout(tmp_path)
+    log = tmp_path / "checks.log"
+    result = _run_step5(lay, FAKE_HOMEBREW_LIBOMP="1", FAKE_CHECK="pass" if runtimes == 1 else "fail",
+                        FAKE_CHECK_LOG=_sh_path(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert log.read_text(encoding="utf-8").split() == ["checked"]
+    assert "OMP_LINK=" in result.stdout.splitlines() and not lay.link.exists()
+    note = "XGBoost and scikit-learn load two different OpenMP libraries (found 2: /opt/homebrew/opt/libomp"
+    readme = f"{_sh_path(lay.base)}/app/0.1.0/install/README.md,"
+    if runtimes == 1:
+        assert "OpenMP" not in result.stdout
+    else:
+        assert "  ! " + note in result.stdout
+        assert readme in result.stdout
+        assert 'item "macOS: XGBoost and the OpenMP library"' in result.stdout
+    assert "DIE" not in result.stderr
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
 def test_install_step5_links_nothing_for_other_failures_or_systems(tmp_path: Path) -> None:
     lay = _OmpLayout(tmp_path)
     result = _run_step5(lay, FAKE_IMPORT_ERROR="ModuleNotFoundError: No module named 'fitz'")
@@ -925,6 +955,12 @@ def test_install_step5_links_nothing_for_other_failures_or_systems(tmp_path: Pat
     assert result.returncode == 1
     assert "do not load" in result.stderr and "brew" not in result.stderr
     assert not lay.link.exists()
+
+    # Linux has no dyld to ask: the OpenMP check is macOS-only.
+    log = tmp_path / "checks.log"
+    result = _run_step5(lay, os_name="Linux", FAKE_HOMEBREW_LIBOMP="1", FAKE_CHECK_LOG=_sh_path(log))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not log.exists()
 
 
 # Not on Windows: the stand-in uname is found first under a local Git Bash

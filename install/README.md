@@ -203,6 +203,15 @@ Nothing is sent except ordinary download requests. EDM-ARS has no telemetry.
     install [Homebrew](https://brew.sh), run `brew install libomp`, then run
     the installer again. XGBoost then uses Homebrew's copy while
     scikit-learn keeps its own; `edmars doctor` warns about such a pair.
+  - *If the installer or `edmars doctor` says two OpenMP libraries load*
+    (a Mac that already has Homebrew's libomp): XGBoost uses Homebrew's
+    copy, scikit-learn its own, and the installer links nothing. Studies
+    usually run fine like this; a study on such a Mac trained XGBoost and
+    scikit-learn models together without an error. If a study stops with
+    "OMP: Error #15", resume it with `edmars resume`. If it stops again,
+    remove Homebrew's copy with `brew uninstall libomp` (Homebrew refuses
+    when another program you installed needs it) and run the installer
+    again, which then links scikit-learn's copy.
   - *To undo it,* delete that `libomp.dylib` link; it also goes when you
     delete `<dir>/python`.
 - **Behind a proxy** — set `HTTPS_PROXY` before running the installer. uv

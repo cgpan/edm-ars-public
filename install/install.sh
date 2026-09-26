@@ -633,7 +633,8 @@ main() {
     say "  5. Install EDM-ARS and the packages it needs (about 1.5 GB)."
     if [ "$OS" = "Darwin" ]; then
         say "     If XGBoost then finds no OpenMP library (Homebrew's libomp), link the"
-        say "     one that comes with scikit-learn into the private Python for it."
+        say "     one that comes with scikit-learn into the private Python for it. Either"
+        say "     way, check that XGBoost and scikit-learn load only one OpenMP library."
     fi
     say "  6. Create the command $BIN_DIR/edmars."
     if [ "$NO_MODIFY_PATH" = 1 ]; then
@@ -863,6 +864,22 @@ main() {
         else
             tail -n 5 "$TMP_DIR/import.err" >&2
             die "the packages were installed but do not load (see the lines above)."
+        fi
+    fi
+    if [ "$OS" = "Darwin" ] && [ -z "$OMP_LINK" ]; then
+        # XGBoost found an OpenMP library of its own, usually Homebrew's
+        # libomp, so no link was made and nothing has counted the copies
+        # yet. Two in one process can stop a study with "OMP: Error #15";
+        # studies usually run fine, so this is a note, not a failure.
+        if ! check_openmp "$VENV_PY" 2>"$TMP_DIR/openmp.err"; then
+            if grep -q "expected one OpenMP library" "$TMP_DIR/openmp.err"; then
+                warn "XGBoost and scikit-learn load two different OpenMP libraries ($(sed -n '$s/^expected one OpenMP library, //p' "$TMP_DIR/openmp.err"))."
+                say "    Studies usually run fine like this. If one stops with 'OMP: Error #15', see"
+                say "    $APP_DIR/install/README.md,"
+                say "    section \"Troubleshooting\", item \"macOS: XGBoost and the OpenMP library\"."
+            else
+                warn "Could not count the OpenMP libraries XGBoost and scikit-learn load: $(sed -n '$p' "$TMP_DIR/openmp.err")"
+            fi
         fi
     fi
 
