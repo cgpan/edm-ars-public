@@ -205,7 +205,7 @@ def _function_probe(calls: str) -> str:
         f"'{name}'"
         for name in ("Test-UnderPath", "Merge-UserPath", "ConvertTo-CmdPath",
                      "Get-SyncProvider", "Test-Excluded", "Get-Download",
-                     "Get-ShLauncherText")
+                     "Get-ShLauncherText", "Get-PathPlanLine")
     )
     return f"""
 $tokens = $null; $errors = $null
@@ -253,6 +253,25 @@ $out.bin = $bin
     assert out["empty"] == r"D:\tools\bin"
     assert out["trailing_semicolon"] == r"C:\a;D:\b"
     assert out["plain_string_kind"] == "C:\\a;" + out["bin"]
+
+
+@pytest.mark.skipif(not (ON_WINDOWS and POWERSHELL), reason="Windows PowerShell only")
+def test_ps1_plan_does_not_promise_a_path_change_when_the_folder_is_on_path(tmp_path: Path) -> None:
+    # The plan said "Add <bin> to your user PATH" even when step 7 then
+    # said "already on your user PATH". Both now decide with Merge-UserPath.
+    calls = r"""
+$bin = Join-Path $env:USERPROFILE '.local\bin'
+$out.absent = Get-PathPlanLine 'C:\tools' $bin $false
+$out.present = Get-PathPlanLine 'C:\tools;%USERPROFILE%\.local\bin\' $bin $false
+$out.no_modify = Get-PathPlanLine 'C:\tools' $bin $true
+$out.bin = $bin
+"""
+    result = _powershell(_function_probe(calls), tmp_path)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out["absent"] == f"  7. Add {out['bin']} to your user PATH (your account only)."
+    assert out["present"] == f"  7. Leave your PATH as it is: {out['bin']} is already on your user PATH."
+    assert out["no_modify"] == "  7. Leave your PATH alone (-NoModifyPath)."
 
 
 @pytest.mark.skipif(not (ON_WINDOWS and POWERSHELL), reason="Windows PowerShell only")
@@ -347,6 +366,7 @@ def test_ps1_dry_run_changes_nothing(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Dry run: nothing was downloaded or changed." in result.stdout
     assert "This will:" in result.stdout
+    assert f"  7. Add {bin_dir} to your user PATH" in result.stdout
     assert not base.exists() and not bin_dir.exists()
     # GNU spellings are the same options.
     result = _run_ps1(tmp_path, "--dry-run", f"--dir={base}", "--bin-dir", str(bin_dir),
@@ -440,9 +460,16 @@ def test_install_sh_parses(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck is not installed")
+#: requirements-dev.txt pins shellcheck-py to the shellcheck the CI lint step
+#: gets from Ubuntu 24.04 (0.9.0), so this test and that step agree. Its
+#: command sits next to the venv's python even when the venv is not active.
+SHELLCHECK = shutil.which("shellcheck") or shutil.which("shellcheck", path=str(Path(sys.executable).parent))
+
+
+@pytest.mark.skipif(SHELLCHECK is None, reason="shellcheck is not installed")
 def test_install_sh_passes_shellcheck() -> None:
-    result = subprocess.run(["shellcheck", "-s", "sh", str(INSTALL_SH)],
+    assert SHELLCHECK is not None
+    result = subprocess.run([SHELLCHECK, "-s", "sh", str(INSTALL_SH)],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout
 
@@ -556,6 +583,309 @@ def test_install_sh_makes_a_uv_found_through_a_relative_path_absolute(tmp_path: 
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"({_sh_path(fake_uv)}, version 0.10.6)" in result.stdout, result.stdout
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+@pytest.mark.parametrize("on_path", [True, False])
+def test_install_sh_plan_does_not_promise_a_path_change_when_the_folder_is_on_path(
+    tmp_path: Path, on_path: bool
+) -> None:
+    # The plan said "Add <bin> to your PATH" even when step 7 then said
+    # "already on your PATH"; it now decides the same way before the plan.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _clean_env(tmp_path, HOME=_sh_path(home))
+    if on_path:
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    result = subprocess.run(
+        [SH, _sh_path(INSTALL_SH), "--dry-run", "--from-local", _sh_path(REPO_ROOT),
+         "--dir", _sh_path(tmp_path / "base"), "--bin-dir", _sh_path(bin_dir)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, env=env, stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    already = f"  7. Leave your PATH as it is: {_sh_path(bin_dir)} is already on it."
+    add = f"  7. Add {_sh_path(bin_dir)} to your PATH"
+    if on_path:
+        assert already in result.stdout and add not in result.stdout
+    else:
+        assert add in result.stdout and already not in result.stdout
+    assert list(home.iterdir()) == []
+
+
+# --- macOS: an OpenMP library for XGBoost without Homebrew ------------------------------
+#
+# XGBoost's macOS wheel needs @rpath/libomp.dylib and finds it only in
+# Homebrew's folder or in <private Python>/lib; install.sh links
+# scikit-learn's bundled copy there (link_openmp). The real dyld check
+# (check_openmp) runs only on a Mac, in CI's macos-14 installer job; here
+# install.sh's own shell code runs against a fake layout, with a stand-in
+# python and a check_openmp that passes when the link resolves to
+# scikit-learn's file, which is what dyld needs to map it only once.
+
+_FAKE_ENV_PYTHON = b"""#!/bin/sh
+# Stand-in for the environment's python. It answers link_openmp's
+# question, and fails the package import the way dyld does while nothing
+# is at <python>/lib/libomp.dylib.
+case "$2" in
+    *find_spec*) printf '%s\\n' "$FAKE_SKLEARN_OMP" "$FAKE_PYTHON_HOME" ;;
+    'import numpy'*)
+        if [ -e "$FAKE_PYTHON_HOME/lib/libomp.dylib" ]; then exit 0; fi
+        echo "$FAKE_IMPORT_ERROR" >&2
+        exit 1
+        ;;
+    *) echo "unexpected python call: $2" >&2; exit 3 ;;
+esac
+"""
+
+_FAKE_CHECK_OPENMP = """
+check_openmp() {
+    if [ "${FAKE_CHECK:-}" = fail ]; then
+        echo "expected one OpenMP library, found 2" >&2
+        return 1
+    fi
+    [ "$FAKE_PYTHON_HOME/lib/libomp.dylib" -ef "$FAKE_SKLEARN_OMP" ]
+}
+"""
+
+_LIBOMP_ERROR = ("XGBoostError: dlopen(.../libxgboost.dylib, 0x0006): Library not loaded: "
+                 "@rpath/libomp.dylib")
+
+
+def _sh_function(name: str) -> str:
+    """One function from install.sh, verbatim."""
+    match = re.search(rf"^{name}\(\) \{{\n.*?\n\}}\n", _text(INSTALL_SH), re.MULTILINE | re.DOTALL)
+    assert match is not None, name
+    return match.group(0)
+
+
+class _OmpLayout:
+    """An install folder as install.sh leaves it on a Mac, minus the binaries."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        # The macOS default install folder has a space in it.
+        self.tmp = tmp_path
+        self.base = tmp_path / "Application Support" / "edm-ars"
+        self.pyroot = self.base / "python"
+        self.home = self.pyroot / "cpython-3.11.14-macos-aarch64-none"
+        (self.home / "lib").mkdir(parents=True)
+        self.link = self.home / "lib" / "libomp.dylib"
+        self.sk_omp = self._venv("0.1.0")
+        self.python = self.base / "venv-0.1.0" / "bin" / "python"
+        self.python.parent.mkdir(parents=True)
+        self.python.write_bytes(_FAKE_ENV_PYTHON)
+        self.python.chmod(0o755)
+        self.env = _clean_env(tmp_path)
+        if ON_WINDOWS:
+            # Git Bash copies files for `ln -s` unless asked for native links.
+            self.env["MSYS"] = "winsymlinks:nativestrict"
+        self.env.update(FAKE_SKLEARN_OMP=_sh_path(self.sk_omp), FAKE_PYTHON_HOME=_sh_path(self.home),
+                        FAKE_IMPORT_ERROR=_LIBOMP_ERROR)
+        probe = tmp_path / "symlink-probe"
+        probe.write_bytes(b"x")
+        made = subprocess.run([str(SH), "-c", 'ln -s "$1" "$1.link"', "sh", _sh_path(probe)],
+                              env=self.env, capture_output=True, text=True)
+        if made.returncode != 0 or not Path(str(probe) + ".link").is_symlink():
+            pytest.skip("this sh cannot make symbolic links here")
+
+    def _venv(self, version: str) -> Path:
+        omp = (self.base / f"venv-{version}" / "lib" / "python3.11" / "site-packages"
+               / "sklearn" / ".dylibs" / "libomp.dylib")
+        omp.parent.mkdir(parents=True)
+        omp.write_bytes(f"libomp from scikit-learn in venv-{version}".encode())
+        return omp
+
+    def run(self, body: str, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
+        script = self.tmp / "harness.sh"
+        script.write_bytes(body.encode("utf-8"))
+        return subprocess.run([str(SH), _sh_path(script), *args], capture_output=True, text=True,
+                              env={**self.env, **env}, timeout=60)
+
+    def provide(self, mode: str, **env: str) -> subprocess.CompletedProcess[str]:
+        body = ("set -eu\n" + _sh_function("link_openmp") + _sh_function("provide_openmp")
+                + _FAKE_CHECK_OPENMP + 'provide_openmp "$1" "$2" "$3" "$4"\n')
+        return self.run(body, _sh_path(self.python), _sh_path(self.pyroot), mode,
+                        _sh_path(self.tmp / "openmp.err"), **env)
+
+    def points_at(self, target: Path) -> bool:
+        return self.link.is_symlink() and os.path.samefile(self.link, target)
+
+
+def _step5_check() -> str:
+    """install.sh's package check (step 5), verbatim."""
+    sh = _text(INSTALL_SH)
+    start = sh.index('    say "Checking that the main packages load..."\n')
+    end = sh.index("    # EDM-ARS itself is not a pip package")
+    return sh[start:end]
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_link_openmp_links_scikit_learns_copy_and_only_there(tmp_path: Path) -> None:
+    lay = _OmpLayout(tmp_path)
+    # "refresh" never makes a link that is not there yet.
+    result = lay.provide("refresh")
+    assert result.returncode == 1 and result.stdout == ""
+    assert not lay.link.is_symlink()
+
+    result = lay.provide("create")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == _sh_path(lay.link)
+    assert lay.points_at(lay.sk_omp)
+    assert lay.sk_omp.read_bytes() == b"libomp from scikit-learn in venv-0.1.0"
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+@pytest.mark.parametrize("old_state", ["previous version", "deleted version"])
+def test_link_openmp_repoints_an_earlier_installs_link_to_this_environment(
+    tmp_path: Path, old_state: str
+) -> None:
+    # An update leaves the link pointing into the previous version's venv
+    # (or at nothing, once that venv is removed). Left alone, the new
+    # version's XGBoost would load the old venv's copy while its
+    # scikit-learn loads its own: two OpenMP runtimes in one process.
+    lay = _OmpLayout(tmp_path)
+    old = lay._venv("0.0.9")
+    os.symlink(old, lay.link)
+    if old_state == "deleted version":
+        old.unlink()
+    result = lay.provide("refresh")
+    assert result.returncode == 0, result.stderr
+    assert lay.points_at(lay.sk_omp)
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_link_openmp_never_replaces_a_real_file(tmp_path: Path) -> None:
+    lay = _OmpLayout(tmp_path)
+    lay.link.write_bytes(b"someone else's libomp")
+    for mode in ("create", "refresh"):
+        result = lay.provide(mode)
+        assert result.returncode == 1
+        assert not lay.link.is_symlink()
+        assert lay.link.read_bytes() == b"someone else's libomp"
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_link_openmp_needs_scikit_learns_copy_and_the_private_python(tmp_path: Path) -> None:
+    lay = _OmpLayout(tmp_path)
+    lay.sk_omp.unlink()  # a scikit-learn that ships no libomp.dylib
+    assert lay.provide("create").returncode == 1
+    assert not lay.link.is_symlink() and not lay.link.exists()
+
+    # A python outside the folder this installer owns is never written to.
+    lay = _OmpLayout(tmp_path / "second")
+    foreign = tmp_path / "someone-elses-python"
+    (foreign / "lib").mkdir(parents=True)
+    result = lay.provide("create", FAKE_PYTHON_HOME=_sh_path(foreign))
+    assert result.returncode == 1
+    assert list((foreign / "lib").iterdir()) == []
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_provide_openmp_removes_the_link_when_the_check_fails(tmp_path: Path) -> None:
+    lay = _OmpLayout(tmp_path)
+    result = lay.provide("create", FAKE_CHECK="fail")
+    assert result.returncode == 1 and result.stdout == ""
+    assert not lay.link.is_symlink() and not lay.link.exists()
+    assert "found 2" in (tmp_path / "openmp.err").read_text(encoding="utf-8")
+
+
+def _run_step5(lay: _OmpLayout, os_name: str = "Darwin", **env: str) -> subprocess.CompletedProcess[str]:
+    tmp_dir = lay.tmp / "installer-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    body = (
+        "set -eu\n"
+        "say() { printf '%s\\n' \"$*\"; }\n"
+        "die() { printf 'DIE: %s\\n' \"$*\" >&2; exit 1; }\n"
+        + _sh_function("link_openmp") + _sh_function("provide_openmp") + _FAKE_CHECK_OPENMP
+        + 'OS=$1\nVENV_PY=$2\nAPP_BASE=$3\nTMP_DIR=$4\n'
+        + _step5_check()
+        + "printf 'OMP_LINK=%s\\n' \"$OMP_LINK\"\n"
+    )
+    return lay.run(body, os_name, _sh_path(lay.python), _sh_path(lay.base), _sh_path(tmp_dir), **env)
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_install_step5_links_openmp_when_xgboost_cannot_find_it(tmp_path: Path) -> None:
+    # What CI's macos-14 job hit: no Homebrew, so `import xgboost` failed
+    # and the installer stopped, asking for Homebrew.
+    lay = _OmpLayout(tmp_path)
+    result = _run_step5(lay)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "linking the one that comes with scikit-learn" in result.stdout
+    assert f"OMP_LINK={_sh_path(lay.link)}" in result.stdout.splitlines()
+    assert lay.points_at(lay.sk_omp)
+    assert "DIE" not in result.stderr
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_install_step5_repoints_the_link_before_checking(tmp_path: Path) -> None:
+    # With the previous version's link still in place the import succeeds
+    # at once, so the link must be re-pointed before the check, not after
+    # a failure.
+    lay = _OmpLayout(tmp_path)
+    os.symlink(lay._venv("0.0.9"), lay.link)
+    result = _run_step5(lay)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"OMP_LINK={_sh_path(lay.link)}" in result.stdout.splitlines()
+    assert "linking the one that comes with scikit-learn" not in result.stdout
+    assert lay.points_at(lay.sk_omp)
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_install_step5_falls_back_to_homebrew_advice_and_leaves_no_link(tmp_path: Path) -> None:
+    lay = _OmpLayout(tmp_path)
+    result = _run_step5(lay, FAKE_CHECK="fail")
+    assert result.returncode == 1
+    assert "brew install libomp" in result.stderr
+    assert "found 2" in result.stderr  # the reason is shown, not only the advice
+    assert not lay.link.is_symlink() and not lay.link.exists()
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_install_step5_links_nothing_for_other_failures_or_systems(tmp_path: Path) -> None:
+    lay = _OmpLayout(tmp_path)
+    result = _run_step5(lay, FAKE_IMPORT_ERROR="ModuleNotFoundError: No module named 'fitz'")
+    assert result.returncode == 1
+    assert "do not load" in result.stderr and "No module named 'fitz'" in result.stderr
+    assert not lay.link.exists()
+
+    result = _run_step5(lay, os_name="Linux")
+    assert result.returncode == 1
+    assert "do not load" in result.stderr and "brew" not in result.stderr
+    assert not lay.link.exists()
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_install_sh_plans_a_mac_install_into_application_support(tmp_path: Path) -> None:
+    # Stand-in uname and sysctl make install.sh see an Apple Silicon Mac.
+    # The macOS default folder has a space in it, and the plan must say
+    # that the OpenMP library may be linked.
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    (fakebin / "uname").write_bytes(b'#!/bin/sh\nif [ "${1:-}" = -m ]; then echo arm64; else echo Darwin; fi\n')
+    (fakebin / "sysctl").write_bytes(
+        b'#!/bin/sh\ncase "$2" in\n    hw.optional.arm64) echo 1 ;;\n'
+        b'    hw.memsize) echo 17179869184 ;;\n    *) echo 0 ;;\nesac\n')
+    for fake in fakebin.iterdir():
+        fake.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _clean_env(tmp_path, HOME=_sh_path(home))
+    env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
+    result = subprocess.run(
+        [SH, _sh_path(INSTALL_SH), "--dry-run", "--from-local", _sh_path(REPO_ROOT)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, env=env, stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert "Computer:      macOS (Apple Silicon)" in out
+    assert f"Install into:  {_sh_path(home)}/Library/Application Support/edm-ars\n" in out
+    assert "link the\n     one that comes with scikit-learn into the private Python" in out
+    assert "Dry run: nothing was downloaded or changed." in out
+    assert list(home.iterdir()) == []
 
 
 @pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")

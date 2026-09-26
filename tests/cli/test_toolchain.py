@@ -529,6 +529,150 @@ def test_install_tinytex_installs_then_fills_in_whatever_a_test_compile_misses(
     assert toolchain._first_error("all fine\n") == ""
 
 
+def test_tinytex_installer_never_asks_for_a_password_on_a_mac(tmp_path: Path) -> None:
+    # install-bin-unix.sh puts TinyTeX on PATH through `sudo tee
+    # /etc/paths.d/TinyTeX` when /usr/local/bin is not writable, and edmars
+    # captured its output, so the user saw a bare "Password:". --no-path
+    # (documented) skips that. The script moves its download into "$1/", so
+    # a folder must come before --no-path.
+    installer, keep = tmp_path / "install-bin-unix.sh", tmp_path
+    assert toolchain.tinytex_installer_command(installer, keep, platform="darwin") == [
+        "sh", str(installer), str(keep), "--no-path"]
+    # Linux's PATH step only links into ~/.local/bin, without sudo: unchanged.
+    assert toolchain.tinytex_installer_command(installer, keep, platform="linux") == ["sh", str(installer)]
+    bat = tmp_path / "install-bin-windows.bat"
+    assert toolchain.tinytex_installer_command(bat, keep, platform="win32") == [
+        "cmd.exe", "/d", "/c", str(bat)]
+
+
+def test_install_tinytex_runs_the_installer_without_a_terminal_and_says_where_it_is(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "TinyTeX"
+    monkeypatch.setattr(toolchain, "tinytex_root", lambda: root)
+    bin_dir = root / "bin" / "universal-darwin"
+    tlmgr_name = "tlmgr.bat" if toolchain.os.name == "nt" else "tlmgr"
+    pdflatex_name = "pdflatex.exe" if toolchain.os.name == "nt" else "pdflatex"
+    real_command = toolchain.tinytex_installer_command
+    monkeypatch.setattr(toolchain, "tinytex_installer_command",
+                        lambda installer, keep: real_command(installer, keep, platform="darwin"))
+    installer_calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "install-bin" in " ".join(args):
+            installer_calls.append((list(args), kwargs))
+            _touch(bin_dir / tlmgr_name)
+            _touch(bin_dir / pdflatex_name)
+            return completed(args, 0, "TinyTeX installed")
+        return completed(args, 0)
+
+    monkeypatch.setattr(proc, "run", run)
+    ok = [toolchain._CompileOutcome(toolchain.Check("acm", "ok", "fine"), []),
+          toolchain._CompileOutcome(toolchain.Check("apa", "ok", "fine"), [])]
+    monkeypatch.setattr(toolchain, "_test_compile_detailed", lambda timeout_s, settings: ok)
+
+    check = toolchain.install_tinytex(settings=_load_settings(), session=serve_bytes(b"echo installer"))
+
+    assert check.status == "ok", check.detail
+    [(args, kwargs)] = installer_calls
+    assert args[0] == "sh" and args[-1] == "--no-path"
+    assert Path(args[2]) == Path(kwargs["cwd"])  # the scratch folder, deleted afterwards
+    assert kwargs.get("new_session") is True
+    assert "not added to your PATH" in check.detail and str(bin_dir) in check.detail
+
+
+# ---------------------------------------------------------------------------
+# XGBoost and its OpenMP library (what `edmars doctor` reports)
+# ---------------------------------------------------------------------------
+
+_MAC_LOAD_ERROR = (
+    "XGBoostError: XGBoost Library (libxgboost.dylib) could not be loaded.\n"
+    "Error message(s): [\"dlopen(/x/venv/lib/python3.11/site-packages/xgboost/lib/libxgboost.dylib, 0x0006): "
+    "Library not loaded: @rpath/libomp.dylib\\n  Referenced from: <89AD> /x/libxgboost.dylib\\n  Reason: "
+    "tried: '/opt/homebrew/opt/libomp/lib/libomp.dylib' (no such file)\"]"
+)
+
+
+def _probe_reply(monkeypatch: pytest.MonkeyPatch, report: dict[str, Any] | None, *,
+                 returncode: int = 0, stderr: str = "", timeout: bool = False) -> list[list[str]]:
+    import json
+    import sys
+
+    calls: list[list[str]] = []
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        assert args[0] == sys.executable and args[1] == "-c"
+        assert "DEEPSEEK_API_KEY" not in kwargs["env"]
+        if timeout:
+            raise subprocess.TimeoutExpired(args, kwargs.get("timeout"))
+        out = "some warning\n" + (json.dumps(report) + "\n" if report is not None else "")
+        return completed(args, returncode, out, stderr)
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "not-for-the-probe")
+    monkeypatch.setattr(proc, "run", run)
+    return calls
+
+
+def test_xgboost_that_loads_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _probe_reply(monkeypatch, {"ok": True, "error": None, "version": "2.1.4", "openmp": None})
+    [check] = toolchain.xgboost_checks()
+    assert (check.name, check.status) == ("XGBoost", "ok")
+    assert check.detail == "XGBoost 2.1.4 loads together with scikit-learn"
+    assert len(calls) == 1 and "import xgboost, sklearn" in calls[0][2]
+
+    lib = "/x/python/cpython-3.11.14-macos-aarch64-none/lib/libomp.dylib"
+    _probe_reply(monkeypatch, {"ok": True, "error": None, "version": "2.1.4", "openmp": [lib]})
+    [check] = toolchain.xgboost_checks()
+    assert check.status == "ok" and f"one OpenMP library ({lib})" in check.detail
+
+
+def test_xgboost_without_an_openmp_library_fails_and_says_how_to_fix_it(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # What CI's macos-14 job hit: the package is installed, find_spec is
+    # happy, and every study that trains XGBoost would stop.
+    _probe_reply(monkeypatch, {"ok": False, "error": _MAC_LOAD_ERROR, "version": None, "openmp": []})
+    [check] = toolchain.xgboost_checks()
+    assert check.status == "fail"
+    assert "found no OpenMP library (Library not loaded: @rpath/libomp.dylib)" in check.detail
+    assert "Run the EDM-ARS installer again" in check.fix and "brew install libomp" in check.fix
+    assert "install/README.md" in check.fix
+
+
+def test_two_openmp_libraries_in_one_process_are_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    both = ["/opt/homebrew/opt/libomp/lib/libomp.dylib", "/x/site-packages/sklearn/.dylibs/libomp.dylib"]
+    _probe_reply(monkeypatch, {"ok": True, "error": None, "version": "2.1.4", "openmp": both})
+    [check] = toolchain.xgboost_checks()
+    assert check.status == "warn"
+    assert "OMP: Error #15" in check.detail and both[0] in check.detail and both[1] in check.detail
+
+
+def test_xgboost_probe_failures_are_reported_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
+    _probe_reply(monkeypatch, {"ok": False, "error": "ModuleNotFoundError: No module named 'xgboost'",
+                               "version": None, "openmp": None})
+    [check] = toolchain.xgboost_checks()
+    assert check.status == "fail" and "No module named 'xgboost'" in check.detail
+    assert check.fix == "Reinstall EDM-ARS with the installer."
+
+    # A native crash while loading leaves no report.
+    _probe_reply(monkeypatch, None, returncode=-6, stderr="OMP: Error #15: Initializing libomp.dylib")
+    [check] = toolchain.xgboost_checks()
+    assert check.status == "fail" and "exit code -6" in check.detail and "Error #15" in check.detail
+
+    _probe_reply(monkeypatch, None, timeout=True)
+    [check] = toolchain.xgboost_checks(timeout_s=5)
+    assert check.status == "warn" and "timed out" in check.detail
+
+
+def test_xgboost_probe_runs_for_real_in_this_python() -> None:
+    # The probe script itself, in a real child process of this interpreter
+    # (the test environment has the locked xgboost and scikit-learn).
+    [check] = toolchain.xgboost_checks()
+    assert check.status in ("ok", "warn"), check.detail
+    assert check.detail.startswith("XGBoost ")
+
+
 def test_tools_never_receive_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "not-for-r")
     seen: list[dict[str, str]] = []

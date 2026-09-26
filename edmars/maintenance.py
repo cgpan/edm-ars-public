@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,11 @@ INSTALL_BASE = f"https://github.com/{REPO}/releases/latest/download"
 
 #: Files that mark a folder as a study EDM-ARS made (and so may delete).
 _STUDY_MARKERS = ("runner.json", "checkpoint.json", "run_status.json", "pipeline.log")
+
+#: On macOS `edmars setup pdf` installs TinyTeX with --no-path (see
+#: toolchain.tinytex_installer_command), so there is no PATH change to
+#: undo, and tlmgr is not on PATH to undo one with.
+_TINYTEX_PATH_UNCHANGED = sys.platform == "darwin"
 
 
 # --- update -------------------------------------------------------------------
@@ -353,7 +359,8 @@ def _explain_left_in_place(current: dict[str, Any]) -> None:
             ui.info(
                 f"TinyTeX (the LaTeX that `edmars setup pdf` installed, {_human(_size(root))}) is still in "
                 f"{root}. Other programs can use it, so it was not removed. If nothing else needs it, "
-                "run `tlmgr path remove` (this undoes the PATH change TinyTeX's installer made), "
+                + ("" if _TINYTEX_PATH_UNCHANGED else "run `tlmgr path remove` (this undoes the PATH "
+                   "change TinyTeX's installer made), ") +
                 "then delete that folder."
             )
     added = settings_mod.get(current, "r.added_packages", {}) or {}

@@ -29,6 +29,7 @@ Every process is started through ``edmars.proc``.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -211,13 +212,15 @@ def _run(
     timeout: float,
     cwd: str | Path | None = None,
     env: Mapping[str, str] | None = None,
+    new_session: bool = False,
 ) -> ToolResult:
     from edmars import proc
 
     try:
+        extra: dict[str, Any] = {"new_session": True} if new_session else {}
         done = proc.run(list(args), timeout=timeout,
                         cwd=str(cwd) if cwd is not None else None,
-                        env=dict(env) if env is not None else _tool_env())
+                        env=dict(env) if env is not None else _tool_env(), **extra)
     except Exception as exc:  # noqa: BLE001 - classify below, re-raise the rest
         if type(exc).__name__ == "TimeoutExpired":
             return ToolResult(None, _as_text(getattr(exc, "stdout", "")),
@@ -717,6 +720,34 @@ def _package_for_file(tlmgr: str, filename: str) -> str | None:
     return None
 
 
+def tinytex_installer_command(installer: Path, keep_dir: Path, *,
+                              platform: str | None = None) -> list[str]:
+    """How to run the official TinyTeX installer on this OS.
+
+    On macOS, install-bin-unix.sh ends by putting TinyTeX on PATH: links
+    in /usr/local/bin when that folder is writable, otherwise a
+    /etc/paths.d/TinyTeX file written through ``sudo``, which asks for an
+    administrator password. edmars captures the installer's output, so
+    the user saw a bare "Password:" and nothing else. The installer's
+    documented ``--no-path`` skips that step; edmars does not need it,
+    because it finds TinyTeX in ~/Library/TinyTeX itself and puts its bin
+    folder on every study's PATH (``latex_bin_dir``), as on Windows.
+
+    The script also takes its FIRST argument, if any, as a folder to move
+    the downloaded bundle into (``mv "$INSTALLER_FILE" "$1/"``), so
+    ``--no-path`` on its own would become that folder, and the move, and
+    with it the installer, would fail. A scratch folder goes first. On
+    Linux the PATH step only adds links in ~/.local/bin (or ~/bin), with
+    no administrator rights, so it runs as before.
+    """
+    platform = platform or sys.platform
+    if platform.startswith("win"):
+        return ["cmd.exe", "/d", "/c", str(installer)]
+    if platform == "darwin":
+        return ["sh", str(installer), str(keep_dir), "--no-path"]
+    return ["sh", str(installer)]
+
+
 def install_tinytex(
     *,
     settings: dict[str, Any] | None = None,
@@ -733,6 +764,7 @@ def install_tinytex(
     ``latex.pdflatex`` are saved.
     """
     title = "TinyTeX"
+    path_note = ""
 
     def step(text: str) -> None:
         if on_step is not None:
@@ -763,9 +795,10 @@ def install_tinytex(
             except fetch.DownloadError as exc:
                 return Check(title, "fail", str(exc), fix="edmars setup pdf")
             step("Installing TinyTeX (this can take several minutes)")
-            args = (["cmd.exe", "/d", "/c", str(installer)] if os.name == "nt"
-                    else ["sh", str(installer)])
-            result = _run(args, timeout=timeout_s, cwd=tmp)
+            args = tinytex_installer_command(installer, Path(tmp))
+            # No terminal for it either: should any installer version still
+            # ask for a password, it fails at once instead of waiting unseen.
+            result = _run(args, timeout=timeout_s, cwd=tmp, new_session=True)
             if result.error or result.returncode != 0:
                 return Check(title, "fail",
                              f"The TinyTeX installer failed: {result.error or _tail(result.output)}",
@@ -775,6 +808,9 @@ def install_tinytex(
             return Check(title, "fail",
                          f"The installer finished, but TinyTeX was not found in {tinytex_root()}.",
                          fix="edmars setup pdf")
+        if "--no-path" in args:
+            path_note = (f" It was not added to your PATH (that needs an administrator password on "
+                         f"a Mac); EDM-ARS finds it in {Path(tlmgr).parent}.")
 
     step("Installing the LaTeX packages the paper templates use")
     failed = _tlmgr_install(tlmgr, tinytex_packages(), timeout=timeout_s)
@@ -807,10 +843,10 @@ def install_tinytex(
     bad = [o.check for o in outcomes if o.check.status != "ok"]
     if not bad:
         note = f" ({len(failed)} optional packages could not be installed)" if failed else ""
-        return Check(title, "ok", f"TinyTeX is installed and both test papers compile{note}.")
+        return Check(title, "ok", f"TinyTeX is installed and both test papers compile{note}.{path_note}")
     return Check(title, "warn",
                  "TinyTeX is installed, but a test paper still fails: "
-                 + "; ".join(f"{c.name}: {c.detail}" for c in bad),
+                 + "; ".join(f"{c.name}: {c.detail}" for c in bad) + path_note,
                  fix="edmars doctor --deep")
 
 
@@ -1091,6 +1127,114 @@ def _added_packages(stdout: str) -> tuple[str | None, list[str]]:
 def remember_rscript(settings: dict[str, Any], rscript: str | None, packages_ok: bool) -> None:
     """Save the chosen Rscript (the runner passes it on as EDM_ARS_RSCRIPT)."""
     _settings_set_and_save(settings, {"r.rscript": rscript, "r.packages_ok": bool(packages_ok)})
+
+
+# ---------------------------------------------------------------------------
+# XGBoost and its OpenMP library
+# ---------------------------------------------------------------------------
+
+#: Run in a fresh Python, as a study's analysis step is: import XGBoost and
+#: scikit-learn together, start scikit-learn's OpenMP runtime and, on
+#: macOS, list the libomp images dyld has loaded. Prints one JSON line.
+_XGBOOST_PROBE = """
+import json, sys
+out = {"ok": False, "error": None, "version": None, "openmp": None}
+try:
+    import xgboost, sklearn
+    out["version"] = xgboost.__version__
+    try:
+        from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
+        _openmp_effective_n_threads()
+    except ImportError:
+        pass
+    out["ok"] = True
+except Exception as exc:
+    out["error"] = type(exc).__name__ + ": " + str(exc)
+if sys.platform == "darwin":
+    try:
+        import ctypes
+        dyld = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        dyld._dyld_image_count.restype = ctypes.c_uint32
+        dyld._dyld_get_image_name.restype = ctypes.c_char_p
+        dyld._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+        names = [dyld._dyld_get_image_name(i) or b"" for i in range(dyld._dyld_image_count())]
+        out["openmp"] = [n.decode("utf-8", "replace") for n in names if n.endswith(b"/libomp.dylib")]
+    except Exception:
+        pass
+print(json.dumps(out))
+"""
+
+_OPENMP_README = "install/README.md, Troubleshooting: macOS, XGBoost and the OpenMP library"
+
+
+def _load_error(text: str) -> str:
+    """The telling part of an import error ("Library not loaded: ...").
+
+    XGBoost quotes dyld's messages as a Python list, so a line break in
+    them arrives as the two characters backslash and n.
+    """
+    match = re.search(r"Library not loaded: [^\s\\\"']+", text)
+    if match:
+        return match.group(0)
+    first = (text or "").strip().splitlines()
+    return first[0][:300] if first else "unknown error"
+
+
+def xgboost_checks(timeout_s: float = 180) -> list[Check]:
+    """Does XGBoost load next to scikit-learn in a fresh Python, as in a study?
+
+    ``find_spec`` (the package check) only sees that XGBoost is installed.
+    On macOS its compiled library also needs an OpenMP library at load
+    time: Homebrew's, or scikit-learn's copy that the installer links for
+    it. And two different OpenMP copies in one process can stop a study
+    with "OMP: Error #15", so on macOS the loaded copies are counted too.
+    """
+    title = "XGBoost"
+    result = _run([sys.executable, "-c", _XGBOOST_PROBE], timeout=timeout_s)
+    if result.error:
+        return [Check(title, "warn", f"Could not check whether XGBoost loads: {result.error}.",
+                      fix="edmars doctor")]
+    report: dict[str, Any] | None = None
+    for line in reversed(result.stdout.strip().splitlines()):
+        try:
+            loaded = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(loaded, dict):
+            report = loaded
+            break
+    if report is None or result.returncode != 0:
+        return [Check(title, "fail",
+                      f"Python stopped while loading XGBoost (exit code {result.returncode}): "
+                      f"{_tail(result.output) or 'no output'}",
+                      fix="Reinstall EDM-ARS with the installer.")]
+    if not report.get("ok"):
+        error = str(report.get("error") or "")
+        if "libomp" in error:  # macOS: XGBoost found no OpenMP library
+            return [Check(
+                title, "fail",
+                f"XGBoost does not load: it found no OpenMP library ({_load_error(error)}). "
+                "Every study that trains XGBoost would stop.",
+                fix=("Run the EDM-ARS installer again: on a Mac without Homebrew's libomp it links "
+                     f"scikit-learn's OpenMP library for XGBoost ({_OPENMP_README}). "
+                     "Or install Homebrew and run: brew install libomp"),
+            )]
+        return [Check(title, "fail", f"XGBoost does not load: {_load_error(error)}",
+                      fix="Reinstall EDM-ARS with the installer.")]
+    version = report.get("version") or "?"
+    openmp = [str(p) for p in (report.get("openmp") or [])]
+    if len(openmp) > 1:
+        return [Check(
+            title, "warn",
+            f"XGBoost {version} loads, but XGBoost and scikit-learn use two different OpenMP "
+            f"libraries ({', '.join(openmp)}). A study that runs both at once can stop with "
+            "'OMP: Error #15'.",
+            fix=f"See {_OPENMP_README}.",
+        )]
+    detail = f"XGBoost {version} loads together with scikit-learn"
+    if openmp:
+        detail += f"; one OpenMP library ({openmp[0]})"
+    return [Check(title, "ok", detail)]
 
 
 # ---------------------------------------------------------------------------

@@ -217,6 +217,28 @@
         return $add
     }
 
+    # Line 7 of the plan. Raw is the user PATH as stored; Merge-UserPath
+    # decides exactly as step 7 does later, so the plan never promises a
+    # PATH change the install then skips.
+    function Get-PathPlanLine([string]$Raw, [string]$Dir, [bool]$NoModify) {
+        if ($NoModify) { return '  7. Leave your PATH alone (-NoModifyPath).' }
+        if ($null -eq (Merge-UserPath $Raw $Dir $true)) {
+            return "  7. Leave your PATH as it is: $Dir is already on your user PATH."
+        }
+        return "  7. Add $Dir to your user PATH (your account only)."
+    }
+
+    # The user PATH as stored in the registry (read only; '' if unset).
+    function Get-RawUserPath {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+        if (-not $key) { return '' }
+        try {
+            return [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        } finally {
+            $key.Close()
+        }
+    }
+
     # Name of the cloud-sync service whose folder contains PATH, if any.
     function Get-SyncProvider([string]$Path) {
         foreach ($name in @('OneDrive', 'OneDriveCommercial', 'OneDriveConsumer')) {
@@ -558,11 +580,7 @@
         }
         Say '  5. Install EDM-ARS and the packages it needs (about 1.5 GB).'
         Say "  6. Create the command $(Join-Path $bin 'edmars.cmd') (and $(Join-Path $bin 'edmars') for Git Bash)."
-        if ($NoModifyPath) {
-            Say '  7. Leave your PATH alone (-NoModifyPath).'
-        } else {
-            Say "  7. Add $bin to your user PATH (your account only)."
-        }
+        Say (Get-PathPlanLine (Get-RawUserPath) $bin ([bool]$NoModifyPath))
         if ($NoOnboard) {
             Say "  8. Stop there (-NoOnboard); run 'edmars setup' when you are ready."
         } else {

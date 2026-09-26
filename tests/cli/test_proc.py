@@ -56,6 +56,33 @@ def test_run_passes_env_cwd_and_input(tmp_path: Path) -> None:
     assert lines[2] == "typed"
 
 
+_SESSION_PROBE = (
+    "import os\n"
+    "sid = os.getsid(0) if hasattr(os, 'getsid') else -1\n"
+    "try:\n"
+    "    open('/dev/tty').close()\n"
+    "    tty = 'yes'\n"
+    "except OSError:\n"
+    "    tty = 'no'\n"
+    "print(sid, tty)\n"
+)
+
+
+def test_run_can_start_a_program_without_the_terminal() -> None:
+    # The TinyTeX installer may run `sudo`, whose "Password:" prompt goes to
+    # the terminal while its explanation is captured. In a new session the
+    # program has no terminal, so such a prompt fails at once instead.
+    result = proc.run([PY, "-c", _SESSION_PROBE], timeout=60, new_session=True)
+    assert result.returncode == 0, result.stderr
+    if sys.platform == "win32":
+        return  # accepted and ignored: Windows programs do not share a terminal this way
+    sid, tty = result.stdout.split()
+    assert int(sid) != os.getsid(0)
+    assert tty == "no"
+    same = proc.run([PY, "-c", _SESSION_PROBE], timeout=60)
+    assert int(same.stdout.split()[0]) == os.getsid(0)
+
+
 def test_run_reports_a_missing_program() -> None:
     with pytest.raises(FileNotFoundError):
         proc.run(["edmars-no-such-program-xyz"], timeout=10)

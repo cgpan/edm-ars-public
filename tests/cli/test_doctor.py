@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from tests.cli.wizard_fakes import Fakes, KeyCheck, install_fakes
+from tests.cli.wizard_fakes import Check, Fakes, KeyCheck, install_fakes
 
 GOOD_KEY = "sk-fake-deepseek-0123456789abcdef"
 S2_KEY = "s2-fake-key-0123456789"
@@ -442,7 +442,22 @@ def test_quick_mode_checks_only_the_installation(fx: Fakes, capsys: pytest.Captu
     # nothing is set up yet, and that must not fail the installer's smoke test
     assert main(quick=True, json_out=True) == 0
     names = {c["name"] for c in json.loads(capsys.readouterr().out)["checks"]}
-    assert names == {"Computer", "Python", "Python packages", "EDM-ARS files", "Terminal"}
+    assert names == {"Computer", "Python", "Python packages", "XGBoost", "EDM-ARS files", "Terminal"}
+
+
+def test_quick_mode_fails_when_xgboost_is_installed_but_does_not_load(
+        fx: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    # On a Mac without an OpenMP library, find_spec still finds xgboost, so
+    # only loading it shows that every study training XGBoost would stop.
+    from edmars.doctor import main
+
+    fx.toolchain.xgboost = [Check("XGBoost", "fail", "XGBoost does not load: it found no OpenMP library "
+                                  "(Library not loaded: @rpath/libomp.dylib).", "Run the EDM-ARS installer again")]
+    assert main(quick=True, json_out=True) == 1
+    checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)["checks"]}
+    assert checks["Python packages"]["status"] == "ok"
+    assert checks["XGBoost"]["status"] == "fail"
+    assert "libomp" in checks["XGBoost"]["detail"]
 
 
 def test_quick_mode_fails_on_a_broken_installation(fx: Fakes, capsys: pytest.CaptureFixture[str]) -> None:

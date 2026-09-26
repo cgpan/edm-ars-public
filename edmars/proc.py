@@ -56,6 +56,7 @@ def run(
     env: Mapping[str, str] | None = None,
     cwd: StrPath | None = None,
     input: str | None = None,  # noqa: A002 - mirrors subprocess.run
+    new_session: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run a program to completion and capture its output as text.
 
@@ -64,8 +65,18 @@ def run(
     is raised (with whatever output was captured). A missing program
     raises ``FileNotFoundError``; use :func:`which` first when a missing
     tool is an expected situation.
+
+    ``new_session`` (macOS and Linux) starts the program without a
+    controlling terminal. Its output is captured, so a password prompt
+    it opened on the terminal (``sudo``) would show the user a bare
+    "Password:" with no explanation; without a terminal such a prompt
+    fails at once instead. Ctrl+C still stops it: the interrupt reaches
+    this process, which then stops the whole tree.
     """
     argv = _argv(args)
+    extra: dict[str, Any] = {}
+    if new_session and not _IS_WINDOWS:
+        extra["start_new_session"] = True
     with subprocess.Popen(
         argv,
         stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
@@ -77,6 +88,7 @@ def run(
         env=dict(env) if env is not None else None,
         cwd=os.fspath(cwd) if cwd is not None else None,
         shell=False,
+        **extra,
     ) as child:
         try:
             out, err = child.communicate(input=input, timeout=timeout)

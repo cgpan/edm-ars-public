@@ -119,6 +119,8 @@ NONINTERACTIVE_OPTIONS: dict[str, tuple[str, str]] = {
     "dataset_path": ("EDMARS_DATASET_PATH", "file to import when dataset_action=import"),
     "latex_action": ("EDMARS_LATEX_ACTION", "auto | system | tinytex | skip (default auto)"),
     "latex_test": ("EDMARS_LATEX_TEST", "true to run the LaTeX test compile"),
+    "miktex_autoinstall": ("EDMARS_MIKTEX_AUTOINSTALL", "true to switch MiKTeX to installing missing LaTeX "
+                                                        "packages without asking (otherwise only a warning)"),
     "r_action": ("EDMARS_R_ACTION", "skip | find | install (install = find R, then add packages)"),
     "rscript": ("EDMARS_RSCRIPT", "path to Rscript for r_action find/install"),
     "lsar_action": ("EDMARS_LSAR_ACTION", "auto | manual | skip (default skip)"),
@@ -1685,6 +1687,8 @@ class _Wizard:
             else:
                 mode = "tinytex" if mode_now == "tinytex" else "system"
             self._set_latex(mode)
+            if mode == "system":
+                self._offer_miktex_autoinstall()
             if self._latex_verify(compile_test=True):
                 return
             fix = self.choose("Some parts are missing, so papers may not compile. What would you like to do?",
@@ -1711,6 +1715,40 @@ class _Wizard:
                     if candidate.is_file():
                         return str(candidate)
         return toolchain.find_tex_tool("pdflatex", self.s)
+
+    def _uses_miktex(self) -> bool:
+        """Is the saved pdflatex MiKTeX's? MiKTeX keeps initexmf beside it."""
+        from edmars import toolchain
+
+        pdflatex = self.get("latex.pdflatex")
+        initexmf = toolchain.find_tex_tool("initexmf", self.s)
+        return bool(pdflatex and initexmf and Path(str(initexmf)).parent == Path(str(pdflatex)).parent)
+
+    def _offer_miktex_autoinstall(self) -> None:
+        """CLI_SPEC section 6: a MiKTeX that asks before installing a package
+        makes a study's PDF step wait for an answer nobody can give."""
+        from edmars import toolchain
+
+        if not self._uses_miktex() or toolchain.miktex_autoinstall(self.s) == "1":
+            return
+        why = ("MiKTeX is set to ask before it installs a missing LaTeX package. A study makes its PDF in the "
+               "background, where nobody sees that question, so the PDF step would wait until it times out "
+               "and the paper would have no PDF.")
+        manual = "In MiKTeX Console > Settings, choose 'Always install missing packages on-the-fly'."
+        if self.ni:
+            if _truthy(self.opt("miktex_autoinstall", False)):
+                self.show_checks([toolchain.set_miktex_autoinstall(self.s)])
+            else:
+                self.warn(f"{why} To let setup change it, run it again with --option miktex_autoinstall=yes. "
+                          f"Or: {manual}")
+            return
+        self.panel("MiKTeX asks before installing packages", why)
+        if self.yes("Switch MiKTeX to install missing packages automatically? This changes one MiKTeX "
+                    "setting for your account; MiKTeX Console > Settings can change it back.", default=True):
+            self.show_checks([toolchain.set_miktex_autoinstall(self.s)])
+        else:
+            self.warn(f"MiKTeX will keep asking, so papers that need a new LaTeX package may end without a PDF. "
+                      f"{manual}")
 
     def _install_tinytex(self) -> bool:
         from edmars import toolchain
@@ -1757,6 +1795,7 @@ class _Wizard:
                 self.error("latex_action=system, but no pdflatex was found on PATH.")
                 return
             self._set_latex("system")
+            self._offer_miktex_autoinstall()
         else:
             self.error(f"Unknown latex_action '{action}'. Use auto, system, tinytex or skip.")
             return

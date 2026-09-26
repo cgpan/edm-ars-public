@@ -399,6 +399,13 @@ def check_packages() -> list["Check"]:
     return [make_check("Python packages", "ok", f"All {len(CORE_PACKAGES)} core packages are installed")]
 
 
+def check_xgboost() -> list["Check"]:
+    """XGBoost can be installed and still not load (on macOS: no OpenMP library)."""
+    from edmars import toolchain
+
+    return list(toolchain.xgboost_checks())
+
+
 def check_app() -> list["Check"]:
     from edmars import paths
 
@@ -909,6 +916,7 @@ def run_checks(settings: dict[str, Any], *, deep: bool = False) -> list["Check"]
         ("Computer", check_os),
         ("Python", check_python),
         ("Python packages", check_packages),
+        ("XGBoost", check_xgboost),
         ("EDM-ARS files", check_app),
         ("Settings", lambda: check_settings_file(settings)),
         ("Notice accepted", lambda: check_disclosure(settings)),
@@ -992,6 +1000,7 @@ def quick_checks() -> list["Check"]:
         ("Computer", check_os),
         ("Python", check_python),
         ("Python packages", check_packages),
+        ("XGBoost", check_xgboost),
         ("EDM-ARS files", check_app),
         ("Terminal", check_encoding),
     ]
