@@ -290,10 +290,34 @@ def test_readme_cost_headline_matches_how_run_cost_labels_it() -> None:
     models = config["deepseek"]["models"]
     calls = [
         TokenUsage(agent=agent, model=models[agent], provider="deepseek",
-                   prompt_tokens=1000, completion_tokens=100)
+                   prompt_tokens=1000, completion_tokens=100,
+                   timestamp="2026-09-26T13:50:00")
         for agent in ("writer", "outline_agent")
     ]
     status = summarize(calls, load_pricing(config)).cost_status
     if status != "measured":
         assert status == "estimated"
         assert "not yet verified" in readme
+
+
+def test_readme_cost_section_names_the_rates_it_was_priced_at() -> None:
+    """The README's dollar figures are archived token counts times the
+    rates config.yaml ships. It quoted "$0.15" for a paper while the
+    deepseek-v4-pro rate behind it was not DeepSeek's (a real study cost
+    about three times its run_cost.json figure), and nothing tied the two.
+    Now a verified rate names its date and source, and the README must
+    name the same ones, so re-verifying a rate sends the editor here."""
+    from src.config import load_config
+    from src.cost import load_pricing
+
+    readme = _readme()
+    cost = readme[readme.index("\n## Cost\n"):]
+    cost = cost[:cost.index("\n## ", 1)]
+    pricing = load_pricing(load_config(str(ROOT / "config.yaml")))
+    assert pricing, "config.yaml ships no rates"
+    for model, rates in pricing.items():
+        if rates.get("verified"):
+            assert str(rates["verified_on"]) in cost, model
+            assert str(rates["source"]) in cost, model
+        else:
+            assert model in cost, f"{model}'s rate is unverified; say so"
