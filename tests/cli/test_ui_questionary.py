@@ -66,3 +66,52 @@ def test_secret_is_stripped(keys) -> None:  # type: ignore[no-untyped-def]
 def test_confirm(keys) -> None:  # type: ignore[no-untyped-def]
     keys("n")
     assert ui.confirm("Continue?", default=True) is False
+
+
+def test_a_menu_that_cannot_start_falls_back_to_numbered_choices(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # questionary 2.1.0 with prompt_toolkit 3.0.52+ raised AttributeError
+    # while building the menu, and every `edmars setup` ended in a crash
+    # report. A broken menu library must cost the arrow keys, not the setup.
+    import questionary
+
+    class Broken:
+        def unsafe_ask(self) -> str:
+            raise AttributeError("'VSplit' object has no attribute 'content'")
+
+    built: list[str] = []
+
+    def broken(*args: object, **kwargs: object) -> Broken:
+        built.append("menu")
+        return Broken()
+
+    monkeypatch.setattr(ui, "_questionary_failed", False)
+    monkeypatch.setattr(ui, "is_interactive", lambda: True)
+    monkeypatch.setattr(ui, "_use_questionary", lambda: not ui._questionary_failed)
+    monkeypatch.setattr(questionary, "select", broken)
+    monkeypatch.setattr(questionary, "confirm", broken)
+    answers = iter(["2", "n"])
+    monkeypatch.setattr(ui, "_read_line", lambda prompt: next(answers))
+
+    assert ui.select("Which AI service?", CHOICES) == "openai"
+    assert ui.confirm("Continue?", default=True) is False
+    assert built == ["menu"]  # after one failure the menus are not tried again
+    out = capsys.readouterr()
+    assert "numbered choices" in out.out + out.err
+
+
+def test_ctrl_c_in_a_menu_is_still_a_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
+    import questionary
+
+    class Interrupted:
+        def unsafe_ask(self) -> str:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(ui, "_questionary_failed", False)
+    monkeypatch.setattr(ui, "is_interactive", lambda: True)
+    monkeypatch.setattr(ui, "_use_questionary", lambda: not ui._questionary_failed)
+    monkeypatch.setattr(questionary, "select", lambda *a, **k: Interrupted())
+    with pytest.raises(KeyboardInterrupt):
+        ui.select("Which AI service?", CHOICES)
+    assert ui._questionary_failed is False
