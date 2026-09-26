@@ -965,10 +965,17 @@ def review_cmd(
     review = getattr(lsar, "review_run", None) or getattr(lsar, "review", None)
     if review is None:
         raise FeatureMissing("lsar.review")
+    run_dir = _resolve_run(settings, run, prefer_active=False)
+    # A study with no paper is said so first, before the notice, the
+    # "usually takes 10-40 minutes" question or anything else.
+    no_paper = getattr(lsar, "no_paper_reason", None)
+    reason = no_paper(run_dir) if callable(no_paper) else None
+    if reason:
+        ui.fail(reason)
+        raise typer.Exit(1)
     # The review sends the paper to DeepSeek, which the notice describes;
     # like new, run and resume, it needs the current notice accepted.
     _require_ack(settings, accept_disclosure)
-    run_dir = _resolve_run(settings, run, prefer_active=False)
     _confirm_spend(
         f"Review the paper in {run_dir.name}? This sends it to DeepSeek and usually "
         f"takes {estimates.MANUAL_REVIEW_TIME}.",

@@ -658,3 +658,20 @@ def test_uninstall_needs_yes_without_a_terminal() -> None:
 def test_a_module_returning_nothing_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_module(monkeypatch, "doctor", main=lambda **_kwargs: None)
     assert invoke("doctor").exit_code == 0
+
+
+
+def test_review_of_a_study_without_a_paper_stops_before_asking_anything() -> None:
+    # Before, the confirmation ("... usually takes 10-40 minutes") and the
+    # notice came first, and only then "no paper PDF".
+    from tests.cli._run_support import make_run, v2_status
+
+    run = make_run(paths.default_studies_dir(), pdf=False,
+                   status=v2_status("ABORTED", released=False, reason_code="ABORTED",
+                                    abort={"stage": "CRITIQUING", "code": "PRE_CRITIC_ABORT",
+                                           "message": "pcc_07: x", "resumable": False}))
+    result = invoke("review", run.name)
+    assert result.exit_code == 1
+    out = " ".join(result.output.split())
+    assert "stopped before its paper was written" in out and "edmars results" in out
+    assert "10-40" not in out and "accept" not in out
