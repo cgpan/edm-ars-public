@@ -32,6 +32,8 @@ import getpass
 import os
 import re
 import sys
+import time
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -472,6 +474,160 @@ def status(message: str) -> Iterator[None]:
         return
     with console.status(Text(message)):
         yield
+
+
+def _rate_text(bytes_per_s: float) -> str:
+    if bytes_per_s >= 100_000:
+        return f"{bytes_per_s / 1e6:.1f} MB/s"
+    return f"{bytes_per_s / 1e3:.0f} KB/s"
+
+
+def _time_left_text(seconds: float) -> str:
+    s = int(round(seconds))
+    if s < 60:
+        return f"about {max(5, (s + 4) // 5 * 5)} s left"
+    if s < 3600:
+        return f"about {(s + 30) // 60} min left"
+    return f"about {s // 3600} h {(s % 3600 + 30) // 60} min left"
+
+
+class TransferProgress:
+    """Progress of a long download, unzip, conversion or checksum.
+
+    Called as ``progress(done_bytes, total_bytes_or_None, phase)`` (the
+    :data:`edmars.fetch.ProgressFn` shape); ``phase`` is ``download``,
+    ``extract``, ``convert`` or ``verify``. Each phase shows the MB done,
+    the speed and the time left: a rich bar in a terminal, and in plain
+    mode a line whenever 2% more is done or 5 seconds have passed (never
+    more than one a second), plus one at 100%. The NCES download ran at
+    0.4 MB/s for 12 minutes on the Mac test, with a line only every 10%,
+    up to 2 min 13 s apart, and no speed or time left. Call
+    :meth:`close` when the work ends, also after an error.
+    """
+
+    WORDS = {"download": "downloaded", "extract": "unpacked", "convert": "converted", "verify": "checked"}
+    LABELS = {"download": "Downloading", "extract": "Unpacking", "convert": "Converting", "verify": "Checking"}
+    #: Plain mode: a new line after this much more of the phase (percent),
+    #: or after this many seconds, but not more often than ``min_gap_s``.
+    every_pct = 2.0
+    every_s = 5.0
+    min_gap_s = 1.0
+    #: The speed is measured over roughly this many recent seconds.
+    window_s = 30.0
+
+    def __init__(self, *, plain: bool | None = None, say_fn: Callable[[str], None] | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.plain = is_plain() or _machine_output if plain is None else plain
+        self._say = say_fn or say
+        self._clock = clock
+        self._phase: str | None = None
+        self._samples: deque[tuple[float, int]] = deque()
+        self._last_line: tuple[float, float] | None = None  # (time, percent)
+        self._finished = False
+        self._bar: Any = None
+        self._task: Any = None
+
+    # -- speed and time left ----------------------------------------------------
+    def _rate(self) -> float | None:
+        if len(self._samples) < 2:
+            return None
+        (t0, d0), (t1, d1) = self._samples[0], self._samples[-1]
+        if t1 - t0 < 0.5 or d1 <= d0:
+            return None
+        return (d1 - d0) / (t1 - t0)
+
+    def line(self, done: int, total: int | None) -> str:
+        """The plain-mode line for this moment of the current phase."""
+        word = self.WORDS.get(self._phase or "", self._phase or "done")
+        rate = self._rate()
+        parts: list[str] = []
+        if total:
+            pct = min(100, int(done * 100 / total))
+            head = f"  {word} {pct}%"
+            if total >= 1e9:
+                parts.append(f"{done / 1e9:.2f} of {total / 1e9:.2f} GB")
+            else:
+                parts.append(f"{done / 1e6:.1f} of {total / 1e6:.1f} MB")
+        else:
+            head = f"  {word} {done / 1e6:.1f} MB"
+        if rate:
+            parts.append(_rate_text(rate))
+            if total and done < total:
+                parts.append(_time_left_text((total - done) / rate))
+        return f"{head} ({', '.join(parts)})" if parts else head
+
+    # -- the callback -------------------------------------------------------------
+    def __call__(self, done: Any = 0, total: Any = None, phase: str = "download", *_rest: Any) -> None:
+        try:
+            done_n = int(done or 0)
+            total_n = int(total) if total else None
+        except (TypeError, ValueError):
+            return
+        now = self._clock()
+        if phase != self._phase:
+            self._stop_bar()
+            self._phase = phase
+            self._samples.clear()
+            self._last_line = None
+            self._finished = False
+        self._samples.append((now, done_n))
+        while len(self._samples) > 2 and now - self._samples[0][0] > self.window_s:
+            self._samples.popleft()
+        if not self.plain:
+            try:
+                self._draw(done_n, total_n)
+                return
+            except Exception:  # noqa: BLE001 - a broken bar falls back to lines
+                self._stop_bar()
+                self.plain = True
+        self._print(now, done_n, total_n)
+
+    def _print(self, now: float, done: int, total: int | None) -> None:
+        pct = done * 100 / total if total else 0.0
+        at_end = bool(total) and done >= (total or 0)
+        if self._finished:
+            return
+        if self._last_line is not None and not at_end:
+            last_t, last_pct = self._last_line
+            if now - last_t < self.min_gap_s:
+                return
+            if now - last_t < self.every_s and pct - last_pct < self.every_pct:
+                return
+        self._last_line = (now, pct)
+        self._finished = at_end
+        self._say(self.line(done, total))
+
+    def _draw(self, done: int, total: int | None) -> None:
+        if self._bar is None:
+            from rich.progress import (
+                BarColumn,
+                DownloadColumn,
+                Progress,
+                TextColumn,
+                TimeRemainingColumn,
+                TransferSpeedColumn,
+            )
+
+            label = self.LABELS.get(self._phase or "", "Working")
+            # A rich Progress needs the real Console, not the proxy.
+            self._bar = Progress(TextColumn(label), BarColumn(), DownloadColumn(), TransferSpeedColumn(),
+                                 TimeRemainingColumn(), console=get_console(), transient=False)
+            self._bar.start()
+            self._task = self._bar.add_task(label, total=total)
+        self._bar.update(self._task, completed=done, total=total)
+
+    def _stop_bar(self) -> None:
+        if self._bar is not None:
+            try:
+                self._bar.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._bar = None
+            self._task = None
+
+    def close(self) -> None:
+        """Stop the bar (a no-op in plain mode)."""
+        self._stop_bar()
 
 
 def open_path(path: Path | str) -> None:

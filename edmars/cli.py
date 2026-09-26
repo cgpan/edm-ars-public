@@ -1004,35 +1004,16 @@ def _dataset_info(datasets: ModuleType, name: str) -> Any:
     return catalog[name]
 
 
-_PHASE_WORDS = {"download": "downloaded", "extract": "unpacked", "convert": "converted",
-                "verify": "checked"}
-
-
-def _progress_printer() -> Callable[..., None]:
-    """A download progress callback: one line per 10% of each phase.
+def _progress_printer() -> ui.TransferProgress:
+    """A progress callback for ``datasets``: a bar in a terminal, lines in
+    plain mode, each with MB done, speed and time left (ui.TransferProgress).
 
     ``datasets`` reports ``(done, total, phase)``: download, then verify
     (the zip) and convert for HSLS:09, or extract and verify for a file
-    used as it comes; a line per phase keeps a 2 GB conversion from
-    looking like a hang after "downloaded 100%".
+    used as it comes; each phase gets its own bar or lines, so a 2 GB
+    conversion does not look like a hang after "downloaded 100%".
     """
-    state: dict[str, Any] = {"phase": "", "last": -1}
-
-    def report(done: Any = 0, total: Any = None, phase: str = "download", *_rest: Any) -> None:
-        try:
-            done_n, total_n = float(done or 0), float(total or 0)
-        except (TypeError, ValueError):
-            return
-        if not total_n:
-            return
-        if phase != state["phase"]:
-            state["phase"], state["last"] = phase, -1
-        step = int(max(0.0, min(done_n / total_n, 1.0)) * 10)
-        if step > state["last"]:
-            state["last"] = step
-            ui.say(f"  {_PHASE_WORDS.get(phase, phase)} {step * 10}%")
-
-    return report
+    return ui.TransferProgress()
 
 
 def _installed_and_valid(datasets: Any, name: str, settings: dict[str, Any]) -> bool:
@@ -1116,7 +1097,11 @@ def data_install_cmd(
                     "A copy that changed is downloaded again.")
         else:
             ui.info("Downloading. Large files take a while; if it stops, run the same command to continue.")
-        path = Path(datasets.install(name, settings, progress=_progress_printer()))
+        progress = _progress_printer()
+        try:
+            path = Path(datasets.install(name, settings, progress=progress))
+        finally:
+            progress.close()
     check = datasets.validate_file(name, path)
     ui.show_checks([check])
     if check.status != "fail":

@@ -320,3 +320,93 @@ def test_is_interactive_is_false_after_end_of_input(monkeypatch: pytest.MonkeyPa
     assert ui.is_interactive()
     monkeypatch.setattr(ui, "_input_closed", True)
     assert not ui.is_interactive()
+
+
+
+# --- download and conversion progress ------------------------------------------------------
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _feed(progress: ui.TransferProgress, clock: _Clock, total: int, *, chunk: int, per_s: float,
+          phase: str = "download", start: int = 0) -> None:
+    done = start
+    progress(done, total, phase)
+    while done < total:
+        done = min(total, done + chunk)
+        clock.now += chunk / per_s
+        progress(done, total, phase)
+
+
+def test_a_slow_download_prints_mb_speed_and_time_left_at_least_every_five_seconds() -> None:
+    # The Mac test's NCES download: 297 MB at about 0.4 MB/s, 12 minutes
+    # with a line only every 10% (up to 2 min 13 s apart), no MB/s, no ETA.
+    clock, lines, stamps = _Clock(), [], []
+
+    def say(text: str) -> None:
+        lines.append(text)
+        stamps.append(clock.now)
+
+    progress = ui.TransferProgress(plain=True, say_fn=say, clock=clock)
+    _feed(progress, clock, 297_000_000, chunk=1 << 20, per_s=400_000)
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    assert max(gaps) <= 5.0 + (1 << 20) / 400_000  # at most one chunk late
+    assert lines[0] == "  downloaded 0% (0.0 of 297.0 MB)"
+    assert lines[-1].startswith("  downloaded 100% (297.0 of 297.0 MB, 0.4 MB/s")
+    middle = lines[len(lines) // 2]
+    assert "0.4 MB/s" in middle and "min left" in middle
+    assert all(line.isascii() for line in lines)
+
+
+def test_a_fast_phase_prints_a_line_per_two_percent_and_not_more_than_one_a_second() -> None:
+    clock, lines = _Clock(), []
+    progress = ui.TransferProgress(plain=True, say_fn=lines.append, clock=clock)
+    _feed(progress, clock, 2_000_000_000, chunk=1 << 20, per_s=150_000_000, phase="convert")
+    assert lines[-1].startswith("  converted 100% (2.00 of 2.00 GB, 1") and lines[-1].endswith(" MB/s)")
+    assert len(lines) <= 16  # 13 s of work: at most one line a second, plus the last
+    clock2, lines2 = _Clock(), []
+    progress = ui.TransferProgress(plain=True, say_fn=lines2.append, clock=clock2)
+    _feed(progress, clock2, 2_000_000_000, chunk=1 << 20, per_s=10_000_000, phase="convert")
+    percents = [int(line.split()[1].rstrip("%")) for line in lines2]
+    assert all(b - a <= 3 for a, b in zip(percents, percents[1:]))  # about every 2%
+
+
+def test_a_resumed_download_measures_the_speed_of_this_session_only() -> None:
+    clock, lines = _Clock(), []
+    progress = ui.TransferProgress(plain=True, say_fn=lines.append, clock=clock)
+    _feed(progress, clock, 297_000_000, chunk=1 << 20, per_s=2_000_000, start=200_000_000)
+    assert lines[0].startswith("  downloaded 67% (200.0 of 297.0 MB")
+    assert "2.0 MB/s" in lines[2]
+
+
+def test_each_phase_gets_its_own_lines() -> None:
+    clock, lines = _Clock(), []
+    progress = ui.TransferProgress(plain=True, say_fn=lines.append, clock=clock)
+    for phase in ("download", "verify", "convert"):
+        _feed(progress, clock, 10_000_000, chunk=1 << 20, per_s=5_000_000, phase=phase)
+    for word in ("downloaded", "checked", "converted"):
+        assert f"  {word} 0% (0.0 of 10.0 MB)" in lines
+        assert any(line.startswith(f"  {word} 100% (10.0 of 10.0 MB") for line in lines)
+
+
+def test_in_a_terminal_the_progress_is_a_bar_with_speed_and_time_left(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rich.console import Console
+    from rich.progress import DownloadColumn, TimeRemainingColumn, TransferSpeedColumn
+
+    console = Console(file=io.StringIO(), width=100, force_terminal=True)
+    monkeypatch.setattr(ui, "get_console", lambda stderr=False: console)
+    lines: list[str] = []
+    progress = ui.TransferProgress(plain=False, say_fn=lines.append)
+    progress(0, 297_000_000, "download")
+    bar = progress._bar
+    kinds = {type(column) for column in bar.columns}
+    assert {DownloadColumn, TransferSpeedColumn, TimeRemainingColumn} <= kinds
+    progress(150_000_000, 297_000_000, "download")
+    progress.close()
+    assert lines == [] and "Downloading" in console.file.getvalue()  # type: ignore[attr-defined]

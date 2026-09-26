@@ -8,6 +8,7 @@ give and checks what was saved, what was said, and what was never shown.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -364,9 +365,11 @@ def test_dataset_download_records_terms_and_shows_progress(fx: Fakes) -> None:
     assert saved["sha256"]  # the fingerprint install() records on first download
     assert "Cite NCES" in fx.ui.output
     # Plain mode: the check and the conversion after the download get their
-    # own lines, so the 2 GB conversion does not look like a hang.
-    assert "Checking:" in fx.ui.output
-    assert "Converting:" in fx.ui.output
+    # own lines, so the 2 GB conversion does not look like a hang, each with
+    # the MB done (ui.TransferProgress).
+    lines = fx.ui.output.splitlines()
+    for word in ("downloaded", "checked", "converted"):
+        assert any(re.fullmatch(rf"  {word} \d+% \(\d+\.\d of \d+\.\d MB.*\)", line) for line in lines), word
 
 
 def test_dataset_download_failure_is_explained(fx: Fakes) -> None:

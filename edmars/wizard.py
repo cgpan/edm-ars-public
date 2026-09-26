@@ -2278,76 +2278,26 @@ class _Wizard:
 
 
 class _DownloadProgress:
-    """Progress callback for ``datasets.download``.
+    """Progress callback for ``datasets.download``: ui.TransferProgress
+    (a rich bar, or plain lines with MB done, speed and time left) printing
+    through the wizard.
 
-    Accepts ``(done, total)`` in bytes, or keyword ``done=``/``total=``.
-    Draws a rich bar, or prints a line every 10% in plain mode.
+    Accepts ``(done, total[, phase])`` in bytes, or keyword ``done=``/``total=``.
     """
 
     def __init__(self, wizard: _Wizard) -> None:
-        self.wizard = wizard
-        self.plain = _plain()
-        self._bar: Any = None
-        self._task: Any = None
-        self._last_decile = -1
-        self._last_mb = 0
-        self._phase = "download"
+        from edmars import ui
 
-    _PHASES = {"download": "Downloading", "extract": "Unpacking", "convert": "Converting",
-               "verify": "Checking"}
+        self._progress = ui.TransferProgress(plain=_plain(), say_fn=wizard.say)
 
     def __call__(self, *args: Any, **kwargs: Any) -> None:
-        try:
-            done = args[0] if args else kwargs.get("done", kwargs.get("downloaded", 0))
-            total = args[1] if len(args) > 1 else kwargs.get("total")
-            phase = str(args[2] if len(args) > 2 else kwargs.get("phase", "download"))
-            done_i = int(done or 0)
-            total_i = int(total) if total else None
-        except (TypeError, ValueError):
-            return
-        if phase != self._phase:
-            # datasets reports download, then extract (the 2 GB unzip), then
-            # verify: each gets its own bar or its own 10% lines.
-            self.close()
-            self._last_decile = -1
-            self._last_mb = 0
-            self._phase = phase
-            if self.plain:
-                self.wizard.say(f"  {self._PHASES.get(phase, phase.capitalize())}:")
-        if self.plain:
-            if total_i:
-                decile = min(10, done_i * 10 // max(total_i, 1))
-                if decile != self._last_decile:
-                    self._last_decile = decile
-                    self.wizard.say(f"  {decile * 10}% ({done_i / 1024 ** 2:.0f} of {total_i / 1024 ** 2:.0f} MB)")
-            elif done_i // (50 * 1024 ** 2) != self._last_mb:
-                self._last_mb = done_i // (50 * 1024 ** 2)
-                self.wizard.say(f"  {done_i / 1024 ** 2:.0f} MB")
-            return
-        try:
-            if self._bar is None:
-                from rich.progress import BarColumn, DownloadColumn, Progress, TimeRemainingColumn, \
-                    TransferSpeedColumn
-
-                from edmars import ui
-
-                label = self._PHASES.get(self._phase, "Working")
-                # A rich Progress needs the real Console, not ui.console's proxy.
-                self._bar = Progress(label, BarColumn(), DownloadColumn(), TransferSpeedColumn(),
-                                     TimeRemainingColumn(), console=ui.get_console(), transient=False)
-                self._bar.start()
-                self._task = self._bar.add_task("download", total=total_i)
-            self._bar.update(self._task, completed=done_i, total=total_i)
-        except Exception:
-            self.plain = True
+        done = args[0] if args else kwargs.get("done", kwargs.get("downloaded", 0))
+        total = args[1] if len(args) > 1 else kwargs.get("total")
+        phase = str(args[2] if len(args) > 2 else kwargs.get("phase", "download"))
+        self._progress(done, total, phase)
 
     def close(self) -> None:
-        if self._bar is not None:
-            try:
-                self._bar.stop()
-            except Exception:
-                pass
-            self._bar = None
+        self._progress.close()
 
 
 # ---------------------------------------------------------------------------
