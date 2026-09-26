@@ -165,7 +165,7 @@ def test_uninstall_names_the_r_packages_setup_added_and_where(
     # neither the packages nor the library; a real install added 74.
     _populate(edmars_home, fake_keyring)
     current = settings.load()
-    lib = "C:/Users/O'Neil/AppData/Local/R/win-library/4.4"
+    lib = "D:/R/O'Neil lab/win-library/4.4"
     settings.set_(current, "r.packages_ok", True)
     settings.set_(current, "r.added_packages", {lib: ["CDM", "Deriv", "mirt"]})
     settings.save(current)
@@ -173,7 +173,7 @@ def test_uninstall_names_the_r_packages_setup_added_and_where(
     assert maintenance.uninstall(assume_yes=True) == 0
     out = " ".join(capsys.readouterr().out.split())
     assert f"added 3 R packages to {lib};" in out
-    assert "remove.packages(c('CDM', 'Deriv', 'mirt'), lib = 'C:/Users/O\\'Neil/" in out
+    assert "remove.packages(c('CDM', 'Deriv', 'mirt'), lib = 'D:/R/O\\'Neil lab/" in out
     assert "any R packages" not in out
 
 

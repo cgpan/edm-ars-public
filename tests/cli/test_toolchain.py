@@ -235,7 +235,7 @@ def test_the_install_records_every_package_it_added_for_uninstall(
     assert "setdiff(rownames(installed.packages(lib.loc = lib)), had)" in code
     assert code.index("had <-") < code.index("install.packages(pkgs")
 
-    lib = "C:/Users/Jane Doe/AppData/Local/R/win-library/4.4"
+    lib = "D:/R libraries/shared lab/4.4"
     settings_dict = _load_settings()
     monkeypatch.setattr(proc, "run", FakeR(["mirt", "CDM"], added=(lib, ["mirt", "CDM", "Deriv"])))
     ok = toolchain.install_r_packages("Rscript", settings=settings_dict)
