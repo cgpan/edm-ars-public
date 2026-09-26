@@ -16,6 +16,13 @@
 # Resolved for the pinned versions but NOT part of the tested environment:
 # cryptography, jeepney, nvidia-nccl-cu12, secretstorage.
 #
+# One pin changed by hand after the freeze: questionary 2.1.0 -> 2.1.1.
+# With the pinned prompt-toolkit 3.0.53, questionary 2.1.0's arrow-key menu
+# raises AttributeError, so every menu in `edmars setup` and `edmars new`
+# crashed in a terminal (the tested environment had an older
+# prompt-toolkit). 2.1.1 has the same dependencies and fixes that. The next
+# make_lock.py run replaces this note.
+#
 # Used by install/install.sh, install/install.ps1 and CI:
 #     uv pip install -r requirements.lock -r requirements-cli.txt
 # Regenerate with scripts/make_lock.py after the suite passes in the new
@@ -86,7 +93,7 @@ python-dotenv==1.1.1  # via -r requirements.txt
 pytz==2026.4  # via pandas
 pywin32-ctypes==0.2.3 ; sys_platform == 'win32'  # via keyring
 pyyaml==6.0.2  # via -r requirements.txt
-questionary==2.1.0  # via -r requirements-cli.txt
+questionary==2.1.1  # via -r requirements-cli.txt
 requests==2.32.3  # via -r requirements.txt
 rich==14.0.0  # via typer, -r requirements-cli.txt
 scikit-learn==1.6.1  # via causal-learn, dowhy, imbalanced-learn, shap, sklearn-compat, -r requirements.txt

@@ -31,7 +31,8 @@
 #   <dir>/app/<version>     EDM-ARS itself (the previous version is kept)
 #   <dir>/venv-<version>    its private Python packages
 #   <dir>/python            a private Python 3.11 (your own Python is untouched)
-#   <dir>/uv                the uv tool, only if you do not have it already
+#   <dir>/uv                the uv tool and its download cache, only if you
+#                           do not have uv already
 #   ~/.local/bin/edmars     the command you type
 # Default <dir>: ~/Library/Application Support/edm-ars (macOS) or
 # ~/.local/share/edm-ars (Linux). To remove it: run `edmars uninstall`
@@ -113,7 +114,7 @@ fetch() {
             elif have wget; then
                 wget -q --https-only -O "$2" "$1"
             else
-                die "neither curl nor wget is installed; install one of them and try again."
+                die "neither curl nor wget is installed; install one of them and try again (for example 'sudo apt install curl ca-certificates' on Ubuntu or Debian)."
             fi
             ;;
         *)
@@ -500,7 +501,7 @@ main() {
         if [ "$UV" = "$APP_BASE/uv/uv" ]; then UV_PRIVATE=1; fi
     else
         fetch "https://astral.sh/uv/$UV_VERSION/install.sh" "$TMP_DIR/uv-installer.sh" \
-            || die "could not download the uv installer. Check your internet connection."
+            || die "could not download the uv installer (see the message above). Check your internet connection. On a minimal Linux system also install the ca-certificates package: curl and wget cannot check https addresses without it."
         uv_sum=$(sha256_of "$TMP_DIR/uv-installer.sh")
         if [ "$uv_sum" != "$UV_INSTALLER_SHA256" ]; then
             die "the uv installer did not match its expected fingerprint, so it was not run. You can install uv yourself (https://docs.astral.sh/uv/) and run this installer again."
@@ -512,6 +513,13 @@ main() {
         UV="$APP_BASE/uv/uv"
         UV_PRIVATE=1
         [ -x "$UV" ] || die "uv was not found at $UV after installing it."
+    fi
+    if [ "$UV_PRIVATE" = 1 ]; then
+        # uv's download cache (about 1.8 GB on Linux) would otherwise stay
+        # in ~/.cache/uv after the program is deleted. In the uv folder it
+        # goes with it. A uv of your own keeps using its own cache.
+        UV_CACHE_DIR="$APP_BASE/uv/cache"
+        export UV_CACHE_DIR
     fi
 
     # ---- 3. Python -------------------------------------------------------------

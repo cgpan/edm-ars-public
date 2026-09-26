@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from edmars import estimates, study  # real modules, imported before the fakes replace their neighbours
 from tests.cli.wizard_fakes import DEFAULT, Fakes, KeyCheck, NonInteractiveError, install_fakes
 
 GOOD_KEY = "sk-fake-deepseek-0123456789abcdef"
@@ -439,8 +440,6 @@ def test_reviewer_asks_for_a_deepseek_key_even_with_another_service(fx: Fakes) -
 def test_reviewer_quotes_the_same_price_as_the_confirmation_card(fx: Fakes) -> None:
     import re
 
-    from edmars import estimates, study
-
     fx.ui.script = ["manual", "skip"]
     assert run("reviewer") == 0
     flat = " ".join(fx.ui.output.split())
@@ -558,6 +557,17 @@ def test_noninteractive_full_setup_with_the_standard_key_variable(
     assert fx.secrets.set_calls == []  # already in the standard variable: nothing copied
     assert fx.ui.prompts == []
     assert GOOD_KEY not in fx.ui.output
+    # Nothing was saved, so a later terminal without the variable has no
+    # key; setup says so instead of only "Using the key".
+    assert "The key was not saved" in fx.ui.output and "--key-env" in fx.ui.output
+
+
+def test_noninteractive_key_in_the_variable_and_already_saved_needs_no_warning(
+        fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", GOOD_KEY)
+    fx.secrets.store["DEEPSEEK_API_KEY"] = GOOD_KEY
+    assert run("ai", non_interactive=True, options={"check_keys": "false"}) == 0
+    assert "The key was not saved" not in fx.ui.output
 
 
 def test_noninteractive_reads_options_from_the_environment(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -725,9 +735,16 @@ def test_noninteractive_key_file_needs_the_option(fx: Fakes, monkeypatch: pytest
     from tests.cli.wizard_fakes import SecretStoreError
 
     monkeypatch.setenv("CI_DEEPSEEK", GOOD_KEY)
-    fx.secrets.fail_on_set = SecretStoreError("no credential store")
+    error = SecretStoreError("Could not save DEEPSEEK_API_KEY in this computer's credential store "
+                             "(NoKeyringError). EDM-ARS can keep it in a file readable only by your "
+                             "user account instead, if you agree to that.")
+    error.reason = "NoKeyringError"  # type: ignore[attr-defined]
+    fx.secrets.fail_on_set = error
     options = {"accept_disclosure": True, "key_env": "CI_DEEPSEEK"}
     assert run(non_interactive=True, options=options) == 1
+    # One explanation, not the error's own offer followed by the wizard's.
+    assert "no credential store EDM-ARS can use" in fx.ui.output
+    assert "if you agree to that" not in fx.ui.output
     assert "allow_key_file=yes" in fx.ui.output
     assert "DEEPSEEK_API_KEY" not in fx.secrets.store
     assert run(non_interactive=True, options={**options, "allow_key_file": True}) == 0

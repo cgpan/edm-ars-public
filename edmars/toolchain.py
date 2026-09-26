@@ -618,6 +618,59 @@ def _tinytex_pdflatex() -> str | None:
     return None
 
 
+#: What the official TinyTeX installer needs on Linux: plain name -> the
+#: package that provides it on (Debian/Ubuntu, Fedora/RHEL).
+_TINYTEX_LINUX_NEEDS: dict[str, tuple[str, str]] = {
+    "Perl": ("perl", "perl"),
+    "xz": ("xz-utils", "xz"),
+    "curl": ("curl", "curl"),
+}
+
+
+def tinytex_missing_tools() -> list[str]:
+    """Programs the TinyTeX installer needs on Linux that this computer lacks.
+
+    The installer and ``tlmgr`` are Perl programs that need Perl's standard
+    modules. Minimal systems (containers, WSL, servers) often have only the
+    bare ``perl`` of ``perl-base``, which the installer refuses. It unpacks
+    a ``.tar.xz`` with ``xz`` and downloads with curl or wget. macOS ships
+    all of these and Windows TinyTeX brings its own, so the list is empty
+    there.
+    """
+    if not sys.platform.startswith("linux"):
+        return []
+    from edmars import proc
+
+    missing: list[str] = []
+    perl = proc.which("perl")
+    # The installer's own test: `perl -mFile::Find /dev/null`.
+    if not perl or not _run([perl, "-MFile::Find", "-e", "1"], timeout=30).ok:
+        missing.append("Perl")
+    if not proc.which("xz"):
+        missing.append("xz")
+    if not (proc.which("curl") or proc.which("wget")):
+        missing.append("curl")
+    return missing
+
+
+def _and(names: Sequence[str]) -> str:
+    """"a", "a and b", "a, b and c"."""
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _perl_on_path() -> bool:
+    from edmars import proc
+
+    return bool(proc.which("perl"))
+
+
+def _linux_install_hint(missing: Sequence[str]) -> str:
+    apt = " ".join(_TINYTEX_LINUX_NEEDS[name][0] for name in missing)
+    dnf = " ".join(_TINYTEX_LINUX_NEEDS[name][1] for name in missing)
+    return (f"Install them first (they need administrator rights): `sudo apt install {apt}` on "
+            f"Ubuntu or Debian, `sudo dnf install {dnf}` on Fedora. Then run `edmars setup pdf` again.")
+
+
 def _tlmgr_install(tlmgr: str, packages: Iterable[str], timeout: float) -> list[str]:
     """Install packages; returns the ones that failed (tries one by one on error)."""
     wanted = [p for p in dict.fromkeys(packages) if p]
@@ -674,6 +727,16 @@ def install_tinytex(
                 on_step(text)
             except Exception:  # noqa: BLE001 - a status line is not fatal
                 pass
+
+    # tlmgr is a Perl program too, so this matters even when TinyTeX is
+    # already there. Checked before anything is downloaded.
+    missing = tinytex_missing_tools()
+    if missing:
+        return Check(title, "fail",
+                     "TinyTeX needs " + _and(missing) + ", which this computer does not have"
+                     + (" (only the minimal Perl without its standard modules was found)"
+                        if "Perl" in missing and _perl_on_path() else "") + ".",
+                     fix=_linux_install_hint(missing))
 
     tlmgr = find_tlmgr()
     if not tlmgr:

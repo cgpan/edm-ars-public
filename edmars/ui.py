@@ -221,7 +221,7 @@ def is_interactive() -> bool:
 
 
 def _use_questionary() -> bool:
-    if not is_interactive() or is_plain() or is_mintty():
+    if _questionary_failed or not is_interactive() or is_plain() or is_mintty():
         return False
     if not (_isatty(sys.stdin) and _isatty(sys.stdout)):
         return False
@@ -230,6 +230,32 @@ def _use_questionary() -> bool:
     except Exception:
         return False
     return True
+
+
+#: Set when an arrow-key prompt failed to start; the numbered prompts are
+#: used from then on.
+_questionary_failed = False
+
+
+def _ask_questionary(build: Callable[[], Any]) -> tuple[bool, Any]:
+    """Run one questionary prompt: (True, answer), or (False, None) if it broke.
+
+    questionary reaches into prompt_toolkit's internals, so a mismatched
+    pair of versions (questionary 2.1.0 with prompt_toolkit 3.0.52 or
+    later) fails while building the menu. Rather than end the whole command
+    with a crash report, the caller falls back to the numbered prompt.
+    Ctrl-C and end of input are passed on as before.
+    """
+    global _questionary_failed
+    try:
+        return True, build().unsafe_ask()
+    except (KeyboardInterrupt, EOFError):
+        raise
+    except Exception as exc:  # noqa: BLE001 - any failure inside the menu library
+        _questionary_failed = True
+        warn(f"The arrow-key menu could not start ({type(exc).__name__}); "
+             "using numbered choices instead.")
+        return False, None
 
 
 # --- Consoles -------------------------------------------------------------
@@ -531,10 +557,12 @@ def select(
             questionary.Choice(title=label, value=value, disabled=unavailable.get(value))
             for value, label in choices
         ]
-        answer = questionary.select(message, choices=options, default=default).unsafe_ask()
-        if answer is None:
-            raise KeyboardInterrupt
-        return str(answer)
+        asked, answer = _ask_questionary(
+            lambda: questionary.select(message, choices=options, default=default))
+        if asked:
+            if answer is None:
+                raise KeyboardInterrupt
+            return str(answer)
 
     say(message)
     for number, (value, label) in enumerate(choices, start=1):
@@ -592,13 +620,13 @@ def text(message: str, default: str | None = None, validate: Validator | None = 
             error = _validation_error(validate, value.strip())
             return error or True
 
-        answer = questionary.text(
-            message, default=default or "", validate=_q_validate if validate else None
-        ).unsafe_ask()
-        if answer is None:
-            raise KeyboardInterrupt
-        answer = str(answer).strip()
-        return answer if answer or default is None else default
+        asked, answer = _ask_questionary(lambda: questionary.text(
+            message, default=default or "", validate=_q_validate if validate else None))
+        if asked:
+            if answer is None:
+                raise KeyboardInterrupt
+            answer = str(answer).strip()
+            return answer if answer or default is None else default
 
     suffix = f" [{default}]" if default else ""
     while True:
@@ -655,10 +683,11 @@ def secret(message: str) -> str:
     if _use_questionary():
         import questionary
 
-        answer = questionary.password(message).unsafe_ask()
-        if answer is None:
-            raise KeyboardInterrupt
-        return str(answer).strip()
+        asked, answer = _ask_questionary(lambda: questionary.password(message))
+        if asked:
+            if answer is None:
+                raise KeyboardInterrupt
+            return str(answer).strip()
 
     if is_mintty():
         warn(
@@ -699,10 +728,11 @@ def confirm(message: str, default: bool = True) -> bool:
     if _use_questionary():
         import questionary
 
-        answer = questionary.confirm(message, default=default).unsafe_ask()
-        if answer is None:
-            raise KeyboardInterrupt
-        return bool(answer)
+        asked, answer = _ask_questionary(lambda: questionary.confirm(message, default=default))
+        if asked:
+            if answer is None:
+                raise KeyboardInterrupt
+            return bool(answer)
 
     hint = "[Y/n]" if default else "[y/N]"
     while True:

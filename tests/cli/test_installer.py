@@ -585,3 +585,63 @@ def test_install_sh_refuses_bad_input_before_changing_anything(tmp_path: Path) -
         assert result.returncode == 1
         assert "Dropbox" in result.stderr
         assert list(synced_home.iterdir()) == []
+
+
+_FAKE_UV = r"""#!/bin/sh
+# A stand-in uv: logs each call with the cache it was given, and makes the
+# files the installer looks for next.
+printf '%s | cache=%s\n' "$*" "${UV_CACHE_DIR-<unset>}" >>"$FAKE_UV_LOG"
+case "$1" in
+    --version) echo "uv 0.10.6 (fake)" ;;
+    python) if [ "$2" = find ]; then echo "$FAKE_BASE_PY"; fi ;;
+    venv)
+        for last in "$@"; do :; done
+        mkdir -p "$last/bin"
+        printf '%s\n' '#!/bin/sh' \
+            'case "$*" in' \
+            '    *sysconfig*) d="$(cd "$(dirname "$0")/.." && pwd)/lib/site"; mkdir -p "$d"; echo "$d" ;;' \
+            '    *edmars*) echo "edmars (fake)" ;;' \
+            'esac' >"$last/bin/python"
+        chmod 755 "$last/bin/python"
+        ;;
+esac
+exit 0
+"""
+
+
+@pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")
+@pytest.mark.parametrize("private", [True, False])
+def test_install_sh_keeps_its_own_uvs_cache_in_the_install_folder(tmp_path: Path, private: bool) -> None:
+    # With the uv it downloaded, the installer left uv's cache (about 1.8 GB
+    # on Linux) in ~/.cache/uv, where nothing listed it for removal. A uv
+    # the user already had keeps its own cache.
+    base, home = tmp_path / "base", tmp_path / "home"
+    home.mkdir()
+    uv = base / "uv" / "uv" if private else tmp_path / "own" / "uv"
+    uv.parent.mkdir(parents=True)
+    uv.write_text(_FAKE_UV, encoding="utf-8")
+    uv.chmod(0o755)
+    log = tmp_path / "uv.log"
+    env = {"FAKE_UV_LOG": str(log), "FAKE_BASE_PY": str(tmp_path / "python3"), "HOME": str(home)}
+    if not private:
+        env["PATH"] = f"{uv.parent}{os.pathsep}{os.environ.get('PATH', '')}"
+    result = _run_sh(tmp_path, "--yes", "--no-onboard", "--no-modify-path", "--from-local",
+                     str(REPO_ROOT), "--dir", str(base), "--bin-dir", str(tmp_path / "bin"), **env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = log.read_text(encoding="utf-8").splitlines()
+    installs = [line for line in calls if line.startswith(("python install", "venv", "pip install"))]
+    assert len(installs) == 3, calls
+    expected = f"cache={base / 'uv' / 'cache'}" if private else "cache=<unset>"
+    assert all(line.endswith(expected) for line in installs), calls
+    record = json.loads((base / "install.json").read_text(encoding="utf-8"))
+    assert record["uv_private"] is private
+
+
+def test_install_ps1_keeps_its_own_uvs_cache_in_the_install_folder() -> None:
+    # The same rule in the Windows installer, checked by text (the real
+    # run needs the network): only a private uv gets the cache setting.
+    ps1 = _text(INSTALL_PS1)
+    block = re.search(r"if \(\$uvPrivate\) \{(?P<body>.*?)\n        \}", ps1, re.DOTALL)
+    assert block is not None
+    assert "Set-TempEnv 'UV_CACHE_DIR' (Join-Path $base 'uv\\cache')" in block.group("body")
+    assert ps1.index("Set-TempEnv 'UV_CACHE_DIR'") < ps1.index("Installing Python $PythonSeries")

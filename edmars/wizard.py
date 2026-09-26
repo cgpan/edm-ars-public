@@ -1092,9 +1092,16 @@ class _Wizard:
 
         where = getattr(secrets, "secrets_file", None)
         path = str(where()) if callable(where) else "a file in your EDM-ARS settings folder"
-        text = (f"This computer's credential store did not keep the key ({_doctor.redact(str(problem))}). "
-                f"EDM-ARS can keep it in {path} instead: a plain-text file that only your user account can "
-                "read. Anyone who can sign in as you, or a program you run, could read it.")
+        # The error's own message already offers the file; only its cause
+        # belongs in this sentence.
+        reason = str(getattr(problem, "reason", "") or "") or _doctor.redact(str(problem))
+        if reason == "NoKeyringError":
+            first = ("This computer has no credential store EDM-ARS can use (usual on Linux without "
+                     "a desktop session).")
+        else:
+            first = f"This computer's credential store did not keep the key ({reason})."
+        text = (f"{first} EDM-ARS can keep it in {path} instead: a plain-text file that only your user "
+                "account can read. Anyone who can sign in as you, or a program you run, could read it.")
         if self.ni:
             if _truthy(self.opt("allow_key_file", False)):
                 self.warn(text + " Using it because allow_key_file was given.")
@@ -1153,7 +1160,14 @@ class _Wizard:
             self.info("Skipping the live key check (check_keys is off).")
         if source_var != env_var:
             return self._store_key(env_var, key)
-        self.ok(f"Using the {label} key from {_doctor.store_label(secrets.secret_source(env_var) or 'env', env_var)}.")
+        source = secrets.secret_source(env_var) or "env"
+        self.ok(f"Using the {label} key from {_doctor.store_label(source, env_var)}.")
+        if source == "env" and not secrets.stored_location(env_var):
+            # Nothing is copied from the provider's own variable, so a later
+            # terminal without it has no key. Say so here, not at the first study.
+            self.info(f"The key was not saved, so EDM-ARS can use it only while {env_var} is set. "
+                      "To save it, run `edmars setup ai` and paste it, or pass it to setup in a "
+                      "variable with another name: --key-env OTHER_NAME.")
         return True
 
     # -- local model server ---------------------------------------------------------

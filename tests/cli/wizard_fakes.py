@@ -316,6 +316,9 @@ class FakeSecrets:
             return self.backend
         return None
 
+    def stored_location(self, name: str) -> str | None:
+        return self.backend if name in self.store else None
+
     def child_secrets(self, names: Iterable[str]) -> dict[str, str]:
         return {n: v for n in names if (v := self.get_secret(n))}
 
@@ -705,7 +708,7 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fakes:
         "disclosure": _module("disclosure", fakes.disclosure, ("ACK_VERSION", "ack_text", "disclaimer_text",
                                                                "privacy_text", "is_acknowledged", "record_ack")),
         "secrets": _module("secrets", fakes.secrets, ("get_secret", "set_secret", "delete_secret", "secret_source",
-                                                       "child_secrets", "redact", "secrets_file",
+                                                       "child_secrets", "redact", "secrets_file", "stored_location",
                                                        "SecretStoreError")),
         "proc": _module("proc", fakes.proc, ("which", "pid_alive", "run", "spawn_detached")),
         "providers": _module("providers", fakes.providers, ("PROVIDERS", "KeyCheck", "check_key",
