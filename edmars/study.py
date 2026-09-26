@@ -145,10 +145,11 @@ JOURNAL_VENUES: frozenset[str] = frozenset({"JEDM", "JLA", "AERA_OPEN"})
 # source every screen and the README share.
 TIME_WITHOUT_REVIEW = estimates.TIME_WITHOUT_REVIEW
 TIME_WITH_REVIEW = estimates.TIME_WITH_REVIEW
-COST_DEEPSEEK = estimates.COST_DEEPSEEK
+COST_DEEPSEEK_WITHOUT_REVIEW = estimates.COST_DEEPSEEK_WITHOUT_REVIEW
+COST_DEEPSEEK_WITH_REVIEW = estimates.COST_DEEPSEEK_WITH_REVIEW
 COST_OTHER = (
     "not estimated for this AI service; live token counts are shown while the "
-    "study runs. You pay the service directly."
+    "study runs. " + estimates.STOPPED_EARLY + " You pay the service directly."
 )
 COST_LOCAL = (
     "no charge from an AI service (your own model server); live token counts "
@@ -2399,11 +2400,12 @@ def confirmation_card(
     lines += _wrap("AI:", ai)
     lines += _wrap("Time:", TIME_WITH_REVIEW if plan.review else TIME_WITHOUT_REVIEW)
     if provider == "deepseek":
-        cost = COST_DEEPSEEK
-    elif provider == "local":
-        cost = COST_LOCAL
+        cost = estimates.cost_deepseek(plan.review)
     else:
-        cost = COST_OTHER
+        cost = COST_LOCAL if provider == "local" else COST_OTHER
+        if plan.review:
+            # The review always runs on DeepSeek, whatever writes the study.
+            cost += f" The automated review uses DeepSeek: {estimates.REVIEW_COST_DEEPSEEK}."
     lines += _wrap("Cost:", cost)
     if balance:
         lines += _wrap("Balance:", str(balance))

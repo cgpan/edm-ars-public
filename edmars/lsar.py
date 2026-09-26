@@ -887,8 +887,8 @@ def review_paper(
     run's ``paper_for_review.pdf`` (the gate's citation-cleaned copy) or
     ``paper.pdf``. Nothing in the run is modified except the new
     ``<run>/lsar_review_manual/`` folder, which receives LSAR's report and
-    a ``console.log``. Takes 10-40 minutes and costs a few cents of
-    DeepSeek credit.
+    a ``console.log``. Takes ``estimates.MANUAL_REVIEW_TIME`` and costs
+    ``estimates.MANUAL_REVIEW_COST``.
 
     Returns ``{"output_dir", "pdf", "venue", "score", "recommendation",
     "benchmark", "passed", "report_md", "report_json"}``; ``benchmark`` and

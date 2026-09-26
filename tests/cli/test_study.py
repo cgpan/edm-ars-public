@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from edmars import study
+from edmars import estimates, study
 from edmars.model import Check, StudyPlan
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -824,7 +824,10 @@ def test_card_content(tmp_path: Path) -> None:
     card = study.confirmation_card(plan, {"provider": "deepseek"}, balance="US$4.20")
     assert "Which ninth-grade factors predict GPA?" in card
     assert study.TIME_WITHOUT_REVIEW in card
-    assert "US$0.05-0.20" in card and "Balance:" in card
+    flat = " ".join(card.split())
+    assert study.COST_DEEPSEEK_WITHOUT_REVIEW in flat and "Balance:" in card
+    assert "US$0.05-0.20" not in flat  # the price the Mac study showed was too low
+    assert "stops early still costs" in flat
     assert "What is sent where" in card and "To DeepSeek:" in card
     assert "never uploaded" in card
     assert "automated review" not in card.split("What is sent where")[1]
@@ -835,8 +838,30 @@ def test_card_content(tmp_path: Path) -> None:
                                               "lsar": {"enabled": True}})
     assert study.TIME_WITH_REVIEW.split(",")[0] in card
     assert "not estimated" in card
+    # The review runs on DeepSeek whatever writes the study, so its price
+    # is quoted even when the study's own service is not estimated.
+    assert estimates.REVIEW_COST_DEEPSEEK in " ".join(card.split())
     assert "To OpenAI:" in card and "To DeepSeek, for the automated review" in card
     assert "benchmark" in card
+
+
+def test_card_prices_a_deepseek_study_with_and_without_the_review() -> None:
+    # The Mac study (DeepSeek, off-peak, stopped after its analysis) cost
+    # about US$0.16 while the card promised US$0.05-0.20 for a whole
+    # reviewed study; the prices were DeepSeek's wrong rates.
+    plan = study.plan_from_flags({}, prompt="Which ninth-grade factors predict GPA?")
+    reviewed = StudyPlan(**{**plan.__dict__, "review": True})
+    settings = {"provider": "deepseek", "lsar": {"enabled": True}}
+    without = " ".join(study.confirmation_card(plan, settings).split())
+    with_review = " ".join(study.confirmation_card(reviewed, settings).split())
+    assert "US$0.20-0.40" in without and "US$0.80" in without
+    assert "US$0.20-0.55" in with_review and "US$1.10" in with_review
+    for card in (without, with_review):
+        assert "01:00-04:00 and 06:00-10:00 UTC" in card
+        assert "stops early still costs" in card
+        card.encode("ascii")
+    assert "including the automated review" in with_review
+    assert "including the automated review" not in without
 
 
 def test_card_for_a_local_model() -> None:

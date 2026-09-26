@@ -528,9 +528,10 @@ def test_reviewer_quotes_the_same_price_as_the_confirmation_card(fx: Fakes) -> N
     flat = " ".join(fx.ui.output.split())
     assert estimates.REVIEW_COST_DEEPSEEK in flat
     assert "US$0.05 per review" not in flat
+    assert "about US$0.01 per review" not in flat  # DeepSeek's real rates are higher
     # Six reviews at the quoted price fit inside the card's whole-study range.
     most_reviews = float(re.findall(r"US\$([\d.]+) in all", estimates.REVIEW_COST_DEEPSEEK)[0])
-    top = float(re.findall(r"US\$[\d.]+-([\d.]+)", study.COST_DEEPSEEK)[0])
+    top = float(re.findall(r"US\$[\d.]+-([\d.]+)", study.COST_DEEPSEEK_WITH_REVIEW)[0])
     assert most_reviews < top
 
 

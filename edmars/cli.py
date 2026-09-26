@@ -985,8 +985,8 @@ def review_cmd(
     # like new, run and resume, it needs the current notice accepted.
     _require_ack(settings, accept_disclosure)
     _confirm_spend(
-        f"Review the paper in {run_dir.name}? This sends it to DeepSeek and usually "
-        f"takes {estimates.MANUAL_REVIEW_TIME}.",
+        f"Review the paper in {run_dir.name}? This sends it to DeepSeek, usually "
+        f"takes {estimates.MANUAL_REVIEW_TIME} and costs {estimates.MANUAL_REVIEW_COST}.",
         non_interactive,
     )
     outcome = _call_with(review, run_dir=run_dir, settings=settings)

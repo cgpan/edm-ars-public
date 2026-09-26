@@ -25,6 +25,8 @@ from urllib.parse import urlsplit
 
 import requests
 
+from edmars import estimates
+
 KeyStatus = Literal["OK", "REJECTED", "NO_CREDIT", "NETWORK", "UNKNOWN"]
 KEY_STATUSES: tuple[str, ...] = ("OK", "REJECTED", "NO_CREDIT", "NETWORK", "UNKNOWN")
 DEFAULT_TIMEOUT = 15.0
@@ -60,8 +62,8 @@ PROVIDERS: dict[str, ProviderInfo] = {
         base_url="https://api.deepseek.com",
         support="recommended",
         note=(
-            "The configuration EDM-ARS is tested with. Pay-as-you-go; a full "
-            "study has cost about US$0.05-0.20 on the few runs measured."
+            "The configuration EDM-ARS is tested with. Pay-as-you-go; a study "
+            "costs " + estimates.COST_DEEPSEEK_WITH_REVIEW
         ),
         top_up_url="https://platform.deepseek.com/top_up",
         key_prefix="sk-",

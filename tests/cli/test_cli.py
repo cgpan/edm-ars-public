@@ -490,6 +490,20 @@ def test_review_requires_the_disclosure(monkeypatch: pytest.MonkeyPatch) -> None
     assert reviewed == [folder]
 
 
+def test_review_asks_with_the_time_and_the_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    from edmars import estimates
+
+    accept_disclosure()
+    folder = make_study()
+    reviewed: list[Path] = []
+    fake_module(monkeypatch, "lsar", review=lambda run_dir: reviewed.append(run_dir) or 0)
+    result = invoke("review", folder.name)  # no --yes, and no terminal to ask in
+    assert result.exit_code != 0
+    flat = " ".join(result.output.split())
+    assert estimates.MANUAL_REVIEW_TIME in flat and estimates.MANUAL_REVIEW_COST in flat
+    assert reviewed == []
+
+
 def test_review_without_a_review_function(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_module(monkeypatch, "lsar")
     result = invoke("review", "--yes")
