@@ -12,9 +12,10 @@ output before anything is called finished.
 
 > **Version 5.** Five study types, ten certified estimators, four curated
 > datasets, 70 composable skill units, ~3,000 automated tests. A complete gated
-> paper takes 18–46 minutes and costs about **$0.15** in API spend at DeepSeek
-> rates (token counts measured on one instrumented run, priced at the rates in
-> `config.yaml`, one of which is not yet verified — see [Cost](#cost)).
+> paper takes 18–46 minutes. At DeepSeek's prices of 2026-09-26 it costs roughly
+> **US$0.20–0.55** in API spend outside DeepSeek's peak hours and up to twice
+> that inside them (token counts measured on archived runs, priced at those
+> rates — see [Cost](#cost)).
 
 ## Disclaimer and privacy
 
@@ -508,29 +509,52 @@ perfectly well without being graded.
 
 ## Cost
 
-Measured from one fully instrumented run (84 API calls, DeepSeek, at the rates
-in `config.yaml`):
+The figures below are token counts measured on archived runs, priced at
+DeepSeek's rates as published on 2026-09-26
+(https://api-docs.deepseek.com/quick_start/pricing), which are the rates in
+`config.yaml`. DeepSeek bills twice as much in its peak hours, 01:00–04:00 and
+06:00–10:00 UTC on weekdays, as at any other time; weekends are off-peak all
+day. With the default routing every stage except the outline (and the optional
+verifier) runs on `deepseek-v4-pro`.
 
-| | Calls | Cost |
-|---|---|---|
-| Pipeline (six agents) | 21 | $0.091 |
-| Review gate (six sampled reviews) | 63 | $0.055 |
-| **One complete paper** | **84** | **$0.146** |
+| | Calls | Off-peak | Peak |
+|---|---|---|---|
+| One instrumented paper: pipeline (six agents, one revision round) | 21 | $0.27 | $0.53 |
+| The same paper: review gate (six sampled reviews) | 63 | $0.13 | $0.26 |
+| **That complete paper** | **84** | **$0.40** | **$0.80** |
+| Pipeline alone, 11 archived papers (median $0.25 off-peak) | 8–21 | $0.18–0.40 | $0.36–0.80 |
+| One automated review (6 measured) | 10–11 | $0.018–0.025 | $0.035–0.050 |
 
-About 74% of input tokens were served from the provider's prompt cache, which is
-the single largest lever on cost. Every run records prompt, completion and
-cached-token counts separately in `token_usage.jsonl`, and `run_cost.json`
-prices them using the rates in `config.yaml`. **A model with no configured rate
-reports `null`, never `$0`** — and because raw counts are stored, changing a rate
-re-prices historical runs without re-running them.
+The review gate runs one review, three when the score is borderline, and up to
+six over two rounds, so a complete gated paper costs roughly $0.20–0.55
+off-peak and $0.40–1.10 at peak. Ten of the eleven archived papers ran every
+stage on the cheaper `deepseek-flash`; their token counts are priced here as
+the default routing would bill them, which assumes `deepseek-v4-pro` uses a
+similar number of tokens (the one paper that ran on it sits mid-range).
+Journal-format papers, written section by section, and psychometric studies
+have not been measured and probably cost more. A study that stops early has
+still spent money: one stopped by the pre-review checks after its analysis
+spent about $0.16 off-peak.
 
-Verify the rates against your provider's current price list before quoting a
-figure; they are operator input, not a measurement. One shipped rate,
-`deepseek-flash` (the outline and verifier stages), is marked `verified: false`;
-a run that uses a model whose rate is unverified never has its cost labelled
-`measured` in `run_cost.json`: it says `estimated`, or `partial` when some
-model has no rate at all. `pipeline.cost_budget_usd` only logs a warning; it
-never stops a run, so set a spending limit with your provider.
+On the instrumented run, 74% of the pipeline's input tokens were served from
+the provider's prompt cache, billed at a thirtieth of the uncached rate on
+`deepseek-v4-pro`; the cache is the single largest lever on cost. Every run
+records prompt, completion and cached-token counts separately in
+`token_usage.jsonl`, and `run_cost.json` prices each call at the rate for the
+hour it was made. **A model with no configured rate reports `null`, never
+`$0`** — and because raw counts are stored, changing a rate re-prices
+historical runs without re-running them. `run_cost.json` leaves out the review
+gate's own calls (LSAR records them in `lsar_review/cycle_*/token_usage.json`)
+and any call cut off by a stop or a crash, which reports no usage but may still
+be billed.
+
+Rates change. Check them against your provider's price list before quoting a
+figure, and update `verified_on` in `config.yaml` when you do. A rate marked
+`verified: false` makes a run's cost `estimated` in `run_cost.json`, never
+`measured`, and so does a call of unknown time on a model priced by the hour
+(it is charged the peak rate); a run that used a model with no rate at all is
+`partial`. `pipeline.cost_budget_usd` only logs a warning; it never stops a
+run, so set a spending limit with your provider.
 
 ---
 
