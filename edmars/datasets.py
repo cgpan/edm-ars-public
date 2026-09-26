@@ -469,7 +469,9 @@ def validate_file(name: str, path: str | Path) -> Check:
     if info.value_format == "labels" and probe_values and not text:
         how = (
             " This is the numeric-code CSV as it comes in the NCES zip; EDM-ARS "
-            f"makes the labelled one from that zip itself: run `{get_command(name)}`."
+            f"makes the labelled one from that zip itself: run `{get_command(name)}`, "
+            "or import a zip you downloaded yourself with "
+            f"`edmars data import {name} <path to the .zip>`."
             if info.label_table else ""
         )
         return Check(
@@ -817,10 +819,10 @@ def download(
         fetch.download_file(info.url, zip_path, progress=progress, session=session)
     if not zipfile.is_zipfile(zip_path):
         _unlink_quiet(zip_path)
+        inside = "the .zip" if info.label_table else "csv inside it"
         instead = (
-            "" if info.label_table else
             f", or download the zip in a browser from {info.url} and use "
-            f"`edmars data import {name} <csv inside it>`"
+            f"`edmars data import {name} <{inside}>`"
         )
         raise DatasetError(
             "The NCES server sent something that is not a zip file (perhaps an "
@@ -916,10 +918,17 @@ def import_file(name: str, path: str | Path, settings: dict[str, Any]) -> Path:
 
     Uses a hard link when the source is on the same disk and not inside a
     cloud-sync folder (no second copy of a 2 GB file); otherwise copies.
-    The verification record is saved into ``settings``.
+    For a dataset with a ``label_table``, ``path`` may also be the zip as
+    downloaded from NCES: it is checked and converted (:func:`convert_zip`)
+    and left where it is. The verification record is saved into ``settings``.
     """
-    _info(name)
+    info = _info(name)
     src = Path(path).expanduser()
+    if info.label_table and src.is_file() and zipfile.is_zipfile(src):
+        dest = expected_path(name, settings)
+        digest = convert_zip(name, src, dest)
+        _store_record(name, settings, dest, digest, f"import:{src.name}")
+        return dest
     check = validate_file(name, src)
     if check.status == "fail":
         raise DatasetError(check.detail)

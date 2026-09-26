@@ -1099,7 +1099,10 @@ def data_import_cmd(
     name: Annotated[str, typer.Argument(help="The dataset's name, as `edmars data list` shows it.")],
     path: Annotated[
         Path,
-        typer.Argument(help="The data file you downloaded yourself.", exists=True, dir_okay=False, readable=True),
+        typer.Argument(
+            help="The data file you downloaded yourself (for HSLS:09 also the NCES .zip, which is converted).",
+            exists=True, dir_okay=False, readable=True,
+        ),
     ],
     plain: PlainOpt = False,
     yes: YesOpt = False,
@@ -1109,7 +1112,7 @@ def data_import_cmd(
     datasets = _module("datasets")
     settings = _settings()
     _dataset_info(datasets, name)
-    with ui.status("Checking and copying the file (a 2 GB file takes a minute)"):
+    with ui.status("Checking the file and putting it in place (a 2 GB file takes a minute)"):
         stored = Path(datasets.import_file(name, path, settings))
     check = datasets.validate_file(name, stored)
     ui.show_checks([check])

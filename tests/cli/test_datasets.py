@@ -166,6 +166,7 @@ def test_labelled_hsls_passes_and_numeric_codes_fail(tmp_path: Path, tiny_hsls: 
     # not that the NCES zip holds a labelled CSV (it does not).
     assert "as it comes in the NCES zip" in check.detail
     assert "`edmars data install hsls09_public`" in check.detail
+    assert "`edmars data import hsls09_public <path to the .zip>`" in check.detail
     assert check.fix == "edmars data install hsls09_public"
 
 
@@ -308,8 +309,11 @@ def test_an_interrupted_download_resumes_on_the_next_call(
 
 def test_an_html_page_instead_of_a_zip_is_refused(fake_nces: bytes, tmp_path: Path) -> None:
     session = serve_bytes(b"<html>Access denied by your network filter</html>")
-    with pytest.raises(datasets.DatasetError, match="not a zip"):
+    with pytest.raises(datasets.DatasetError, match="not a zip") as caught:
         datasets.download("hsls09_public", tmp_path, session=session)
+    # The way round a filter: fetch the zip in a browser and import the zip
+    # (the CSV inside it is the numeric one, which cannot be imported).
+    assert "`edmars data import hsls09_public <the .zip>`" in str(caught.value)
     assert not (tmp_path / "hsls_17_student_pets_sr_v1_0.csv").exists()
     assert not list((tmp_path / ".downloads").glob("*.zip"))
 
@@ -537,6 +541,49 @@ def test_importing_the_installed_file_itself_is_fine(tiny_hsls: None) -> None:
     dest.write_bytes(_csv(HSLS_HEADER, HSLS_LABELLED))
     assert datasets.import_file("hsls09_public", dest, settings_dict) == dest
     assert dest.read_bytes() == _csv(HSLS_HEADER, HSLS_LABELLED)
+
+
+def test_the_nces_zip_can_be_imported_and_is_converted(fake_nces: bytes, tmp_path: Path) -> None:
+    """A zip downloaded in a browser gives the same file as `data install`."""
+    settings_dict = _load_settings()
+    zip_file = tmp_path / "HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip"
+    zip_file.write_bytes(fake_nces)
+
+    dest = datasets.import_file("hsls09_public", zip_file, settings_dict)
+
+    assert dest == datasets.expected_path("hsls09_public", settings_dict)
+    assert dest.read_bytes() == LABELLED_CSV
+    record = settings_dict["datasets"]["hsls09_public"]
+    assert record["sha256"] == _sha(LABELLED_CSV)
+    assert record["source"] == "import:HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip"
+    assert zip_file.read_bytes() == fake_nces, "the user's own zip is left alone"
+    assert datasets.status("hsls09_public", settings_dict).status == "ok"
+    assert datasets.verify("hsls09_public", settings_dict).status == "ok"
+
+
+def test_an_imported_zip_of_another_release_is_refused_and_kept(
+    fake_nces: bytes, tmp_path: Path
+) -> None:
+    settings_dict = _load_settings()
+    zip_file = tmp_path / "newer.zip"
+    zip_file.write_bytes(_zip({MEMBER: NUMERIC_CSV + b'"10004",-5,1,8,50.0,3.0,1,"11"\n'}))
+    with pytest.raises(datasets.UnknownReleaseError, match="did not convert") as caught:
+        datasets.import_file("hsls09_public", zip_file, settings_dict)
+    assert "was deleted" not in str(caught.value)
+    assert zip_file.is_file()
+    assert not datasets.expected_path("hsls09_public", settings_dict).exists()
+
+
+def test_data_import_command_converts_the_nces_zip(fake_nces: bytes, tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from edmars.cli import app
+
+    zip_file = tmp_path / "HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip"
+    zip_file.write_bytes(fake_nces)
+    result = CliRunner().invoke(app, ["data", "import", "hsls09_public", str(zip_file), "--plain"])
+    assert result.exit_code == 0, result.output
+    assert datasets.expected_path("hsls09_public", _load_settings()).read_bytes() == LABELLED_CSV
 
 
 def test_import_refuses_an_invalid_file(tmp_path: Path) -> None:
