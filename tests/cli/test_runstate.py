@@ -200,6 +200,33 @@ def test_usage_events_are_priced_like_src_cost() -> None:
     assert unpriced["data"]["cost_usd"] is None
 
 
+def test_usage_events_are_priced_by_the_hour_like_run_cost_json() -> None:
+    # config.yaml now prices DeepSeek by the hour: the top-level rates are
+    # the peak ones, and the flat formula charged every call at them.
+    from src.cost import TokenUsage, cost_usd
+
+    pricing = {"deepseek-v4-pro": {
+        "input": 1.32, "cached_input": 0.044, "output": 3.96,
+        "off_peak": {"input": 0.66, "cached_input": 0.022, "output": 1.98},
+        "peak_windows_utc": {"days": ["mon", "tue", "wed", "thu", "fri"],
+                             "hours": ["01:00-04:00", "06:00-10:00"]},
+    }}
+    row = {"agent": "Analyst", "model": "deepseek-v4-pro", "prompt_tokens": 1_000_000,
+           "cached_prompt_tokens": 500_000, "completion_tokens": 1_000_000}
+    saturday = {**row, "timestamp": "2026-09-26T13:50:00"}  # the Mac study: off-peak
+    friday_peak = {**row, "timestamp": "2026-09-25T02:30:00"}
+    untimed = dict(row)
+    off, peak, unknown = (ev["data"]["cost_usd"] for ev in usage_events([saturday, friday_peak, untimed], pricing))
+    assert off == pytest.approx(0.5 * 0.66 + 0.5 * 0.022 + 1.98)
+    assert peak == pytest.approx(0.5 * 1.32 + 0.5 * 0.044 + 3.96)
+    assert unknown == pytest.approx(peak)  # an unknown time is never priced low
+    for got, source in ((off, saturday), (peak, friday_peak)):
+        usage = TokenUsage(agent="Analyst", model="deepseek-v4-pro", provider="deepseek",
+                           prompt_tokens=1_000_000, completion_tokens=1_000_000,
+                           cached_prompt_tokens=500_000, timestamp=source["timestamp"])
+        assert got == pytest.approx(cost_usd(usage, pricing))
+
+
 def test_tail_state_of_a_finished_run(run_home: Path) -> None:
     run = make_run(run_home, results=PREDICTION_RESULTS,
                    review={"overall_quality_score": 8, "overall_verdict": "PASS", "unverified": False},

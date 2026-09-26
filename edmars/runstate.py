@@ -891,18 +891,40 @@ def load_pricing(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def usage_cost(row: dict[str, Any], pricing: dict[str, Any]) -> float | None:
-    """USD for one ``token_usage.jsonl`` row, same formula as src/cost.py."""
-    rates = pricing.get(str(row.get("model"))) if pricing else None
+    """USD for one ``token_usage.jsonl`` row, or None when its model has no rate.
+
+    Priced by src/cost.py itself, so a model DeepSeek bills by the hour
+    (an ``off_peak`` block and ``peak_windows_utc`` in config.yaml) is
+    charged the rate for the hour in the row's timestamp, exactly as
+    run_cost.json charges it. Without the pipeline next to the app, the
+    entry's full rate is used: that is the peak rate, which src/cost.py
+    also charges a call whose time it cannot read, so the figure is never
+    too low.
+    """
+    model = str(row.get("model"))
+    rates = pricing.get(model) if pricing else None
     if not isinstance(rates, dict):
         return None
-    prompt = _num(row.get("prompt_tokens")) or 0.0
-    cached = _num(row.get("cached_prompt_tokens")) or 0.0
-    completion = _num(row.get("completion_tokens")) or 0.0
+    prompt = int(_num(row.get("prompt_tokens")) or 0)
+    cached = int(_num(row.get("cached_prompt_tokens")) or 0)
+    completion = int(_num(row.get("completion_tokens")) or 0)
+    try:
+        from src.cost import TokenUsage, cost_usd
+
+        stamp = row.get("timestamp")
+        usage = TokenUsage(
+            agent=str(row.get("agent") or ""), model=model, provider=str(row.get("provider") or ""),
+            prompt_tokens=prompt, completion_tokens=completion, cached_prompt_tokens=cached,
+            timestamp=stamp if isinstance(stamp, str) else None,
+        )
+        return cost_usd(usage, pricing)
+    except Exception:  # noqa: BLE001 - no pipeline, or a rate it cannot read
+        pass
     rate_in = _num(rates.get("input")) or 0.0
     rate_cached = _num(rates.get("cached_input"))
     rate_cached = rate_in if rate_cached is None else rate_cached
     rate_out = _num(rates.get("output")) or 0.0
-    total = max(prompt - cached, 0.0) * rate_in + cached * rate_cached + completion * rate_out
+    total = max(prompt - cached, 0) * rate_in + cached * rate_cached + completion * rate_out
     return total / 1_000_000.0
 
 
