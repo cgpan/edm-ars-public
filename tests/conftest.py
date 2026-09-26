@@ -1,5 +1,6 @@
 """Pytest configuration: registers custom markers and handles integration test skipping."""
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -159,6 +160,12 @@ def pytest_configure(config: pytest.Config) -> None:
         "live_review_gate: opt out of the offline ReviewGate stub (makes "
         "real LSAR + provider calls; use only with --run-integration)",
     )
+    config.addinivalue_line(
+        "markers",
+        "requires_tools(*names): skip unless every named command-line tool "
+        "(pdflatex, bibtex, biber, ...) is on PATH; looked up with "
+        "shutil.which after collection, never run while a module is imported",
+    )
 
 
 def pytest_collection_modifyitems(
@@ -171,3 +178,34 @@ def pytest_collection_modifyitems(
         for item in items:
             if "integration" in item.keywords:
                 item.add_marker(skip_marker)
+    _skip_tests_whose_tools_are_missing(items)
+
+
+def _skip_tests_whose_tools_are_missing(items: list[pytest.Item]) -> None:
+    """Skip each ``requires_tools`` test whose tools are not on PATH.
+
+    shutil.which only looks, it never starts the tool, so this cannot fail
+    the way a tool call in a skipif condition does: the first CI run had
+    no TeX, ``subprocess.run(["pdflatex", ...])`` in a class-level skipif
+    raised FileNotFoundError while tests/test_arc_p3_p4.py was being
+    imported, and pytest stopped before it ran a single test. The skip is
+    a marker, so -rs reports it at the test, with the missing tools named.
+    """
+    found: dict[str, bool] = {}
+    for item in items:
+        names = [
+            name
+            for marker in item.iter_markers(name="requires_tools")
+            for name in marker.args
+        ]
+        missing: list[str] = []
+        for name in names:
+            if name not in found:
+                found[name] = shutil.which(name) is not None
+            if not found[name] and name not in missing:
+                missing.append(name)
+        if missing:
+            item.add_marker(pytest.mark.skip(
+                reason=f"{', '.join(missing)} not found on PATH; this test "
+                "runs the real tool"
+            ))
