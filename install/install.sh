@@ -526,6 +526,10 @@ main() {
         say "  4. Download EDM-ARS from GitHub and check its SHA-256 fingerprint."
     fi
     say "  5. Install EDM-ARS and the packages it needs (about 1.5 GB)."
+    if [ "$OS" = "Darwin" ]; then
+        say "     If XGBoost then finds no OpenMP library (Homebrew's libomp), link the"
+        say "     one that comes with scikit-learn into the private Python for it."
+    fi
     say "  6. Create the command $BIN_DIR/edmars."
     if [ "$NO_MODIFY_PATH" = 1 ]; then
         say "  7. Leave your PATH alone (--no-modify-path)."

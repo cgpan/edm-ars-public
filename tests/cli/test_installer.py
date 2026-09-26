@@ -857,6 +857,37 @@ def test_install_step5_links_nothing_for_other_failures_or_systems(tmp_path: Pat
     assert not lay.link.exists()
 
 
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_install_sh_plans_a_mac_install_into_application_support(tmp_path: Path) -> None:
+    # Stand-in uname and sysctl make install.sh see an Apple Silicon Mac.
+    # The macOS default folder has a space in it, and the plan must say
+    # that the OpenMP library may be linked.
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    (fakebin / "uname").write_bytes(b'#!/bin/sh\nif [ "${1:-}" = -m ]; then echo arm64; else echo Darwin; fi\n')
+    (fakebin / "sysctl").write_bytes(
+        b'#!/bin/sh\ncase "$2" in\n    hw.optional.arm64) echo 1 ;;\n'
+        b'    hw.memsize) echo 17179869184 ;;\n    *) echo 0 ;;\nesac\n')
+    for fake in fakebin.iterdir():
+        fake.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _clean_env(tmp_path, HOME=_sh_path(home))
+    env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
+    result = subprocess.run(
+        [SH, _sh_path(INSTALL_SH), "--dry-run", "--from-local", _sh_path(REPO_ROOT)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, env=env, stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert "Computer:      macOS (Apple Silicon)" in out
+    assert f"Install into:  {_sh_path(home)}/Library/Application Support/edm-ars\n" in out
+    assert "link the\n     one that comes with scikit-learn into the private Python" in out
+    assert "Dry run: nothing was downloaded or changed." in out
+    assert list(home.iterdir()) == []
+
+
 @pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")
 def test_install_sh_refuses_bad_input_before_changing_anything(tmp_path: Path) -> None:
     home = tmp_path / "home"
