@@ -1019,6 +1019,15 @@ def _progress_printer() -> Callable[..., None]:
     return report
 
 
+def _installed_and_valid(datasets: Any, name: str, settings: dict[str, Any]) -> bool:
+    """Whether ``datasets.install`` will find a usable copy already in place."""
+    expected = getattr(datasets, "expected_path", None)
+    if expected is None:
+        return False
+    path = Path(expected(name, settings))
+    return path.is_file() and str(getattr(datasets.validate_file(name, path), "status", "")) == "ok"
+
+
 def _save_dataset_path(settings: dict[str, Any], name: str, path: Path) -> None:
     """Remember where a dataset is (``datasets`` records hashes itself)."""
     from edmars import settings as settings_mod
@@ -1084,7 +1093,13 @@ def data_install_cmd(
             from edmars import settings as settings_mod
 
             settings_mod.save(settings)
-        ui.info("Downloading. Large files take a while; if it stops, run the same command to continue.")
+        if _installed_and_valid(datasets, name, settings):
+            # install() only re-hashes a valid copy (and downloads again
+            # only if it changed), so "Downloading" would be wrong here.
+            ui.info("Already installed: checking that the file is complete and unchanged. "
+                    "A copy that changed is downloaded again.")
+        else:
+            ui.info("Downloading. Large files take a while; if it stops, run the same command to continue.")
         path = Path(datasets.install(name, settings, progress=_progress_printer()))
     check = datasets.validate_file(name, path)
     ui.show_checks([check])

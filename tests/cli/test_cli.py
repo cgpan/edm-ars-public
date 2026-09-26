@@ -571,6 +571,7 @@ def _dataset_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]
         terms_accepted=lambda name, s: bool(settings.get(s, f"datasets.{name}.terms_accepted_at")),
         accept_terms=accept_terms,
         raw_data_dir=lambda s: tmp_path,
+        expected_path=lambda name, s=None: tmp_path / "hsls.csv",
         validate_file=lambda name, path: Check("HSLS:09", "ok", "labelled values found"),
         status=status,
         verify=verify,
@@ -608,9 +609,13 @@ def test_data_install_records_the_dataset(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert entry["verified_at"].endswith("Z")
     assert entry["sha256"] == "ab" * 32  # the record datasets.install made is saved
     assert entry["terms_accepted_at"].endswith("Z")
+    assert "Downloading." in result.output
     # Terms already accepted: not asked again, even without --accept-terms.
     again = invoke("data", "install", "hsls09_public")
     assert again.exit_code == 0, again.output
+    # Already installed: the file is re-checked, and nothing says it downloads.
+    assert "Already installed" in again.output
+    assert "Downloading" not in again.output
 
 
 def test_data_install_unknown_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

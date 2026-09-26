@@ -478,6 +478,27 @@ def test_a_local_zip_is_refused_where_nothing_pins_it(
         datasets.download("hsls09_public", tmp_path / "raw", session=serve_bytes(b""))
 
 
+def test_installing_an_installed_copy_does_not_say_downloading(
+    fake_nces: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typer.testing import CliRunner
+
+    from edmars.cli import app
+
+    local = tmp_path / "nces.zip"
+    local.write_bytes(fake_nces)
+    monkeypatch.setenv("EDMARS_TEST_ZIP_HSLS09_PUBLIC", str(local))
+    command = ["data", "install", "hsls09_public", "--accept-terms", "--plain"]
+    first = CliRunner().invoke(app, command)
+    assert first.exit_code == 0, first.output
+    assert "converted 100%" in first.output
+
+    again = CliRunner().invoke(app, command)
+    assert again.exit_code == 0, again.output
+    assert "Already installed" in again.output
+    assert "Downloading" not in again.output and "converted" not in again.output
+
+
 REAL_ZIP_ENV = "EDMARS_REAL_HSLS_ZIP"
 
 
