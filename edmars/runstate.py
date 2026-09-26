@@ -181,6 +181,12 @@ class RunState:
     gate: dict[str, Any] | None = None
     verify: dict[str, Any] | None = None
     cost_unpriced: bool = False
+    #: AI calls that ended without an answer, so their cost is unknown:
+    #: cut off when the study was stopped (the service may still bill
+    #: them), or failed with an error. Both are in ``llm_calls``; neither
+    #: is in run_cost.json, which counts answered calls.
+    calls_cut_off: int = 0
+    calls_failed: int = 0
     last_seq: int = 0
     last_plain: str = ""
     alive: bool | None = None
@@ -402,6 +408,56 @@ def _stage_end(state: RunState, key: str, ts: datetime | None, outcome: Any) -> 
         state.code_running = False
 
 
+#: llm.end ``error_class`` values of a call cut off by a stop (Ctrl+C,
+#: `edmars stop`, a termination signal) rather than failed by an error.
+_STOP_ERRORS = frozenset({"KeyboardInterrupt", "_StopRequested", "SystemExit"})
+
+
+def _cut_off_open_call(state: RunState) -> None:
+    """A call still waiting for its answer when the run ended (or a new
+    process started) was cut off: count it, with an unknown cost."""
+    if state.waiting_ai:
+        state.llm_calls += 1
+        state.calls_cut_off += 1
+        state.waiting_ai = False
+        state.waiting_agent = None
+
+
+def cost_is_lower_bound(state: RunState) -> bool:
+    """True when some AI call's cost is not in the figure: a model with no
+    price, or a call that ended without an answer."""
+    return bool(state.cost_unpriced or state.calls_cut_off or state.calls_failed)
+
+
+def cost_line(state: RunState) -> str:
+    """The cost as every screen shows it (live view, result screen,
+    summary.html), so the figures and their "at least" always agree."""
+    n = state.llm_calls
+    calls = f"{n} AI call{'s' if n != 1 else ''}"
+    if state.calls_cut_off:
+        calls += f", {state.calls_cut_off} cut off when the study was stopped"
+    lead = "Cost" if state.finished else "Cost so far"
+    unanswered = state.calls_cut_off + state.calls_failed
+    cost = state.cost_usd
+    if cost is None:
+        if n and n > unanswered:
+            return f"{lead}: not priced for this AI service ({calls})"
+        if not n:
+            if state.finished:
+                return f"{lead}: not recorded for this study"
+            return f"{lead}: US$0.00 (no AI calls yet)"
+        cost = 0.0  # only calls without an answer so far
+    amount = f"US${cost:.3f}"
+    if cost_is_lower_bound(state):
+        amount = f"at least {amount}"
+    return f"{lead}: {amount} ({calls})"
+
+
+#: Shown with the cost when a call was cut off by the stop.
+CUT_OFF_NOTE = ("An AI call that was cut off when the study was stopped may still be "
+                "billed by the AI service, so the real cost can be a little higher.")
+
+
 def _apply(state: RunState, ev: dict[str, Any]) -> None:
     etype = str(ev.get("type") or "")
     seq = ev.get("seq")
@@ -430,6 +486,7 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
     if etype == "run.start":
         if state.finished or data.get("resumed"):
             state.resumed += 1
+        _cut_off_open_call(state)
         for st in state.stages:
             if st.status == "running":
                 # The earlier process ended mid-step without a stage.end
@@ -466,9 +523,15 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
         state.llm_wait = None
         state.llm_calls += 1
         cost = _num(data.get("cost_usd"))
-        if cost is None:
+        if data.get("ok") is False:
+            # No answer came back: cost unknown, but not "unpriced".
+            if str(data.get("error_class") or "") in _STOP_ERRORS:
+                state.calls_cut_off += 1
+            else:
+                state.calls_failed += 1
+        elif cost is None:
             state.cost_unpriced = True
-        else:
+        if cost is not None:
             state.cost_usd = round((state.cost_usd or 0.0) + cost, 6)
     elif etype == "llm.wait":
         state.llm_wait = {
@@ -563,6 +626,7 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
             state.cost_usd = cost
         if isinstance(data.get("abort"), dict):
             state.abort = dict(data["abort"])
+        _cut_off_open_call(state)
         state.waiting_ai = False
         state.code_running = False
         for st in state.stages:
@@ -1454,8 +1518,11 @@ def _enrich(state: RunState, run_dir: Path, files: _FileCache, *, tail: bool) ->
         run_started_ts is None or (cost_mtime is not None and cost_mtime >= run_started_ts - 1)
     ):
         n = _int(cost_file.get("n_calls"))
-        if n is not None and n >= state.llm_calls:
-            state.llm_calls = n
+        # run_cost.json counts answered calls only; the calls that ended
+        # without an answer stay counted on top, with an unknown cost.
+        unanswered = state.calls_cut_off + state.calls_failed
+        if n is not None and n >= state.llm_calls - unanswered:
+            state.llm_calls = n + unanswered
             cost = _num(cost_file.get("cost_usd"))
             if cost is not None:
                 state.cost_usd = cost
@@ -1510,6 +1577,7 @@ def _enrich(state: RunState, run_dir: Path, files: _FileCache, *, tail: bool) ->
             state.finished = True
             state.final_state = "STOPPED" if state.stop_requested else "CRASHED"
     if state.finished:
+        _cut_off_open_call(state)
         state.waiting_ai = False
         state.code_running = False
         for st in state.stages:
@@ -1813,8 +1881,11 @@ __all__ = [
     "EXPERIMENTAL_LINE",
     "EXPERIMENTAL_NOTE",
     "EXPERIMENTAL_WHY",
+    "CUT_OFF_NOTE",
     "RunState",
     "as_dict",
+    "cost_is_lower_bound",
+    "cost_line",
     "StageState",
     "StateReader",
     "STAGE_ORDER",

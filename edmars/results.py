@@ -29,12 +29,14 @@ from typing import Any
 from edmars.endstates import READY_KINDS, Outcome, classify, gate_skip_text, messages, quote_path
 from edmars.model import EXIT_ERROR, EXIT_NOT_READY, EXIT_READY, EXIT_STOPPED
 from edmars.runstate import (
+    CUT_OFF_NOTE,
     EXPERIMENTAL_LINE,
     EXPERIMENTAL_NOTE,
     EXPERIMENTAL_WHY,
     RunState,
     fmt_ci,
     fmt_num,
+    cost_line,
     fmt_score,
     load_state,
 )
@@ -280,9 +282,20 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
         add()
         add(str(messages().get("saved_note") or "Your finished steps are saved."))
         add(f"Study folder: {run_dir}", "dim")
+    _cost(state, add)
     add()
     add(reminder(), "italic")
     return out
+
+
+def _cost(state: RunState, add: Any) -> None:
+    """The cost, worded as the live view words it, and why it may be low."""
+    if not (state.llm_calls or state.cost_usd is not None):
+        return
+    add()
+    add(cost_line(state), "dim")
+    if state.calls_cut_off:
+        add(CUT_OFF_NOTE, "dim")
 
 
 def _please_check(outcome: Outcome, add: Any, plain: bool) -> None:
@@ -494,10 +507,12 @@ def render_summary_html(outcome: Outcome, state: RunState, run_dir: Path) -> str
         meta.append(f"Dataset: {state.dataset}")
     if state.provider:
         meta.append(f"AI service: {state.provider}")
-    if cost is not None:
-        meta.append(f"Cost: US${cost:.3f} ({state.llm_calls} AI calls)")
+    if cost is not None or state.llm_calls:
+        meta.append(cost_line(state))
     meta.append(f"Summary written {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     add(f'<p class="muted">{_e(" · ".join(meta))}</p>')
+    if state.calls_cut_off:
+        add(f'<p class="muted">{_e(CUT_OFF_NOTE)}</p>')
     add(f'<p class="note">{_e(reminder())}</p>')
     add("</main></body></html>")
     return "\n".join(parts) + "\n"

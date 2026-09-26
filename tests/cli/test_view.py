@@ -334,3 +334,44 @@ def test_a_step_cut_off_without_a_stage_end_counts_as_an_earlier_attempt() -> No
                            _ev(10, "stage.end", "53:00", stage="ANALYZING", outcome="ok")])
     analysis = state.stage("ANALYZING")
     assert analysis.duration_s() == 180.0 and analysis.earlier_s == 60.0
+
+
+
+def _stopped_mid_call() -> list[dict]:
+    return [
+        event(1, "run.start", 0, task_type="prediction", dataset="hsls09_public", provider="deepseek"),
+        event(2, "stage.start", 0, stage="ANALYZING"),
+        event(3, "llm.end", 1, ok=True, cost_usd=0.02),
+        event(4, "llm.end", 2, ok=False, error_class="KeyboardInterrupt", cost_usd=None),
+        event(5, "stage.end", 2, stage="ANALYZING", outcome="interrupted"),
+        event(6, "run.end", 2, state="INTERRUPTED"),
+    ]
+
+
+def test_a_call_cut_off_by_the_stop_is_counted_and_explained() -> None:
+    # The Mac view said "at least US$0.039 (9 AI calls)" at the stop while
+    # pipeline.log counted 8 calls, and nothing said what the ninth was.
+    state = fold(_stopped_mid_call())
+    assert (state.llm_calls, state.calls_cut_off, state.calls_failed) == (2, 1, 0)
+    assert view.cost_line(state) == "Cost: at least US$0.020 (2 AI calls, 1 cut off when the study was stopped)"
+    screen = " ".join(view.screen_text(state, width=80, now=NOW).split())
+    assert "may still be billed by the AI service" in screen
+
+
+def test_a_call_that_failed_makes_the_cost_a_lower_bound_without_calling_it_cut_off() -> None:
+    state = fold([event(1, "llm.end", 0, ok=True, cost_usd=0.01),
+                  event(2, "llm.end", 1, ok=False, error_class="APIStatusError", cost_usd=None)])
+    assert view.cost_line(state) == "Cost so far: at least US$0.010 (2 AI calls)"
+    assert not state.cost_unpriced  # the model has a price; the call had no answer
+    only_cut_off = fold([event(1, "llm.end", 0, ok=False, error_class="KeyboardInterrupt"),
+                         event(2, "run.end", 0, state="INTERRUPTED")])
+    assert view.cost_line(only_cut_off) == \
+        "Cost: at least US$0.000 (1 AI call, 1 cut off when the study was stopped)"
+
+
+def test_a_call_still_waiting_when_the_process_died_is_cut_off() -> None:
+    state = fold([event(1, "llm.end", 0, ok=True, cost_usd=0.01),
+                  event(2, "llm.start", 1),
+                  event(3, "run.start", 5, resumed=True)])
+    assert (state.llm_calls, state.calls_cut_off) == (2, 1)
+    assert not state.waiting_ai

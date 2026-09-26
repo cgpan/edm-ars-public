@@ -32,6 +32,7 @@ from typing import Any, Callable
 from rich.cells import cell_len
 
 from edmars.runstate import (
+    CUT_OFF_NOTE,
     EXPERIMENTAL_LINE,
     RunState,
     StageState,
@@ -42,6 +43,7 @@ from edmars.runstate import (
     step_position,
     stopped_early,
 )
+from edmars.runstate import cost_line as _cost_line
 
 EXIT_ENDED = 0
 EXIT_LEFT_RUNNING = 10
@@ -141,18 +143,9 @@ def _provider_label(provider: str) -> str:
 
 
 def cost_line(state: RunState) -> str:
-    calls = f"{state.llm_calls} AI call{'s' if state.llm_calls != 1 else ''}"
-    lead = "Cost" if state.finished else "Cost so far"
-    if state.cost_usd is None:
-        if state.llm_calls:
-            return f"{lead}: not priced for this AI service ({calls})"
-        if state.finished:
-            return f"{lead}: not recorded for this study"
-        return f"{lead}: US$0.00 (no AI calls yet)"
-    amount = f"US${state.cost_usd:.3f}"
-    if state.cost_unpriced:
-        amount = f"at least {amount}"
-    return f"{lead}: {amount} ({calls})"
+    """The cost line (edmars.runstate.cost_line, shared with the result
+    screen and summary.html)."""
+    return _cost_line(state)
 
 
 def render_screen(
@@ -220,6 +213,8 @@ def render_screen(
     for i, text in enumerate(_wrap(f"Now: {now_text}", width, indent="     ")):
         add(text, "bold" if i == 0 else "")
     tail = "" if state.finished else " · Safe to close this window — the study keeps running"
+    if state.finished and state.calls_cut_off:
+        tail = f". {CUT_OFF_NOTE}"
     for text in _wrap(cost_line(state) + tail, width):
         add(text, "dim")
     recent = state.recent[-3:]
@@ -346,6 +341,8 @@ class PlainPrinter:
             self._finished_said = True
             ended = "Stopped" if stopped_early(state) else "Finished"
             out += self._emit(f"{ended}. {state.now_text} {cost_line(state)}.")
+            if state.calls_cut_off:
+                out += self._emit(CUT_OFF_NOTE)
         if out:
             self._last_output = tick
         elif not state.finished and self._last_output is not None and \
