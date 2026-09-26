@@ -12,6 +12,7 @@ import csv
 import json
 import os
 from dataclasses import dataclass, field
+from typing import Any, NamedTuple
 
 
 # ---------------------------------------------------------------------------
@@ -150,35 +151,108 @@ def run_pre_critic_checks(
 #: keys or substrings that show the work was actually done. Vague phrases
 #: are NOT listed: a check that fires on "explore" or "examine" would be
 #: noise, and noise is how a check gets ignored.
-_RQ_COMMITMENTS: tuple[tuple[tuple[str, ...], tuple[str, ...], str], ...] = (
-    (
+#:
+#: ``strict`` commitments do not accept a record that says the analysis
+#: did not run (see :func:`_evidence_text`). Only the incremental-validity
+#: promise is strict: the skill contract lets a moderation or calibration
+#: analysis be recorded as skipped and descoped in the Limitations, and
+#: the Analyst prompt tells regression runs to do exactly that for
+#: calibration, so making those strict would stop runs the contract
+#: allows.
+class _Commitment(NamedTuple):
+    kind: str
+    phrases: tuple[str, ...]
+    evidence_keys: tuple[str, ...]
+    description: str
+    strict: bool = False
+
+
+_RQ_COMMITMENTS: tuple[_Commitment, ...] = (
+    _Commitment(
+        "ordinal",
         ("ordinal", "ordered categor", "proportional odds", "ordered logit"),
         ("ordinal", "proportional_odds", "polr", "ordered"),
         "an ordinal model (proportional-odds or ordinal forest)",
     ),
-    (
+    _Commitment(
+        "incremental",
         ("above and beyond", "over and above", "incremental valid",
          "incremental predictive", "beyond baseline"),
         ("incremental_validity", "nested_model", "delta_auc"),
         "an incremental-validity / nested-model comparison",
+        strict=True,
     ),
-    (
+    _Commitment(
+        "mediation",
         ("mediat",),
         ("mediation", "indirect_effect"),
         "a mediation analysis",
     ),
-    (
+    _Commitment(
+        "moderation",
         ("moderat", "interaction effect", "varies by", "vary by"),
         ("moderation", "interaction", "subgroup_heterogeneity",
          "subgroup_performance"),
         "a moderation / interaction analysis",
     ),
-    (
+    _Commitment(
+        "calibration",
         ("calibrat",),
         ("calibration",),
         "a calibration analysis",
     ),
 )
+
+#: ``status`` values with which a helper or the Analyst says an analysis
+#: did NOT run. run_incremental_validity returns ``{"status": "skipped",
+#: "reason": ...}`` when its column lists match nothing; that record is
+#: the absence of the test, and its key name must not pass for evidence.
+_NOT_RUN_STATUSES: frozenset[str] = frozenset(
+    {"skipped", "failed", "error", "not_run"}
+)
+
+_DROPPED = object()
+
+
+def _drop_not_run(value: Any) -> Any:
+    """``value`` without any dict whose ``status`` says it did not run."""
+    if isinstance(value, dict):
+        status = value.get("status")
+        if isinstance(status, str) and status.strip().lower() in _NOT_RUN_STATUSES:
+            return _DROPPED
+        kept = {}
+        for key, item in value.items():
+            pruned = _drop_not_run(item)
+            if pruned is not _DROPPED:
+                kept[key] = pruned
+        return kept
+    if isinstance(value, list):
+        return [p for p in (_drop_not_run(v) for v in value) if p is not _DROPPED]
+    return value
+
+
+def _evidence_text(results: dict, strict: bool) -> str:
+    """The lower-cased text pcc_07 searches for evidence.
+
+    Evidence may sit at any depth (results.incremental_validity,
+    results.all_models["OrdinalForest"], a key inside a sub-dict), so the
+    serialised object is searched rather than a fixed set of top-level
+    keys. For a strict commitment, records that say the analysis did not
+    run are removed first, and so are ``warnings`` and ``errors``: a
+    sentence reporting that the comparison was skipped names the key
+    without being the comparison.
+    """
+    subject: Any = results
+    if strict:
+        subject = _drop_not_run(
+            {k: v for k, v in results.items() if k not in ("warnings", "errors")}
+        )
+        if subject is _DROPPED:
+            return ""
+    try:
+        return json.dumps(subject).lower()
+    except (TypeError, ValueError):
+        return str(subject).lower()
 
 
 def _check_research_question_is_answered(
@@ -199,19 +273,14 @@ def _check_research_question_is_answered(
     results = getattr(ctx, "results_object", None) or {}
     if not isinstance(results, dict):
         return
-    # Evidence may sit at any depth (results.incremental_validity,
-    # results.all_models["OrdinalForest"], a key inside a sub-dict), so
-    # search the serialised object rather than a fixed set of top-level
-    # keys.
-    try:
-        haystack = json.dumps(results).lower()
-    except (TypeError, ValueError):
-        haystack = str(results).lower()
 
-    for phrases, evidence_keys, description in _RQ_COMMITMENTS:
+    for commitment in _RQ_COMMITMENTS:
+        phrases = commitment.phrases
+        description = commitment.description
         if not any(p in question for p in phrases):
             continue
-        if any(k.lower() in haystack for k in evidence_keys):
+        haystack = _evidence_text(results, commitment.strict)
+        if any(k.lower() in haystack for k in commitment.evidence_keys):
             continue
         matched = next(p for p in phrases if p in question)
         result.failures.append(
