@@ -36,6 +36,10 @@ _CLEARED_ENV = (
     "EDMARS_DEBUG",
     "EDMARS_PLAIN",
     "NO_COLOR",
+    # TERM=dumb (common in CI and containers) turns plain mode on before
+    # the checks the ui tests are about; the suite was written where TERM
+    # is unset, as on Windows.
+    "TERM",
     "MSYSTEM",
     # Pipeline settings a developer's shell may hold, and that the pipeline
     # tests leak: src.config.load_config sets LSAR_HOME in os.environ when

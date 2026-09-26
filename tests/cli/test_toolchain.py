@@ -362,10 +362,12 @@ def test_set_miktex_autoinstall(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 def test_saved_pdflatex_brings_its_own_siblings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # The file names this OS uses: "biber.exe" is not a program on Linux.
+    exe = ".exe" if toolchain.os.name == "nt" else ""
     tiny = tmp_path / "TinyTeX" / "bin" / "windows"
-    pdflatex = _touch(tiny / "pdflatex.exe")
-    biber = _touch(tiny / "biber.exe")
-    other = _touch(tmp_path / "miktex" / "biber.exe")
+    pdflatex = _touch(tiny / f"pdflatex{exe}")
+    biber = _touch(tiny / f"biber{exe}")
+    other = _touch(tmp_path / "miktex" / f"biber{exe}")
     monkeypatch.setattr(proc, "which", lambda name: other if name == "biber" else None)
     settings = {"latex": {"mode": "tinytex", "pdflatex": pdflatex}}
     assert toolchain.find_tex_tool("pdflatex", settings) == pdflatex

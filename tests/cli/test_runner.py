@@ -336,7 +336,13 @@ def test_stop_lets_a_detached_run_wind_down_instead_of_killing_it(run_home: Path
         started = time.monotonic()
         runner.stop(run)
         assert time.monotonic() - started < 20
-        assert (run / "child_stopped").read_text(encoding="utf-8") == "_StopRequested True"
+        stopped = (run / "child_stopped").read_text(encoding="utf-8")
+        if sys.platform == "win32":
+            assert stopped == "_StopRequested True"  # only the STOP file can reach it
+        else:
+            # macOS/Linux also get SIGTERM, which usually arrives before the
+            # file watcher's next look. Either way the run wound itself down.
+            assert stopped in ("_StopRequested True", "_StopRequested False")
     finally:
         proc.terminate_tree(pid, grace_s=0)
 
