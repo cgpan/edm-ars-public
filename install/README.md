@@ -127,7 +127,7 @@ and `curl -LsSf <url>/install.sh | sh -s -- --no-onboard` elsewhere.
 | EDM-ARS itself | `<dir>\app\<version>` | `<dir>/app/<version>` | same |
 | Its Python packages | `<dir>\venv-<version>` | `<dir>/venv-<version>` | same |
 | Private Python 3.11 | `<dir>\python` | `<dir>/python` | same |
-| uv (only if you had none) | `<dir>\uv` | `<dir>/uv` | same |
+| uv and its download cache (only if you had no uv) | `<dir>\uv` | `<dir>/uv` | same |
 | The `edmars` command | `%USERPROFILE%\.local\bin\edmars.cmd` (and `edmars` beside it, for Git Bash) | `~/.local/bin/edmars` | same |
 | Install record | `<dir>\install.json` | `<dir>/install.json` | same |
 

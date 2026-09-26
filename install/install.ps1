@@ -24,7 +24,8 @@
         <Dir>\app\<version>     EDM-ARS itself (the previous version is kept)
         <Dir>\venv-<version>    its private Python packages
         <Dir>\python            a private Python 3.11 (your own Python is untouched)
-        <Dir>\uv                the uv tool, only if you do not have it already
+        <Dir>\uv                the uv tool and its download cache, only if you
+                                do not have uv already
         %USERPROFILE%\.local\bin\edmars.cmd   the command you type
         %USERPROFILE%\.local\bin\edmars       the same command for Git Bash
     Default <Dir>: %LOCALAPPDATA%\edm-ars. To remove it: run `edmars
@@ -637,6 +638,12 @@
             $uv = Join-Path $base 'uv\uv.exe'
             $uvPrivate = $true
             if (-not (Test-Path -LiteralPath $uv)) { Stop-Install "uv was not found at $uv after installing it." }
+        }
+        if ($uvPrivate) {
+            # uv's download cache would otherwise stay in %LOCALAPPDATA%\uv\cache
+            # after the program is deleted. In the uv folder it goes with it.
+            # A uv of your own keeps using its own cache.
+            Set-TempEnv 'UV_CACHE_DIR' (Join-Path $base 'uv\cache')
         }
 
         # ---- 3. Python --------------------------------------------------------------
