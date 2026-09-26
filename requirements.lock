@@ -1,7 +1,7 @@
 # requirements.lock -- exact package versions for installing EDM-ARS.
 #
 # Frozen from a clean Python 3.11.14 (win32) environment that passed the full
-# offline test suite (2482 passed, 32 skipped). That environment was built from
+# offline test suite (3905 passed, 41 skipped). That environment was built from
 # requirements.txt (without docker) plus requirements-cli.txt and pytest;
 # the test-only packages (pytest, pluggy, iniconfig) are left out here.
 #
@@ -15,13 +15,6 @@
 # `sys_platform` marker is installed on that platform only.
 # Resolved for the pinned versions but NOT part of the tested environment:
 # cryptography, jeepney, nvidia-nccl-cu12, secretstorage.
-#
-# One pin changed by hand after the freeze: questionary 2.1.0 -> 2.1.1.
-# With the pinned prompt-toolkit 3.0.53, questionary 2.1.0's arrow-key menu
-# raises AttributeError, so every menu in `edmars setup` and `edmars new`
-# crashed in a terminal (the tested environment had an older
-# prompt-toolkit). 2.1.1 has the same dependencies and fixes that. The next
-# make_lock.py run replaces this note.
 #
 # Used by install/install.sh, install/install.ps1 and CI:
 #     uv pip install -r requirements.lock -r requirements-cli.txt
@@ -49,7 +42,7 @@ fonttools==4.66.0  # via matplotlib
 graphviz==0.21  # via causal-learn
 h11==0.16.0  # via httpcore
 httpcore==1.0.9  # via httpx
-httpx==0.28.1  # via anthropic, openai
+httpx==0.28.1  # via anthropic, openai, -r requirements.txt
 idna==3.20  # via anyio, httpx, requests
 imbalanced-learn==0.13.0  # via -r requirements.txt
 importlib-metadata==9.0.1 ; python_full_version < '3.12'  # via keyring

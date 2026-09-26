@@ -130,6 +130,41 @@ def test_lock_header_says_what_was_tested() -> None:
     assert "docker" in header and "torch" in header and "lightgbm" in header
 
 
+def test_lock_header_is_exactly_what_make_lock_writes() -> None:
+    # The questionary fix had to change one pin by hand and add a note
+    # saying so until scripts/make_lock.py was run again. A header that is
+    # not exactly the script's own (a hand note, a placeholder suite
+    # result) means the lock was not regenerated from a tested environment.
+    import make_lock
+
+    text = LOCK.read_text(encoding="utf-8")
+    match = re.search(
+        r"^# Frozen from a clean Python (?P<tested>.+) environment that passed the full\n"
+        r"# offline test suite \((?P<result>[^)]*)\)\.",
+        text,
+        re.MULTILINE,
+    )
+    assert match, "requirements.lock has no make_lock.py header"
+    assert re.fullmatch(r"\d+ passed(, \d+ skipped)?", match.group("result")), (
+        f"the suite result in the lock header is {match.group('result')!r}, not a pytest count"
+    )
+    flat = " ".join(
+        line[1:].strip() for line in text.splitlines() if line.startswith("#")
+    )
+    untested = re.search(r"NOT part of the tested environment: (.*?)\.(?: |$)", flat)
+    assert untested, "the lock header does not list the resolved-but-untested packages"
+    extras = [] if untested.group(1) == "none" else [
+        name.strip() for name in untested.group(1).split(",")
+    ]
+    expected = make_lock.header(match.group("tested"), match.group("result"), extras)
+    assert text.startswith(expected), (
+        "requirements.lock's header differs from what scripts/make_lock.py writes; "
+        "regenerate the lock instead of editing it by hand"
+    )
+    first_pin = text[len(expected):].splitlines()[0]
+    assert PIN_LINE.match(first_pin), f"extra header text after make_lock.py's: {first_pin!r}"
+
+
 def test_cli_requirements_are_the_agreed_list() -> None:
     # The foundation branch writes the same file; both must stay identical.
     lines = (REPO_ROOT / "requirements-cli.txt").read_text(encoding="utf-8").splitlines()
