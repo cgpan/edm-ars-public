@@ -130,9 +130,10 @@ def test_uninstall_removes_settings_keys_and_downloads_but_keeps_data(
     assert made["study"].exists() and made["notes"].exists()
 
 
+@pytest.mark.parametrize("path_unchanged", [False, True])
 def test_uninstall_names_the_tinytex_it_leaves_in_place(
     edmars_home: Path, fake_keyring: FakeKeyring, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str], path_unchanged: bool,
 ) -> None:
     # `edmars setup pdf` installs TinyTeX (about 300 MB) outside EDM-ARS's
     # folders. Uninstall said "settings, keys and downloads were removed"
@@ -148,11 +149,15 @@ def test_uninstall_names_the_tinytex_it_leaves_in_place(
     (tinytex / "bin" / "windows").mkdir(parents=True)
     (tinytex / "bin" / "windows" / "pdflatex.exe").write_bytes(b"x" * 2048)
     monkeypatch.setattr(toolchain, "tinytex_root", lambda: tinytex)
+    # On macOS setup installs TinyTeX without touching PATH, and tlmgr is
+    # not on PATH either, so "run tlmgr path remove" would only fail there.
+    monkeypatch.setattr(maintenance, "_TINYTEX_PATH_UNCHANGED", path_unchanged)
 
     assert maintenance.uninstall(assume_yes=True) == 0
     out = " ".join(capsys.readouterr().out.split())
     assert tinytex.is_dir()  # other programs may use it; the user decides
-    assert str(tinytex) in out and "tlmgr path remove" in out
+    assert str(tinytex) in out and "then delete that folder" in out
+    assert ("tlmgr path remove" in out) is not path_unchanged
     assert "R library" in out
     assert "downloads were removed" not in out
     assert "automated reviewer and caches were removed" in out

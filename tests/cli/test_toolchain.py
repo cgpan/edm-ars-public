@@ -449,6 +449,58 @@ def test_install_tinytex_installs_then_fills_in_whatever_a_test_compile_misses(
     assert toolchain._first_error("all fine\n") == ""
 
 
+def test_tinytex_installer_never_asks_for_a_password_on_a_mac(tmp_path: Path) -> None:
+    # install-bin-unix.sh puts TinyTeX on PATH through `sudo tee
+    # /etc/paths.d/TinyTeX` when /usr/local/bin is not writable, and edmars
+    # captured its output, so the user saw a bare "Password:". --no-path
+    # (documented) skips that. The script moves its download into "$1/", so
+    # a folder must come before --no-path.
+    installer, keep = tmp_path / "install-bin-unix.sh", tmp_path
+    assert toolchain.tinytex_installer_command(installer, keep, platform="darwin") == [
+        "sh", str(installer), str(keep), "--no-path"]
+    # Linux's PATH step only links into ~/.local/bin, without sudo: unchanged.
+    assert toolchain.tinytex_installer_command(installer, keep, platform="linux") == ["sh", str(installer)]
+    bat = tmp_path / "install-bin-windows.bat"
+    assert toolchain.tinytex_installer_command(bat, keep, platform="win32") == [
+        "cmd.exe", "/d", "/c", str(bat)]
+
+
+def test_install_tinytex_runs_the_installer_without_a_terminal_and_says_where_it_is(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "TinyTeX"
+    monkeypatch.setattr(toolchain, "tinytex_root", lambda: root)
+    bin_dir = root / "bin" / "universal-darwin"
+    tlmgr_name = "tlmgr.bat" if toolchain.os.name == "nt" else "tlmgr"
+    pdflatex_name = "pdflatex.exe" if toolchain.os.name == "nt" else "pdflatex"
+    real_command = toolchain.tinytex_installer_command
+    monkeypatch.setattr(toolchain, "tinytex_installer_command",
+                        lambda installer, keep: real_command(installer, keep, platform="darwin"))
+    installer_calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "install-bin" in " ".join(args):
+            installer_calls.append((list(args), kwargs))
+            _touch(bin_dir / tlmgr_name)
+            _touch(bin_dir / pdflatex_name)
+            return completed(args, 0, "TinyTeX installed")
+        return completed(args, 0)
+
+    monkeypatch.setattr(proc, "run", run)
+    ok = [toolchain._CompileOutcome(toolchain.Check("acm", "ok", "fine"), []),
+          toolchain._CompileOutcome(toolchain.Check("apa", "ok", "fine"), [])]
+    monkeypatch.setattr(toolchain, "_test_compile_detailed", lambda timeout_s, settings: ok)
+
+    check = toolchain.install_tinytex(settings=_load_settings(), session=serve_bytes(b"echo installer"))
+
+    assert check.status == "ok", check.detail
+    [(args, kwargs)] = installer_calls
+    assert args[0] == "sh" and args[-1] == "--no-path"
+    assert Path(args[2]) == Path(kwargs["cwd"])  # the scratch folder, deleted afterwards
+    assert kwargs.get("new_session") is True
+    assert "not added to your PATH" in check.detail and str(bin_dir) in check.detail
+
+
 def test_tools_never_receive_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "not-for-r")
     seen: list[dict[str, str]] = []

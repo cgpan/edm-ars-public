@@ -199,13 +199,15 @@ def _run(
     timeout: float,
     cwd: str | Path | None = None,
     env: Mapping[str, str] | None = None,
+    new_session: bool = False,
 ) -> ToolResult:
     from edmars import proc
 
     try:
+        extra: dict[str, Any] = {"new_session": True} if new_session else {}
         done = proc.run(list(args), timeout=timeout,
                         cwd=str(cwd) if cwd is not None else None,
-                        env=dict(env) if env is not None else _tool_env())
+                        env=dict(env) if env is not None else _tool_env(), **extra)
     except Exception as exc:  # noqa: BLE001 - classify below, re-raise the rest
         if type(exc).__name__ == "TimeoutExpired":
             return ToolResult(None, _as_text(getattr(exc, "stdout", "")),
@@ -652,6 +654,34 @@ def _package_for_file(tlmgr: str, filename: str) -> str | None:
     return None
 
 
+def tinytex_installer_command(installer: Path, keep_dir: Path, *,
+                              platform: str | None = None) -> list[str]:
+    """How to run the official TinyTeX installer on this OS.
+
+    On macOS, install-bin-unix.sh ends by putting TinyTeX on PATH: links
+    in /usr/local/bin when that folder is writable, otherwise a
+    /etc/paths.d/TinyTeX file written through ``sudo``, which asks for an
+    administrator password. edmars captures the installer's output, so
+    the user saw a bare "Password:" and nothing else. The installer's
+    documented ``--no-path`` skips that step; edmars does not need it,
+    because it finds TinyTeX in ~/Library/TinyTeX itself and puts its bin
+    folder on every study's PATH (``latex_bin_dir``), as on Windows.
+
+    The script also takes its FIRST argument, if any, as a folder to move
+    the downloaded bundle into (``mv "$INSTALLER_FILE" "$1/"``), so
+    ``--no-path`` on its own would become that folder, and the move, and
+    with it the installer, would fail. A scratch folder goes first. On
+    Linux the PATH step only adds links in ~/.local/bin (or ~/bin), with
+    no administrator rights, so it runs as before.
+    """
+    platform = platform or sys.platform
+    if platform.startswith("win"):
+        return ["cmd.exe", "/d", "/c", str(installer)]
+    if platform == "darwin":
+        return ["sh", str(installer), str(keep_dir), "--no-path"]
+    return ["sh", str(installer)]
+
+
 def install_tinytex(
     *,
     settings: dict[str, Any] | None = None,
@@ -676,6 +706,7 @@ def install_tinytex(
             except Exception:  # noqa: BLE001 - a status line is not fatal
                 pass
 
+    path_note = ""
     tlmgr = find_tlmgr()
     if not tlmgr:
         key = "windows" if os.name == "nt" else "unix"
@@ -688,9 +719,10 @@ def install_tinytex(
             except fetch.DownloadError as exc:
                 return Check(title, "fail", str(exc), fix="edmars setup pdf")
             step("Installing TinyTeX (this can take several minutes)")
-            args = (["cmd.exe", "/d", "/c", str(installer)] if os.name == "nt"
-                    else ["sh", str(installer)])
-            result = _run(args, timeout=timeout_s, cwd=tmp)
+            args = tinytex_installer_command(installer, Path(tmp))
+            # No terminal for it either: should any installer version still
+            # ask for a password, it fails at once instead of waiting unseen.
+            result = _run(args, timeout=timeout_s, cwd=tmp, new_session=True)
             if result.error or result.returncode != 0:
                 return Check(title, "fail",
                              f"The TinyTeX installer failed: {result.error or _tail(result.output)}",
@@ -700,6 +732,9 @@ def install_tinytex(
             return Check(title, "fail",
                          f"The installer finished, but TinyTeX was not found in {tinytex_root()}.",
                          fix="edmars setup pdf")
+        if "--no-path" in args:
+            path_note = (f" It was not added to your PATH (that needs an administrator password on "
+                         f"a Mac); EDM-ARS finds it in {Path(tlmgr).parent}.")
 
     step("Installing the LaTeX packages the paper templates use")
     failed = _tlmgr_install(tlmgr, tinytex_packages(), timeout=timeout_s)
@@ -732,10 +767,10 @@ def install_tinytex(
     bad = [o.check for o in outcomes if o.check.status != "ok"]
     if not bad:
         note = f" ({len(failed)} optional packages could not be installed)" if failed else ""
-        return Check(title, "ok", f"TinyTeX is installed and both test papers compile{note}.")
+        return Check(title, "ok", f"TinyTeX is installed and both test papers compile{note}.{path_note}")
     return Check(title, "warn",
                  "TinyTeX is installed, but a test paper still fails: "
-                 + "; ".join(f"{c.name}: {c.detail}" for c in bad),
+                 + "; ".join(f"{c.name}: {c.detail}" for c in bad) + path_note,
                  fix="edmars doctor --deep")
 
 

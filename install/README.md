@@ -215,8 +215,10 @@ Run `edmars uninstall`: it removes EDM-ARS's settings and stored keys, and
 asks separately before touching datasets or studies. It does not remove
 TinyTeX, if `edmars setup pdf` installed it, because other programs can use
 it: it prints its folder, and you delete that yourself after running
-`tlmgr path remove`. R packages from `edmars setup r` stay in your R
-library. It cannot delete the
+`tlmgr path remove` (not on a Mac, where setup installs TinyTeX without
+changing your PATH, so no administrator password is asked for; EDM-ARS
+finds it in `~/Library/TinyTeX` itself). R packages from `edmars setup r`
+stay in your R library. It cannot delete the
 program it is running from, so it ends by listing the program files this
 installer created (read from `install.json` in the install folder). Then,
 with no `edmars` window open:
