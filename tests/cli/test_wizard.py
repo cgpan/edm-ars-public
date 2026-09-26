@@ -363,8 +363,10 @@ def test_dataset_download_records_terms_and_shows_progress(fx: Fakes) -> None:
     assert fx.datasets.progress_calls
     assert saved["sha256"]  # the fingerprint install() records on first download
     assert "Cite NCES" in fx.ui.output
-    # Plain mode: the unzip after the download gets its own lines.
-    assert "Unpacking:" in fx.ui.output
+    # Plain mode: the check and the conversion after the download get their
+    # own lines, so the 2 GB conversion does not look like a hang.
+    assert "Checking:" in fx.ui.output
+    assert "Converting:" in fx.ui.output
 
 
 def test_dataset_download_failure_is_explained(fx: Fakes) -> None:
@@ -373,6 +375,22 @@ def test_dataset_download_failure_is_explained(fx: Fakes) -> None:
     assert run("datasets") == 0
     assert "The download stopped" in fx.ui.output
     assert "continues where it stopped" in fx.ui.output
+
+
+def test_a_download_refused_for_a_reason_shows_that_reason_alone(fx: Fakes) -> None:
+    class Refused(RuntimeError):
+        user_facing = True  # as datasets.UnknownReleaseError and every DatasetError
+
+    fx.datasets.download_error = Refused(
+        "HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip is not the HSLS:09 release EDM-ARS knows. "
+        "Put a labelled copy in place with: edmars data import hsls09_public <path to the .csv file>")
+    fx.ui.script = ["download", "agree", "skip"]
+    assert run("datasets") == 0
+    assert "HSLS:09 could not be installed" in fx.ui.output
+    assert "edmars data import hsls09_public" in fx.ui.output
+    # Trying again would fail the same way, so the wizard must not promise
+    # that it "continues where it stopped".
+    assert "continues where it stopped" not in fx.ui.output
 
 
 def test_importing_the_numeric_file_explains_the_labeled_one(fx: Fakes, tmp_path: Path) -> None:

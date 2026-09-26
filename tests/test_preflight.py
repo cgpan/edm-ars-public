@@ -118,6 +118,10 @@ def test_missing_raw_data_names_the_exact_file(
     assert "hsls_17_student_pets_sr_v1_0.csv" in data.fix
     # The direct download the README gives, not the survey landing page.
     assert "nces.ed.gov/EDAT/Data/Zip/HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip" in data.fix
+    # The CSV in that zip holds numeric codes: the hint says to convert it,
+    # not to take it out of the zip as it is.
+    assert "out of the zip" not in data.fix
+    assert "python -m edmars.relabel" in data.fix
     # A file saved under the provider's own name is pointed out.
     assert "HSLS_2017_PETS_SR.csv" in data.fix
 

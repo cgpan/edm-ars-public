@@ -12,8 +12,19 @@ recorded (in settings, and in a ``<file>.edmars.json`` sidecar so the
 record survives a caller that forgot to save settings), and
 ``verify()`` later tells the user when the bytes changed.
 
+HSLS:09 is not used as it comes: the NCES zip holds the numeric-code
+CSV, and the pipeline needs the labelled one. For a dataset with a
+``label_table`` the zip's SHA-256 is checked first, the CSV inside it is
+converted while it is unpacked (``edmars.relabel``), and the result must
+match the pinned SHA-256 of the labelled file; otherwise nothing is
+installed.
+
 Nothing here touches the network except :func:`download`, which the
-caller runs only after the user accepted the dataset's terms.
+caller runs only after the user accepted the dataset's terms. For
+testing, ``EDMARS_TEST_ZIP_<NAME>`` (e.g. ``EDMARS_TEST_ZIP_HSLS09_PUBLIC``)
+names a local copy of the zip to use instead of downloading it; it is
+honoured only for a zip whose SHA-256 is pinned, so it can never install
+anything but the known release.
 """
 
 from __future__ import annotations
@@ -31,27 +42,47 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from edmars import fetch
+from edmars import fetch, relabel
 from edmars.fetch import ProgressFn, emit_progress, human_bytes
 from edmars.model import Check
 
-#: Pinned SHA-256 of each extracted CSV. ``None`` means trust-on-first-use:
+#: Pinned SHA-256 of each installed CSV. ``None`` means trust-on-first-use:
 #: the hash of the first file that passes validation is recorded and later
 #: files are compared against it. Pin a value only after checking it
 #: against a download made on a second machine.
 EXPECTED_SHA256: dict[str, str | None] = {
-    "hsls09_public": None,
+    # The labelled CSV that edmars.relabel makes from the NCES zip. Checked
+    # 2026-09-26: the conversion of a fresh NCES download reproduced the
+    # labelled copy the pipeline was built on (March 2026) byte for byte.
+    "hsls09_public": "b4400425b11294f7fc79f3a5f6a71a7b9bb9f77756abd3bb948a3b3b7ffa65d8",
     "els_2002": None,
 }
 
-#: Summary of the NCES public-use terms, shown before any NCES download.
-NCES_TERMS = (
+_ISSUES_URL = "https://github.com/cgpan/edm-ars-public/issues"
+
+#: A local copy of a dataset's zip to use instead of downloading it, for
+#: testing (see :func:`_local_zip`), e.g. EDMARS_TEST_ZIP_HSLS09_PUBLIC.
+TEST_ZIP_ENV = "EDMARS_TEST_ZIP_{name}"
+
+_NCES_TERMS_COMMON = (
     "This is a public-use file published by the National Center for "
     "Education Statistics (NCES). By downloading it you agree to use it for "
     "statistical research only, to make no attempt to identify any "
     "individual student, school or family, and to cite NCES as the source "
     "in anything you publish. EDM-ARS is not affiliated with or endorsed by "
-    "NCES or IES; the file comes straight from the NCES website."
+    "NCES or IES"
+)
+
+#: Summary of the NCES public-use terms, shown before an NCES download
+#: that is installed as it comes.
+NCES_TERMS = _NCES_TERMS_COMMON + "; the file comes straight from the NCES website."
+
+#: The same terms for a file EDM-ARS converts (HSLS:09).
+NCES_TERMS_CONVERTED = _NCES_TERMS_COMMON + (
+    ". EDM-ARS downloads the file from the NCES website and converts the "
+    "numeric codes in it to their text labels (for example 1 to 'Male'), "
+    "the labelled form EDM-ARS expects. The conversion is checked: the "
+    "result must match a known SHA-256 fingerprint, or nothing is installed."
 )
 
 
@@ -69,6 +100,11 @@ class DatasetInfo:
     url: str | None = None
     #: Base name of the CSV inside the zip at ``url``.
     member: str | None = None
+    #: Pinned SHA-256 of the zip at ``url``. Required for ``label_table``.
+    zip_sha256: str | None = None
+    #: Bundled code-to-label table (``edmars/data``) that turns the numeric
+    #: ``member`` into the labelled file; None = the member is used as is.
+    label_table: str | None = None
     download_size: str = ""
     #: Free space needed for the download and the extracted file together.
     disk_needed_bytes: int = 0
@@ -101,18 +137,25 @@ CATALOG: dict[str, DatasetInfo] = {
         source="download",
         description=(
             "23,503 students followed from 9th grade (2009) into college "
-            "and work; the labelled public-use CSV."
+            "and work; the public-use file from NCES, converted to the "
+            "labelled CSV EDM-ARS expects."
         ),
         url="https://nces.ed.gov/EDAT/Data/Zip/HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip",
         member="hsls_17_student_pets_sr_v1_0.csv",
-        download_size="about 300 MB to download, about 2.0 GB unpacked",
+        # 296,995,863 bytes; the numeric-code CSV inside is 888,168,765
+        # bytes, SHA-256 987b6097... (recorded in the label table).
+        zip_sha256="770b2e64d509d8ed82f2ed1cf2a6983ebed969058f982e4cd22e12f4738e8639",
+        label_table="hsls09_public.labels.json.gz",
+        download_size="about 300 MB to download, about 2.0 GB once converted",
+        # The zip (0.3 GB) and the labelled file (2.0 GB) side by side; the
+        # numeric CSV is converted as it is unpacked and never written.
         disk_needed_bytes=2_600_000_000,
         min_bytes=1_000_000_000,
         required_columns=("X1SEX", "X1RACE", "X3TGPAACAD", "X4EVRATNDCLG"),
         value_format="labels",
         format_probe=("X1SEX", "X1RACE"),
         recommended=True,
-        terms=NCES_TERMS,
+        terms=NCES_TERMS_CONVERTED,
         homepage="https://nces.ed.gov/surveys/hsls09/",
     ),
     "els_2002": DatasetInfo(
@@ -432,12 +475,17 @@ def validate_file(name: str, path: str | Path) -> Check:
     numeric = [v for v in probe_values if _NUMERIC.match(v)]
     text = [v for v in probe_values if not _NUMERIC.match(v)]
     if info.value_format == "labels" and probe_values and not text:
+        how = (
+            " This is the numeric-code CSV as it comes in the NCES zip; EDM-ARS "
+            f"makes the labelled one from that zip itself: run `{get_command(name)}`, "
+            "or import a zip you downloaded yourself with "
+            f"`edmars data import {name} <path to the .zip>`."
+            if info.label_table else ""
+        )
         return Check(
             title, "fail",
             f"{path.name} stores numeric codes (for example {', '.join(numeric[:3])}) "
-            "where EDM-ARS expects text labels such as 'Male'/'Female'. This is "
-            "the numeric-code version of the file; EDM-ARS needs the labelled CSV "
-            "from the NCES zip.",
+            "where EDM-ARS expects text labels such as 'Male'/'Female'." + how,
             fix=get_command(name),
         )
     if info.value_format == "codes" and text:
@@ -543,8 +591,8 @@ def verify(
     if pinned and digest != pinned:
         return Check(
             info.label, "fail",
-            f"{path.name} does not match the published SHA-256. It may be "
-            "damaged or a different release.",
+            f"{path.name} does not match the expected SHA-256 for this release. "
+            "It may be damaged or a different release.",
             fix=get_command(name),
         )
     rec = _record(name, settings, path)
@@ -629,6 +677,93 @@ def _unlink_quiet(path: Path) -> None:
         pass
 
 
+class UnknownReleaseError(DatasetError):
+    """The zip is not the release the label table was built for."""
+
+
+#: Labels are longer than codes: the labelled HSLS:09 CSV is 2.25 times the
+#: size of the numeric one. Used for the free-space check before converting.
+_LABEL_GROWTH = 2.5
+
+
+def _unknown_release(info: DatasetInfo, zip_name: str, note: str = "") -> str:
+    return (
+        f"{zip_name} is not the {info.label.split(' (')[0]} release EDM-ARS knows: "
+        "its SHA-256 differs. EDM-ARS turns the numeric codes in that zip into "
+        "text labels with a table made for one exact release, so it did not "
+        f"convert this one rather than risk a wrong file.{note} NCES may have "
+        f"published a new release; please report this at {_ISSUES_URL}. If you "
+        "have the labelled CSV (text values such as 'Male'), put it in place "
+        f"with: edmars data import {info.name} <path to the .csv file>"
+    )
+
+
+def convert_zip(
+    name: str, zip_path: str | Path, dest: str | Path, progress: ProgressFn | None = None
+) -> str:
+    """Convert the numeric CSV in ``zip_path`` into the labelled ``dest``.
+
+    Checks the zip's SHA-256 first (phase ``verify``), then streams the
+    member through ``edmars.relabel`` into ``dest.part`` (phase
+    ``convert``) and moves it into place only when the numeric input and
+    the labelled output both match their expected SHA-256s. Returns the
+    output's SHA-256. The zip itself is left alone.
+
+    Raises :class:`UnknownReleaseError` for a zip that is not the pinned
+    release, and :class:`DatasetError` for anything else.
+    """
+    info = _info(name)
+    if not info.label_table or not info.zip_sha256 or not info.member:
+        raise DatasetError(f"{info.label} is not converted from a zip.")
+    zip_path, dest = Path(zip_path), Path(dest)
+    if not zip_path.is_file() or not zipfile.is_zipfile(zip_path):
+        raise DatasetError(f"{zip_path} is not a zip file.")
+    if fetch.sha256_file(zip_path, progress=progress, phase="verify") != info.zip_sha256:
+        raise UnknownReleaseError(_unknown_release(info, zip_path.name))
+    table = relabel.load_table(info.label_table)
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+
+    def report(done: int, total: int | None) -> None:
+        emit_progress(progress, done, total, "convert")
+
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            item = _find_member(archive, info.member)
+            _require_space(dest.parent, int(item.file_size * _LABEL_GROWTH) + 50_000_000,
+                           "converting the file")
+            report(0, item.file_size)
+            with archive.open(item) as src, open(part, "wb") as out:
+                result = relabel.convert_stream(src, out, table, total=item.file_size,
+                                                progress=report)
+    except relabel.ConversionError as exc:
+        _unlink_quiet(part)
+        raise DatasetError(
+            f"The file in {zip_path.name} could not be converted ({exc}). Nothing "
+            f"was installed; please report this at {_ISSUES_URL}."
+        ) from exc
+    except (zipfile.BadZipFile, NotImplementedError) as exc:
+        _unlink_quiet(part)
+        raise DatasetError(
+            f"{zip_path.name} could not be unpacked ({exc}). Nothing was installed."
+        ) from exc
+    except BaseException:
+        _unlink_quiet(part)
+        raise
+    pinned = EXPECTED_SHA256.get(name)
+    wrong_input = bool(table.numeric_csv_sha256 and result.sha256_in != table.numeric_csv_sha256)
+    if wrong_input or (pinned and result.sha256_out != pinned):
+        _unlink_quiet(part)
+        raise DatasetError(
+            "The converted file does not match the expected SHA-256 "
+            f"({'input' if wrong_input else 'output'} differs), so it was not "
+            f"installed. Please report this at {_ISSUES_URL}."
+        )
+    os.replace(part, dest)
+    return result.sha256_out
+
+
 def download(
     name: str,
     dest_dir: str | Path,
@@ -643,12 +778,13 @@ def download(
     ``dest_dir`` is the raw-data folder (normally ``raw_data_dir(settings)``);
     the file lands at ``dest_dir / CATALOG[name].filename``. The zip is
     streamed to disk with resume support, only the one CSV member is
-    extracted, the result is validated and hashed, and the zip is deleted.
+    extracted (or, with a ``label_table``, converted: :func:`convert_zip`),
+    the result is validated and hashed, and the zip is deleted.
 
     When ``settings`` is given the terms must have been accepted
     (:func:`accept_terms`) and the verification record is saved into it.
     ``progress(done, total[, phase])`` is called with phase ``download``,
-    ``extract`` and ``verify``.
+    ``extract`` (or ``convert``) and ``verify``.
     """
     info = _info(name)
     if info.source != "download" or not info.url or not info.member:
@@ -681,39 +817,59 @@ def download(
         # The copy on disk no longer matches what was verified: asking to
         # install it again is asking for a repair, so fetch a fresh copy.
 
-    zip_path = dest_dir / ".downloads" / PurePosixPath(info.url).name
-    partial = zip_path.with_name(zip_path.name + ".part")
-    already = partial.stat().st_size if partial.exists() else 0
-    already += zip_path.stat().st_size if zip_path.exists() else 0
-    _require_space(dest_dir, max(0, info.disk_needed_bytes - already), f"{info.label}")
-
-    if not zip_path.is_file():
-        fetch.download_file(info.url, zip_path, progress=progress, session=session)
-    if not zipfile.is_zipfile(zip_path):
+    local = _local_zip(info)
+    # ``ours``: the zip is EDM-ARS's download, deleted once it is used. A
+    # local zip (EDMARS_TEST_ZIP_<NAME>) belongs to whoever set it.
+    ours = local is None
+    zip_path = local or dest_dir / ".downloads" / PurePosixPath(info.url).name
+    if ours:
+        partial = zip_path.with_name(zip_path.name + ".part")
+        already = partial.stat().st_size if partial.exists() else 0
+        already += zip_path.stat().st_size if zip_path.exists() else 0
+        _require_space(dest_dir, max(0, info.disk_needed_bytes - already), f"{info.label}")
+        if not zip_path.is_file():
+            fetch.download_file(info.url, zip_path, progress=progress, session=session)
+    if ours and not zipfile.is_zipfile(zip_path):
         _unlink_quiet(zip_path)
+        inside = "the .zip" if info.label_table else "csv inside it"
+        instead = (
+            f", or download the zip in a browser from {info.url} and use "
+            f"`edmars data import {name} <{inside}>`"
+        )
         raise DatasetError(
             "The NCES server sent something that is not a zip file (perhaps an "
             "error page or a network filter's warning page). Nothing was kept; "
-            "try again later, or download the zip in a browser from "
-            f"{info.url} and use `edmars data import {name} <csv inside it>`."
+            f"try again later{instead}."
         )
-    _extract_member(zip_path, info.member, dest, progress)
-
-    check = validate_file(name, dest)
-    if check.status == "fail":
-        rejected = dest.with_name(dest.name + ".rejected")
-        os.replace(dest, rejected)
-        raise DatasetError(f"The downloaded file did not pass validation: {check.detail} "
-                           f"(kept for inspection at {rejected}).")
-    digest = fetch.sha256_file(dest, progress=progress)
     pinned = EXPECTED_SHA256.get(name)
-    if pinned and digest != pinned:
-        rejected = dest.with_name(dest.name + ".rejected")
-        os.replace(dest, rejected)
-        raise DatasetError(
-            f"The downloaded file does not match the published SHA-256 (kept for "
-            f"inspection at {rejected})."
-        )
+    if info.label_table:
+        try:
+            digest = convert_zip(name, zip_path, dest, progress)
+        except UnknownReleaseError:
+            if not ours:
+                raise
+            # Downloading again gets the same unknown zip; keeping it only
+            # fills the disk. A zip that matched is kept on other errors:
+            # it is the right file, and a fixed EDM-ARS can use it.
+            _remove_download(zip_path)
+            raise UnknownReleaseError(_unknown_release(
+                info, zip_path.name, " The downloaded zip was deleted.")) from None
+    else:
+        _extract_member(zip_path, info.member, dest, progress)
+        check = validate_file(name, dest)
+        if check.status == "fail":
+            rejected = dest.with_name(dest.name + ".rejected")
+            os.replace(dest, rejected)
+            raise DatasetError(f"The downloaded file did not pass validation: {check.detail} "
+                               f"(kept for inspection at {rejected}).")
+        digest = fetch.sha256_file(dest, progress=progress)
+        if pinned and digest != pinned:
+            rejected = dest.with_name(dest.name + ".rejected")
+            os.replace(dest, rejected)
+            raise DatasetError(
+                f"The downloaded file does not match the expected SHA-256 (kept for "
+                f"inspection at {rejected})."
+            )
     rec = _record(name, settings, dest)
     extra: dict[str, Any] = {}
     if rec.get("sha256") and rec["sha256"] != digest and not pinned:
@@ -722,13 +878,42 @@ def download(
         # The user asked for this download, so keep it, and keep the old
         # hash on record so the change is visible.
         extra["replaced_sha256"] = rec["sha256"]
-    _store_record(name, settings, dest, digest, info.url, extra=extra)
+    source = info.url if ours else f"local zip:{zip_path.name}"
+    _store_record(name, settings, dest, digest, source, extra=extra)
+    if ours:
+        _remove_download(zip_path)
+    return dest
+
+
+def _local_zip(info: DatasetInfo) -> Path | None:
+    """The zip named by ``EDMARS_TEST_ZIP_<NAME>``, if that is set.
+
+    Honoured only for a zip that :func:`convert_zip` checks against a
+    pinned SHA-256, so it can stand in for the download but can never
+    install anything else.
+    """
+    var = TEST_ZIP_ENV.format(name=info.name.upper())
+    value = os.environ.get(var, "").strip()
+    if not value:
+        return None
+    if not (info.zip_sha256 and info.label_table):
+        raise DatasetError(
+            f"{var} is set, but EDM-ARS cannot check a local zip for {info.label} "
+            "(it has no pinned zip SHA-256). Unset it to download the file."
+        )
+    path = Path(value).expanduser()
+    if not path.is_file():
+        raise DatasetError(f"{var} is set to {path}, which is not a file.")
+    return path
+
+
+def _remove_download(zip_path: Path) -> None:
+    """Delete a downloaded zip, and its ``.downloads`` folder once empty."""
     _unlink_quiet(zip_path)
     try:
         zip_path.parent.rmdir()
     except OSError:
         pass
-    return dest
 
 
 def install(
@@ -771,10 +956,17 @@ def import_file(name: str, path: str | Path, settings: dict[str, Any]) -> Path:
 
     Uses a hard link when the source is on the same disk and not inside a
     cloud-sync folder (no second copy of a 2 GB file); otherwise copies.
-    The verification record is saved into ``settings``.
+    For a dataset with a ``label_table``, ``path`` may also be the zip as
+    downloaded from NCES: it is checked and converted (:func:`convert_zip`)
+    and left where it is. The verification record is saved into ``settings``.
     """
-    _info(name)
+    info = _info(name)
     src = Path(path).expanduser()
+    if info.label_table and src.is_file() and zipfile.is_zipfile(src):
+        dest = expected_path(name, settings)
+        digest = convert_zip(name, src, dest)
+        _store_record(name, settings, dest, digest, f"import:{src.name}")
+        return dest
     check = validate_file(name, src)
     if check.status == "fail":
         raise DatasetError(check.detail)
@@ -811,9 +1003,9 @@ def import_file(name: str, path: str | Path, settings: dict[str, Any]) -> Path:
     pinned = EXPECTED_SHA256.get(name)
     if pinned and digest != pinned:
         raise DatasetError(
-            f"{src.name} has the right columns but does not match the published "
-            "SHA-256 of the NCES release; it may be a different release. It was "
-            f"placed at {dest} but not marked verified."
+            f"{src.name} has the right columns, but its SHA-256 differs from the "
+            "one EDM-ARS expects for this release, so it may be a different "
+            f"release or export. It was placed at {dest} but not marked verified."
         )
     _store_record(name, settings, dest, digest, f"import:{src.name}")
     return dest

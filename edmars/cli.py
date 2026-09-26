@@ -989,15 +989,17 @@ def _dataset_info(datasets: ModuleType, name: str) -> Any:
     return catalog[name]
 
 
-_PHASE_WORDS = {"download": "downloaded", "extract": "unpacked", "verify": "checked"}
+_PHASE_WORDS = {"download": "downloaded", "extract": "unpacked", "convert": "converted",
+                "verify": "checked"}
 
 
 def _progress_printer() -> Callable[..., None]:
     """A download progress callback: one line per 10% of each phase.
 
-    ``datasets`` reports ``(done, total, phase)`` with the phases
-    download, extract and verify; a line per phase keeps a 2 GB unzip
-    from looking like a hang after "downloaded 100%".
+    ``datasets`` reports ``(done, total, phase)``: download, then verify
+    (the zip) and convert for HSLS:09, or extract and verify for a file
+    used as it comes; a line per phase keeps a 2 GB conversion from
+    looking like a hang after "downloaded 100%".
     """
     state: dict[str, Any] = {"phase": "", "last": -1}
 
@@ -1016,6 +1018,15 @@ def _progress_printer() -> Callable[..., None]:
             ui.say(f"  {_PHASE_WORDS.get(phase, phase)} {step * 10}%")
 
     return report
+
+
+def _installed_and_valid(datasets: Any, name: str, settings: dict[str, Any]) -> bool:
+    """Whether ``datasets.install`` will find a usable copy already in place."""
+    expected = getattr(datasets, "expected_path", None)
+    if expected is None:
+        return False
+    path = Path(expected(name, settings))
+    return path.is_file() and str(getattr(datasets.validate_file(name, path), "status", "")) == "ok"
 
 
 def _save_dataset_path(settings: dict[str, Any], name: str, path: Path) -> None:
@@ -1083,7 +1094,13 @@ def data_install_cmd(
             from edmars import settings as settings_mod
 
             settings_mod.save(settings)
-        ui.info("Downloading. Large files take a while; if it stops, run the same command to continue.")
+        if _installed_and_valid(datasets, name, settings):
+            # install() only re-hashes a valid copy (and downloads again
+            # only if it changed), so "Downloading" would be wrong here.
+            ui.info("Already installed: checking that the file is complete and unchanged. "
+                    "A copy that changed is downloaded again.")
+        else:
+            ui.info("Downloading. Large files take a while; if it stops, run the same command to continue.")
         path = Path(datasets.install(name, settings, progress=_progress_printer()))
     check = datasets.validate_file(name, path)
     ui.show_checks([check])
@@ -1098,7 +1115,10 @@ def data_import_cmd(
     name: Annotated[str, typer.Argument(help="The dataset's name, as `edmars data list` shows it.")],
     path: Annotated[
         Path,
-        typer.Argument(help="The data file you downloaded yourself.", exists=True, dir_okay=False, readable=True),
+        typer.Argument(
+            help="The data file you downloaded yourself (for HSLS:09 also the NCES .zip, which is converted).",
+            exists=True, dir_okay=False, readable=True,
+        ),
     ],
     plain: PlainOpt = False,
     yes: YesOpt = False,
@@ -1108,7 +1128,7 @@ def data_import_cmd(
     datasets = _module("datasets")
     settings = _settings()
     _dataset_info(datasets, name)
-    with ui.status("Checking and copying the file (a 2 GB file takes a minute)"):
+    with ui.status("Checking the file and putting it in place (a 2 GB file takes a minute)"):
         stored = Path(datasets.import_file(name, path, settings))
     check = datasets.validate_file(name, stored)
     ui.show_checks([check])

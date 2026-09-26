@@ -477,8 +477,9 @@ class FakeDatasets:
         target = Path(dest_dir) / self.CATALOG[name].filename
         target.write_text(LABELED_HEADER + "1,Male,White,3.1,Yes\n", encoding="utf-8")
         if progress is not None:
-            # The real module reports (done, total, phase): download, then extract.
-            for phase in ("download", "extract"):
+            # The real module reports (done, total, phase). For HSLS:09: download
+            # the zip, check its SHA-256, then convert the CSV inside it.
+            for phase in ("download", "verify", "convert"):
                 for done in (0, 50, 100):
                     progress(done, 100, phase)
                     self.progress_calls.append((done, 100, phase))

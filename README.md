@@ -254,7 +254,7 @@ sandbox, exactly as described in [Disclaimer and privacy](#disclaimer-and-privac
 | **LaTeX** with `pdflatex`, `bibtex` and `biber` on `PATH` | the PDF | Conference papers (the default, `writer.venue_format: conference`) use the `acmart` class with BibTeX; journal manuscripts (`writer.venue_format: journal`) use `apa7` with `biblatex-apa` and `biber`. See below. |
 | **R 4.4 or newer** with `jsonlite`, `lavaan`, `mirt` and `CDM` | psychometric studies only | `MASS` ships with R. See below. |
 | **About 16 GB of RAM** | HSLS:09 studies | The 2 GB HSLS:09 CSV takes about 6.6 GB of memory once loaded. |
-| **About 3 GB of free disk**, plus LaTeX | everything | Python packages about 1.2 GB; HSLS:09 is a 0.3 GB download that unzips to 2 GB. |
+| **About 3 GB of free disk**, plus LaTeX | everything | Python packages about 1.2 GB; HSLS:09 is a 0.3 GB download that becomes a 2 GB file. |
 | [LSAR](https://github.com/cgpan/LSAR-public) | the optional review gate | See [The review gate](#the-review-gate-optional). |
 | Docker | nothing by default | An experimental sandbox; see [Install](#install). |
 
@@ -336,26 +336,36 @@ anything.
 
 | Dataset | Save it as | Format |
 |---|---|---|
-| HSLS:09 public-use student file (2017 release) | `data/raw/hsls_17_student_pets_sr_v1_0.csv` | CSV with **value labels** |
+| HSLS:09 public-use student file (2017 release) | `data/raw/hsls_17_student_pets_sr_v1_0.csv` | CSV with **value labels**, made from the NCES download (below) |
 | ELS:2002 public-use base-year to third follow-up student file | `data/raw/els_2002/els_02_12_byf3pststu_v1_0.csv` | CSV with numeric codes |
 | ASSISTments 2009–10 skill-builder data | `data/raw/assistments_0910/skill_builder_0910.csv` | CSV, 525,534 rows |
 | ELS:2002 × HSLS:09 cross-cohort panel | `data/raw/did_els_hsls_panel/panel.csv` | built by a script, below |
 
 **HSLS:09** comes from NCES as a direct download:
 <https://nces.ed.gov/EDAT/Data/Zip/HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip>
-(about 297 MB; the CSV inside is about 2 GB). Take
-`hsls_17_student_pets_sr_v1_0.csv` out of the zip and put it in `data/raw/`.
-EDM-ARS needs this **labelled CSV**, whose cells hold text such as `Male`,
-`Yes` or `Unit non-response`. The SPSS, Stata and R versions of the download,
-or a CSV of numeric codes, will not work: the variable registry and the
-prompts assume the labels.
+(about 297 MB). The CSV inside it, `hsls_17_student_pets_sr_v1_0.csv`
+(about 0.9 GB), stores **numeric codes**: `X1SEX` is `1` or `2`. EDM-ARS
+needs the **labelled CSV** (about 2 GB), whose cells hold text such as
+`Male`, `Yes` or `Unit non-response`: the variable registry and the prompts
+assume the labels. Do not unzip the CSV and use it as it is, and do not use
+the SPSS, Stata or R versions of the download.
+
+EDM-ARS makes the labelled CSV from the zip itself, with a code-to-label
+table it ships (`edmars/data/hsls09_public.labels.json.gz`: column, code and
+label only). The conversion is checked: the zip must be the known release
+(SHA-256 `770b2e64…`) and the converted file must match the labelled file
+EDM-ARS was built on (SHA-256 `b4400425…`), or nothing is written. With the
+`edmars` command, `edmars data install hsls09_public` downloads the zip and
+converts it; `edmars data import hsls09_public <the zip>` converts a zip you
+downloaded yourself. From a source checkout, download the zip and convert it
+into `data/raw/` (about a minute, no network):
 
 macOS / Linux:
 
 ```bash
 mkdir -p data/raw
 curl -L -o hsls.zip https://nces.ed.gov/EDAT/Data/Zip/HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip
-unzip -j hsls.zip '*hsls_17_student_pets_sr_v1_0.csv' -d data/raw/
+python -m edmars.relabel hsls.zip data/raw/hsls_17_student_pets_sr_v1_0.csv
 rm hsls.zip
 ```
 
@@ -365,10 +375,12 @@ Windows (PowerShell):
 New-Item -ItemType Directory -Force data\raw | Out-Null
 $ProgressPreference = 'SilentlyContinue'    # makes the download much faster
 Invoke-WebRequest https://nces.ed.gov/EDAT/Data/Zip/HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip -OutFile hsls.zip
-Expand-Archive hsls.zip -DestinationPath hsls_zip
-Get-ChildItem hsls_zip -Recurse -Filter hsls_17_student_pets_sr_v1_0.csv | Move-Item -Destination data\raw\
-Remove-Item hsls_zip -Recurse; Remove-Item hsls.zip
+python -m edmars.relabel hsls.zip data\raw\hsls_17_student_pets_sr_v1_0.csv
+Remove-Item hsls.zip
 ```
+
+If NCES ever replaces the zip, the conversion stops with a message instead
+of writing a file it cannot check; please report it.
 
 **ELS:2002.** Export the public-use BY–F3 student file as CSV from NCES
 (<https://nces.ed.gov/surveys/els2002/>, via the EDAT data tool) and save it
