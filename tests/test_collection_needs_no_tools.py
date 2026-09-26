@@ -10,10 +10,12 @@ Linux and Windows -- no test ran at all.
 A test that needs a command-line tool declares it with
 ``@pytest.mark.requires_tools("pdflatex", ...)``; tests/conftest.py
 looks the tools up with shutil.which, which never starts them, and
-skips the test naming the ones that are missing. This file scans every module under tests/ for a process
-launch in code that runs at import time: module and class bodies,
-decorators, default argument values, and module-level helpers those
-call.
+skips the test naming the ones that are missing. A test that needs R
+asks for the ``r_ready`` fixture, which starts R when the test runs.
+
+This file scans every module under tests/ for a process launch in code
+that runs at import time: module and class bodies, decorators, default
+argument values, and module-level helpers those call.
 """
 from __future__ import annotations
 
@@ -36,6 +38,10 @@ _LAUNCHERS_BY_MODULE: dict[str, frozenset[str]] = {
         "execl", "execlp", "execv", "execvp", "spawnl", "spawnv",
     }),
 }
+
+#: This project's functions that start pdflatex/bibtex/biber or Rscript,
+#: matched by name however they were imported.
+_PROJECT_LAUNCHERS = frozenset({"compile_latex", "missing_r_packages", "run_r_script"})
 
 
 #: Import-time launches that cannot stop collection, each with the reason.
@@ -86,6 +92,10 @@ class _Scanner:
             return f"{func.value.id}.{func.attr}"
         if isinstance(func, ast.Name) and func.id in self.bare:
             return func.id
+        if isinstance(func, ast.Name) and func.id in _PROJECT_LAUNCHERS:
+            return func.id
+        if isinstance(func, ast.Attribute) and func.attr in _PROJECT_LAUNCHERS:
+            return func.attr
         return None
 
     def _calls_in(self, node: ast.AST) -> list[tuple[int, str]]:
@@ -189,6 +199,21 @@ def test_the_scan_follows_a_module_helper_and_a_bare_import() -> None:
         "HAS_TEX = _has_tex()\n"
     )
     assert _scan(source) == [(4, "_has_tex() -> co")]
+
+
+def test_the_scan_catches_an_r_probe_at_import() -> None:
+    """The shape tests/test_v4_psychometrics.py had: every collection,
+    even of one unrelated test, started R to decide a skipif."""
+    source = (
+        "import pytest\n"
+        "try:\n"
+        "    from src.r_bridge import missing_r_packages\n"
+        "    _MISSING_R = missing_r_packages()\n"
+        "except Exception:\n"
+        "    _MISSING_R = ['R']\n"
+        "needs_r = pytest.mark.skipif(bool(_MISSING_R), reason='no R')\n"
+    )
+    assert _scan(source) == [(4, "missing_r_packages")]
 
 
 def test_the_scan_leaves_calls_inside_tests_alone() -> None:

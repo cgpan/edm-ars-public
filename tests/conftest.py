@@ -141,6 +141,27 @@ def _no_live_review_gate(request: pytest.FixtureRequest,
         pass
 
 
+@pytest.fixture(scope="session")
+def r_ready() -> str:
+    """The Rscript the certified R scripts will use, or a skip.
+
+    Starts R once per session, and only when a test asks for it; the
+    probe used to run while tests/test_v4_psychometrics.py was imported,
+    so every collection started R. The skip names the cause: no usable
+    Rscript, or an R without the packages the scripts load.
+    """
+    from src.r_bridge import find_rscript, missing_r_packages
+
+    try:
+        missing = missing_r_packages()
+        rscript = find_rscript()
+    except Exception as exc:  # RBridgeError, or an R that cannot start
+        pytest.skip(f"Rscript not available: {exc}")
+    if missing:
+        pytest.skip(f"R packages missing: {', '.join(missing)}")
+    return rscript
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--run-integration",
