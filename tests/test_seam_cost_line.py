@@ -1,9 +1,9 @@
 """The pipeline.log cost line says when the figure is not a measurement.
 
 fix/wp-prov marks run_cost.json `cost_status: estimated` when a rate is
-flagged unverified in config.yaml (the shipped deepseek-flash entry is),
-and `partial` when some calls have no rate. The orchestrator's
-"Run cost: $X" line still read as measured.
+flagged unverified in config.yaml, or when a call to a time-of-day priced
+model has no readable time, and `partial` when some calls have no rate.
+The orchestrator's "Run cost: $X" line still read as measured.
 """
 from __future__ import annotations
 
@@ -37,6 +37,21 @@ def test_cost_line_names_an_estimate(
     orch._write_cost_summary()
     log = (tmp_path / "pipeline.log").read_text(encoding="utf-8")
     assert expected in log
+
+
+def test_estimate_from_calls_of_unknown_time_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rates are verified, but a call with no timestamp on a time-of-day
+    priced model was charged the peak rate: the line must not blame a
+    rate."""
+    payload = {**_payload("estimated"), "untimed_calls": 2,
+               "unverified_rate_models": []}
+    monkeypatch.setattr("src.cost.write_summary", lambda _d, _c: payload)
+    orch = _orch(tmp_path, _config(tmp_path))
+    orch._write_cost_summary()
+    log = (tmp_path / "pipeline.log").read_text(encoding="utf-8")
+    assert "Run cost: $0.0123 (estimated: some calls have no time, priced at peak) over" in log
 
 
 def test_unpriced_run_still_says_not_priced(
