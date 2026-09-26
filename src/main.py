@@ -651,7 +651,31 @@ def _quote(path: str) -> str:
     return f'"{path}"' if any(c.isspace() for c in path) else path
 
 
+#: Set by the edmars app for every study it starts (edmars/runner.py).
+_EDMARS_RUN_ID_ENV = "EDMARS_RUN_ID"
+
+
+def _edmars_quote(path: str) -> str:
+    """A folder as it should be typed after `edmars resume`: bare when it is
+    plainly safe, double-quoted on Windows (Git Bash drops bare
+    backslashes), shell-quoted elsewhere. Mirrors edmars.endstates.quote_path;
+    the pipeline does not import the app."""
+    if re.fullmatch(r"[A-Za-z0-9_./:-]+", path):
+        return path
+    if os.name == "nt":
+        return f'"{path}"'
+    import shlex
+
+    return shlex.quote(path)
+
+
 def _resume_command(plan: "_Plan") -> str:
+    if os.environ.get(_EDMARS_RUN_ID_ENV, "").strip():
+        # Started by `edmars`, whose resume rebuilds the command and the
+        # config from the user's settings: the pipeline's own
+        # `python -m src.main ... --resume` line (which the Mac test's
+        # console.log showed) is for developers, not for that user.
+        return f"edmars resume {_edmars_quote(plan.output_dir)}"
     parts = ["python -m src.main"]
     if os.path.normcase(os.path.abspath(plan.config_path)) != os.path.normcase(
         str(PROJECT_ROOT / "config.yaml")

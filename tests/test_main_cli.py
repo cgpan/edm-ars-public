@@ -690,6 +690,30 @@ def test_abort_reason_and_resume_command_when_resumable(
     assert "--resume" in out
 
 
+def test_a_study_started_by_edmars_is_told_to_use_edmars_resume(
+    env: dict[str, Path], stub: type[_StubOrchestrator],
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The Mac test's console.log said "Continue with: python -m src.main
+    # --config ... --resume" for a study edmars had started, while edmars
+    # itself said `edmars resume <folder>`.
+    monkeypatch.setenv("EDMARS_RUN_ID", "2026-09-26_0941_which-ninth-grade_c986")
+    stub.final_state = PipelineState.ABORTED
+    stub.status = _status_v2(
+        state="ABORTED", released=False, reason_code="ABORTED",
+        abort={"stage": "FORMULATING", "code": "NO_CREDIT",
+               "message": "the DeepSeek account has no balance", "resumable": True},
+    )
+    assert _run(env) == 3
+    out = capsys.readouterr().out
+    folder = str(env["root"] / "run")
+    assert "After fixing the cause, continue the run with:" in out
+    expected = folder if re.fullmatch(r"[A-Za-z0-9_./:-]+", folder) else (
+        f'"{folder}"' if os.name == "nt" else f"'{folder}'")
+    assert f"  edmars resume {expected}\n" in out
+    assert "python -m src.main" not in out and "--resume" not in out
+
+
 def test_no_resume_command_when_the_abort_is_final(
     env: dict[str, Path], stub: type[_StubOrchestrator],
     capsys: pytest.CaptureFixture[str],
