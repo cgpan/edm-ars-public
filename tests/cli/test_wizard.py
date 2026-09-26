@@ -376,6 +376,22 @@ def test_dataset_download_failure_is_explained(fx: Fakes) -> None:
     assert "continues where it stopped" in fx.ui.output
 
 
+def test_a_download_refused_for_a_reason_shows_that_reason_alone(fx: Fakes) -> None:
+    class Refused(RuntimeError):
+        user_facing = True  # as datasets.UnknownReleaseError and every DatasetError
+
+    fx.datasets.download_error = Refused(
+        "HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip is not the HSLS:09 release EDM-ARS knows. "
+        "Put a labelled copy in place with: edmars data import hsls09_public <path to the .csv file>")
+    fx.ui.script = ["download", "agree", "skip"]
+    assert run("datasets") == 0
+    assert "HSLS:09 could not be installed" in fx.ui.output
+    assert "edmars data import hsls09_public" in fx.ui.output
+    # Trying again would fail the same way, so the wizard must not promise
+    # that it "continues where it stopped".
+    assert "continues where it stopped" not in fx.ui.output
+
+
 def test_importing_the_numeric_file_explains_the_labeled_one(fx: Fakes, tmp_path: Path) -> None:
     numeric = tmp_path / "numeric.csv"
     numeric.write_text("STU_ID,X1SEX,X1RACE,X3TGPAACAD,X4EVRATNDCLG\n1,1,8,3.1,1\n", encoding="utf-8")

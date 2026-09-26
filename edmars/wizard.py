@@ -1473,6 +1473,11 @@ class _Wizard:
             raise _Quit()
         except Exception as exc:  # noqa: BLE001
             progress.close()
+            if getattr(exc, "user_facing", False):
+                # Written for the user and already says what to do; for a zip
+                # of an unknown release, trying again would fail the same way.
+                self._report(f"{label} could not be installed: {_doctor.redact(str(exc))}")
+                return False
             self._report(f"The download stopped: {_doctor.redact(str(exc))}. Run `edmars setup datasets` "
                          "to try again; it continues where it stopped.")
             return False
