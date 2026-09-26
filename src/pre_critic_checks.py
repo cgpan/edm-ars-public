@@ -3,14 +3,45 @@
 Inspired by AutoResearchClaw health.py: a fast, zero-LLM validation layer that
 catches obvious pipeline failures before the expensive Critic (Opus) call is made.
 
-If critical failures are found, the Orchestrator can short-circuit and synthesise a
+If critical failures are found, the Orchestrator short-circuits and synthesises a
 REVISE/ABORT review_report without burning an Opus API call.
+
+What a critical finding does
+----------------------------
+Every critical finding says whether a revision can fix it (``revisable``).
+A revisable one sends its ``revision_instruction`` to ``target_agent``
+through the ordinary REVISING cascade (SPEC §5.3); if it is still failing
+when the revision cycles run out, the run stops with PRE_CRITIC_UNRESOLVED
+and no paper is written. Any finding that is not revisable stops the run at
+once with PRE_CRITIC_ABORT. A check that sets nothing is not revisable, so
+a new critical check keeps the old stop-the-run behaviour until someone
+decides otherwise.
+
+    check   finding                                    on failure  target
+    pcc_01  outcome is a column of train_X.csv         stop        DataEngineer
+    pcc_06  data_report.validation_passed is False     stop        DataEngineer
+    pcc_02  no individual model in results.json        revise      Analyst
+    pcc_07  the analysis the question promises is      revise      Analyst
+            missing from results.json
+
+Why: SPEC §4.4 lists the ABORT conditions as a fundamental flaw
+(unanswerable question, analytic_n < 1,000, confirmed leakage) and SPEC §8
+aborts on ``validation_passed == false``. pcc_01 is confirmed leakage by
+construction and pcc_06 is the §8 condition, on which the ENGINEERING
+stage also stops after its one targeted retry. pcc_02 and pcc_07 are
+neither: the data and the question are sound. pcc_07 means the Analyst
+left out an analysis it can run on the same files (the helpers exist);
+pcc_02 means its generated code failed on every attempt, which a fresh
+Analyst run starts over from. Stopping on either throws away a study a
+revision could finish. The ``major`` checks never short-circuit; the
+Critic reads them.
 """
 from __future__ import annotations
 
 import csv
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
@@ -26,6 +57,26 @@ class CheckFailure:
     severity: str  # "critical" | "major"
     message: str
     target_agent: str  # "ProblemFormulator" | "DataEngineer" | "Analyst"
+    #: Critical findings only: True when re-running ``target_agent`` with
+    #: ``revision_instruction`` can clear the finding. False stops the run.
+    revisable: bool = False
+    #: What ``target_agent`` must do, in terms it can act on. ``message``
+    #: says what is wrong; this says what to change. Empty means the
+    #: message is the instruction.
+    revision_instruction: str = ""
+
+    @property
+    def instruction(self) -> str:
+        return self.revision_instruction or self.message
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "check_id": self.check_id,
+            "severity": self.severity,
+            "message": self.message,
+            "target_agent": self.target_agent,
+            "revisable": bool(self.revisable),
+        }
 
 
 @dataclass
@@ -35,6 +86,22 @@ class PreCriticResult:
     @property
     def has_critical(self) -> bool:
         return any(f.severity == "critical" for f in self.failures)
+
+    @property
+    def fatal_failures(self) -> list[CheckFailure]:
+        """Critical findings no revision can fix; any one stops the run."""
+        return [
+            f for f in self.failures
+            if f.severity == "critical" and not f.revisable
+        ]
+
+    @property
+    def revisable_failures(self) -> list[CheckFailure]:
+        """Critical findings a targeted agent re-run can fix."""
+        return [
+            f for f in self.failures
+            if f.severity == "critical" and f.revisable
+        ]
 
     @property
     def critical_count(self) -> int:
@@ -95,7 +162,7 @@ def run_pre_critic_checks(
     # Universal checks (run for every task type)
     _check_outcome_not_in_train_x(ctx, output_dir, result)
     _check_data_report_validation_passed(ctx, result)
-    _check_research_question_is_answered(ctx, result)
+    _check_research_question_is_answered(ctx, result, task_type=task_type)
 
     if task_type == "prediction":
         # Prediction-shaped structural checks: model battery + SHAP +
@@ -256,17 +323,27 @@ def _evidence_text(results: dict, strict: bool) -> str:
 
 
 def _check_research_question_is_answered(
-    ctx: object, result: PreCriticResult
+    ctx: object, result: PreCriticResult, task_type: str = "prediction"
 ) -> None:
-    """pcc_07 (critical): the analysis must contain the test the RQ promises.
+    """pcc_07 (critical, revisable): the analysis must contain the test the
+    RQ promises.
 
     This is the single largest driver of low rigor scores that is
     genuinely the system's fault. A paper whose central question is never
     tested still compiles, still scores, and still reads fluently -- the
     absence is invisible in the artifact and obvious to a reviewer.
+
+    Revisable, and aimed at the Analyst: the question and the data are
+    sound, and the missing analysis runs on the files the Analyst already
+    has. Rewording the question instead would restart the whole
+    ProblemFormulator -> DataEngineer -> Analyst cascade to delete the
+    paper's contribution; the instruction says how to run the test.
     """
     spec = getattr(ctx, "research_spec", None) or {}
-    question = str(spec.get("research_question") or "").lower()
+    if not isinstance(spec, dict):
+        return
+    original = str(spec.get("research_question") or "")
+    question = original.lower()
     if not question:
         return
 
@@ -297,8 +374,194 @@ def _check_research_question_is_answered(
                     f"rigor."
                 ),
                 target_agent="Analyst",
+                revisable=True,
+                revision_instruction=_commitment_instruction(
+                    commitment, matched, original, ctx, task_type
+                ),
             )
         )
+
+
+#: Where a question's named baseline ends: the next clause, not the next
+#: word ("... above and beyond achievement and SES, and does ...").
+_CLAUSE_END = re.compile(
+    r"[,;:?.()]|\s(?:and|or)\s+(?:does|do|is|are|how|whether|to what)\b"
+    r"|\s(?:explains?|predicts?|accounts? for)\b",
+    re.IGNORECASE,
+)
+
+
+def _named_after(question: str, phrase: str) -> str:
+    """The words a question puts after ``phrase``, up to the clause end.
+
+    "... ABOVE AND BEYOND academic achievement and socioeconomic status,
+    and does ..." -> "academic achievement and socioeconomic status".
+    Empty when the phrase names nothing after it ("incremental validity").
+    """
+    at = question.lower().find(phrase)
+    if at < 0:
+        return ""
+    tail = question[at + len(phrase):]
+    tail = re.sub(r"^\s*(?:what|that which|those of|the effects? of)\s+", "",
+                  tail, flags=re.IGNORECASE)
+    cut = _CLAUSE_END.search(tail)
+    named = (tail[: cut.start()] if cut else tail).strip()
+    return named[:160]
+
+
+def _outcome_type(ctx: object) -> str:
+    for source in ("data_report", "research_spec"):
+        block = getattr(ctx, source, None)
+        if isinstance(block, dict) and isinstance(block.get("outcome_type"), str):
+            return block["outcome_type"].strip().lower()
+    return ""
+
+
+def _predictor_names(ctx: object, limit: int = 40) -> list[str]:
+    spec = getattr(ctx, "research_spec", None)
+    entries = spec.get("predictor_set") if isinstance(spec, dict) else None
+    names: list[str] = []
+    for entry in entries or []:
+        name = entry.get("variable") if isinstance(entry, dict) else entry
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+    return names[:limit]
+
+
+_NOT_RUN_ENDING = (
+    "A record whose status is 'skipped' does not answer the question: fix "
+    "its inputs and run it again. If it truly cannot run on these files, "
+    "keep the helper's skipped record with its reason; the study will then "
+    "stop instead of publishing a question it never tested. Keep every "
+    "other part of the analysis as it was."
+)
+
+
+def _commitment_instruction(
+    commitment: _Commitment,
+    matched: str,
+    question: str,
+    ctx: object,
+    task_type: str,
+) -> str:
+    """The concrete work pcc_07 asks the Analyst to add, per commitment."""
+    prediction = task_type == "prediction"
+    if commitment.kind == "incremental":
+        return _incremental_instruction(matched, question, ctx, prediction)
+    if commitment.kind == "ordinal" and prediction:
+        return (
+            f"The research question promises {commitment.description} "
+            f"({matched!r}). Fit a proportional-odds model on the ordered "
+            "outcome with statsmodels' OrderedModel (distr='logit') on the "
+            "same train/test split and predictors as the other models, "
+            "evaluate it on the held-out test set next to the nominal "
+            "models, and record it as results['ordinal_model'] = {'status': "
+            "'ok', <the same metrics as all_models>}. " + _NOT_RUN_ENDING
+        )
+    if commitment.kind == "moderation" and prediction:
+        return (
+            f"The research question promises {commitment.description} "
+            f"({matched!r}). Call analysis_helpers.run_moderation_analysis("
+            "X=X_all, y=y_all, focal_cols=[encoded focal columns], "
+            "moderator_col=<the encoded moderator the question names>) as "
+            "prediction-rigor-extensions section 1 shows, and record the "
+            "return value as results['moderation_analysis']. "
+            + _NOT_RUN_ENDING
+        )
+    if commitment.kind == "calibration" and prediction:
+        return (
+            f"The research question promises {commitment.description} "
+            f"({matched!r}). Record results['calibration'] = "
+            "analysis_helpers.compute_calibration_metrics(y_true=test_y_arr, "
+            "y_prob=<best model's held-out probabilities>); never compute "
+            "those fields by hand. " + _NOT_RUN_ENDING
+        )
+    if commitment.kind == "mediation":
+        return (
+            f"The research question promises {commitment.description} "
+            f"({matched!r}). Estimate the indirect effect through the "
+            "mediator the question names (product of the a and b paths), "
+            "with a 1000-resample bootstrap 95% CI (random_state=42; "
+            "resample schools when school IDs exist), and record "
+            "results['mediation'] = {'status': 'ok', 'mediator': ..., "
+            "'indirect_effect': ..., 'ci_lower': ..., 'ci_upper': ...}. "
+            + _NOT_RUN_ENDING
+        )
+    return (
+        f"The research question promises {commitment.description} "
+        f"({matched!r}). Run that analysis on the existing analysis files "
+        "and record it in results.json under a key that names it. "
+        + _NOT_RUN_ENDING
+    )
+
+
+def _incremental_instruction(
+    matched: str, question: str, ctx: object, prediction: bool
+) -> str:
+    baseline = _named_after(question, matched)
+    names = _predictor_names(ctx)
+    outcome_type = _outcome_type(ctx)
+    lines = [
+        f"The research question promises an incremental-validity test "
+        f"({matched!r}): the focal predictors must be shown to add "
+        f"predictive power over a baseline block, in a nested-model "
+        f"comparison on the held-out test set. A SHAP ranking inside one "
+        f"model does not show this.",
+    ]
+    if baseline:
+        lines.append(
+            f"The question names the baseline as: \"{baseline}\". "
+            "baseline_cols = the encoded train_X columns of the predictor_set "
+            "variables that measure it; focal_cols = the encoded columns of "
+            "the constructs the question credits (by default every other "
+            "predictor). A one-hot variable's columns start with its name "
+            "(X1RACE -> X1RACE_*)."
+        )
+    else:
+        lines.append(
+            "The question does not name the baseline block in words: use "
+            "the encoded columns of the focal constructs as focal_cols and "
+            "omit baseline_cols, which then defaults to every other column."
+        )
+    if names:
+        lines.append("predictor_set: " + ", ".join(names) + ".")
+    if prediction and outcome_type in ("binary", ""):
+        lines.append(
+            "Call the certified helper; do not reimplement it:\n"
+            "    results['incremental_validity'] = "
+            "analysis_helpers.run_incremental_validity(\n"
+            "        train_X, train_y_arr, test_X, test_y_arr,\n"
+            "        focal_cols=focal_cols, baseline_cols=baseline_cols,\n"
+            "        school_ids=test_school_ids)  # pseudo_school_id from "
+            "test_school_ids.csv; None if that file is absent\n"
+            "    results['incremental_validity']['baseline_cols'] = "
+            "baseline_cols\n"
+            "It returns baseline_auc, full_auc, delta_auc and a bootstrap "
+            "CI on the difference."
+        )
+    elif prediction:
+        lines.append(
+            f"run_incremental_validity compares AUCs and needs a binary "
+            f"outcome; this outcome is {outcome_type}. Fit the same nested "
+            "pair with LinearRegression on the training set (baseline_cols, "
+            "then baseline_cols + focal_cols), compare held-out R^2 and "
+            "RMSE, bootstrap the R^2 difference over the test rows (1000 "
+            "resamples, random_state=42; resample schools when "
+            "test_school_ids.csv exists) and record "
+            "results['incremental_validity'] = {'status': 'ok', "
+            "'baseline_r2', 'full_r2', 'delta_r2', 'ci_lower', 'ci_upper', "
+            "'baseline_cols', 'focal_cols'}."
+        )
+    else:
+        lines.append(
+            "Fit the nested pair (baseline, then baseline + focal) with the "
+            "study's own estimator, compare them on the held-out data or "
+            "with a likelihood-ratio test, and record the difference and "
+            "its 95% CI as results['incremental_validity'] with "
+            "'status': 'ok'."
+        )
+    lines.append(_NOT_RUN_ENDING)
+    return "\n".join(lines)
 
 
 def _check_refuters_attempted(ctx: object, result: PreCriticResult) -> None:
@@ -396,6 +659,10 @@ def _check_outcome_not_in_train_x(
                         "— confirmed target leakage."
                     ),
                     target_agent="DataEngineer",
+                    # Not revisable: SPEC §4.4 names confirmed leakage as
+                    # an ABORT condition, and every model, metric and SHAP
+                    # value downstream was fitted with the answer as input.
+                    revisable=False,
                 )
             )
     except OSError:
@@ -410,11 +677,21 @@ def _check_model_count(ctx: object, result: PreCriticResult) -> None:
     stacking_keys = {k for k in all_models if "stack" in k.lower()}
     individual_count = len(all_models) - len(stacking_keys)
     if individual_count == 0:
-        # Not "too few models" -- the analysis did not happen. A REVISE
-        # here spends its cycles and then writes an UNVERIFIED paper about
-        # an empty results object, which is the artifact this whole guard
-        # exists to prevent. Nothing downstream can rescue it, so it is
-        # critical and the run stops.
+        # Not "too few models" -- the analysis did not happen. As a major
+        # finding it went to the Critic, whose REVISE spends its cycles
+        # and then writes an UNVERIFIED paper about an empty results
+        # object, which is the artifact this whole guard exists to
+        # prevent. So it is critical: the paper is never written.
+        #
+        # Critical and revisable. An empty battery is what the Analyst
+        # returns when its generated code failed on every attempt or timed
+        # out -- an execution failure, not a flaw in the question or the
+        # data, and not one of the SPEC's ABORT conditions. A fresh
+        # Analyst run starts from new code and is worth its cost; if the
+        # battery is still empty after the last revision cycle the run
+        # stops (PRE_CRITIC_UNRESOLVED) and still writes no paper.
+        errors = results.get("errors") if isinstance(results, dict) else None
+        recorded = "; ".join(str(e) for e in (errors or [])[:2])
         result.failures.append(
             CheckFailure(
                 check_id="pcc_02",
@@ -425,6 +702,18 @@ def _check_model_count(ctx: object, result: PreCriticResult) -> None:
                     "there are no results to report on."
                 ),
                 target_agent="Analyst",
+                revisable=True,
+                revision_instruction=(
+                    "The previous analysis produced no trained model: "
+                    "results.json all_models has no individual model."
+                    + (f" It recorded: {recorded[:600]}" if recorded else "")
+                    + " Write the analysis again from the start. Fit and "
+                    "evaluate each model in the battery inside its own "
+                    "try/except that appends the error to results['errors'] "
+                    "and continues with the next model (SPEC section 8), so "
+                    "one failing model cannot empty the battery, and write "
+                    "results.json even when some models fail."
+                ),
             )
         )
     elif individual_count < 4:
@@ -530,5 +819,9 @@ def _check_data_report_validation_passed(ctx: object, result: PreCriticResult) -
                     f"Warnings: {warnings_preview}"
                 ),
                 target_agent="DataEngineer",
+                # Not revisable: SPEC §8 aborts on validation_passed ==
+                # false. The ENGINEERING stage does the same after its one
+                # targeted DataEngineer retry; this check agrees with it.
+                revisable=False,
             )
         )

@@ -24,7 +24,13 @@ ABORT_CODES: dict[str, dict[str, bool]] = {
     "SAMPLE_TOO_SMALL": {"resumable": False},
     "DATA_CONTRACT_FAILED": {"resumable": True},
     "ANALYSIS_FAILED": {"resumable": True},
+    # A pre-review finding no revision can fix (confirmed leakage, a data
+    # report that failed validation).
     "PRE_CRITIC_ABORT": {"resumable": False},
+    # A pre-review finding a revision could have fixed was still failing
+    # when the revision cycles ran out. Not resumable: a resume re-enters
+    # the same check with the cycle count restored from the checkpoint.
+    "PRE_CRITIC_UNRESOLVED": {"resumable": False},
     "CRITIC_ABORT": {"resumable": False},
     "LLM_OUTPUT_UNPARSEABLE": {"resumable": True},
     "INTERRUPTED": {"resumable": True},
