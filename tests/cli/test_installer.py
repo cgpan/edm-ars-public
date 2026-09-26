@@ -440,9 +440,16 @@ def test_install_sh_parses(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck is not installed")
+#: requirements-dev.txt pins shellcheck-py to the shellcheck the CI lint step
+#: gets from Ubuntu 24.04 (0.9.0), so this test and that step agree. Its
+#: command sits next to the venv's python even when the venv is not active.
+SHELLCHECK = shutil.which("shellcheck") or shutil.which("shellcheck", path=str(Path(sys.executable).parent))
+
+
+@pytest.mark.skipif(SHELLCHECK is None, reason="shellcheck is not installed")
 def test_install_sh_passes_shellcheck() -> None:
-    result = subprocess.run(["shellcheck", "-s", "sh", str(INSTALL_SH)],
+    assert SHELLCHECK is not None
+    result = subprocess.run([SHELLCHECK, "-s", "sh", str(INSTALL_SH)],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout
 

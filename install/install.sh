@@ -393,7 +393,9 @@ main() {
     UV_PRIVATE=0
     if [ -z "${EDMARS_FORCE_PRIVATE_UV:-}" ]; then
         for uv_candidate in "$(command -v uv 2>/dev/null || true)" "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" "$APP_BASE/uv/uv"; do
-            [ -n "$uv_candidate" ] && [ -x "$uv_candidate" ] || continue
+            if [ -z "$uv_candidate" ] || [ ! -x "$uv_candidate" ]; then
+                continue
+            fi
             uv_seen=$("$uv_candidate" --version 2>/dev/null | awk '{print $2}') || continue
             [ -n "$uv_seen" ] || continue
             if version_ge "$uv_seen" "$UV_MIN_VERSION"; then
