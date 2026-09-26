@@ -356,7 +356,9 @@ def test_semantic_scholar_key_is_checked_and_saved(fx: Fakes) -> None:
     # arXiv refused every query on the Mac test (HTTP 406): "need no key"
     # must not read as "always works".
     out = " ".join(fx.ui.output.split())
-    assert "arXiv and Crossref need no key, but they can refuse or rate-limit requests too" in out
+    assert "arXiv needs no key, but it can refuse requests outright" in out
+    # Crossref only checks that cited papers exist; it is not a search.
+    assert "Crossref, which needs none either, only checks that cited papers exist" in out
     assert "Semantic Scholar key is the reliable way" in out
 
 

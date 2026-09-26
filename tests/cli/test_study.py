@@ -862,6 +862,10 @@ def test_card_prices_a_deepseek_study_with_and_without_the_review() -> None:
         card.encode("ascii")
     assert "including the automated review" in with_review
     assert "including the automated review" not in without
+    # Crossref gets the titles of papers found, to check they exist, not
+    # search words (PRIVACY.md says the same).
+    assert "To Semantic Scholar and arXiv: search words from your question." in without
+    assert "To Crossref: the titles of the papers found, to check that they exist." in without
 
 
 def test_card_for_a_local_model() -> None:

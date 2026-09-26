@@ -495,7 +495,9 @@ def test_the_literature_hint_does_not_promise_that_arxiv_always_works(monkeypatc
     monkeypatch.setattr(secrets, "secret_source", lambda name: None)
     [check] = doctor.check_semantic_scholar({})
     assert check.status == "warn"
-    assert "arXiv and Crossref need no key but can refuse or rate-limit requests too" in check.detail
+    assert "arXiv, the other search, needs no key but can refuse requests outright" in check.detail
+    # Crossref only checks that cited papers exist; it is not a search.
+    assert "Crossref" not in check.detail
     assert "A free Semantic Scholar key is the reliable fix" in check.detail
     assert "edmars setup literature" in (check.fix or "")
 
