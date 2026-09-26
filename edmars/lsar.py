@@ -205,7 +205,22 @@ def _tail(text: str, lines: int = 4) -> str:
 # Verification
 # ---------------------------------------------------------------------------
 
-_IMPORT_CHECK = "import sys; sys.path.insert(0, sys.argv[1]); import lsar.pipeline"
+#: Loads LSAR the way the review gate does, then the PDF layout model.
+#: LSAR imports pymupdf4llm only when it converts a PDF, and pymupdf4llm
+#: SILENTLY drops to its classic converter when ``pymupdf.layout`` cannot
+#: be imported. The layout model runs on onnxruntime, whose Windows DLLs
+#: need MSVCP140.dll and MSVCP140_1.dll (the Microsoft Visual C++
+#: Redistributable), which neither Python nor any wheel supplies. Without
+#: them every review would be scored on text from a converter other than
+#: the one LSAR's benchmark was calibrated with, and nothing would say so.
+_IMPORT_CHECK = (
+    "import sys; sys.path.insert(0, sys.argv[1]); import lsar.pipeline\n"
+    "import importlib.util\n"
+    "if importlib.util.find_spec('pymupdf4llm') is not None:\n"
+    "    import pymupdf.layout\n"
+)
+
+VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
 
 def _file_problems(home: Path) -> list[str]:
@@ -233,7 +248,9 @@ def verify(home: Path) -> list[str]:
     Checks the files the review gate reads, then imports ``lsar.pipeline``
     in a child Python started like the pipeline's own run (no user site,
     no PYTHONPATH), so a missing dependency shows up here and not as a
-    silently skipped review at the end of a paid run.
+    silently skipped review at the end of a paid run. It also loads the
+    PDF layout model (see ``_IMPORT_CHECK``), whose failure would not skip
+    reviews but would quietly change what they score.
     """
     home = Path(home)
     problems = _file_problems(home)
@@ -243,7 +260,15 @@ def verify(home: Path) -> list[str]:
                         timeout=180, cwd=home)
     if code != 0:
         missing = re.findall(r"No module named '([^'.]+)", output)
-        if missing:
+        if "DLL load failed" in output and ("onnxruntime" in output or "pymupdf" in output):
+            problems.append(
+                "The PDF layout model LSAR's scores were calibrated with cannot load "
+                f"({_tail(output, 1)}). Reviews would quietly use a different PDF "
+                "converter, so their scores would not match the benchmark. On Windows "
+                "this means the Microsoft Visual C++ Redistributable (x64) is missing: "
+                f"install it from {VC_REDIST_URL}, then run `edmars setup reviewer` again."
+            )
+        elif missing:
             problems.append(
                 f"LSAR needs the Python package '{missing[-1]}', which is not installed "
                 "for the Python that runs EDM-ARS."
@@ -345,7 +370,7 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
                              fix="edmars setup reviewer"))
         else:
             out.append(Check("LSAR loads in Python", "ok",
-                             "lsar.pipeline imports in a fresh Python."))
+                             "lsar.pipeline and the PDF layout model load in a fresh Python."))
     return out
 
 

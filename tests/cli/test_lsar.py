@@ -321,6 +321,46 @@ def test_verify_names_missing_files_and_missing_modules(tmp_path: Path) -> None:
     assert "config.yaml is missing" in lsar.verify(home)[0]
 
 
+DLL_ERROR = ("DLL load failed while importing onnxruntime_pybind11_state: "
+             "The specified module could not be found.")
+
+
+def _home_with_converter(tmp_path: Path, layout_body: str) -> Path:
+    """An LSAR home whose folder also shadows pymupdf4llm and pymupdf.layout.
+
+    The import check puts the home first on sys.path, so these stand-ins
+    are what the child Python imports.
+    """
+    home = tmp_path / "home"
+    for rel, data in _tree(top="x").items():
+        target = home / rel.split("/", 1)[1]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    (home / "pymupdf4llm").mkdir()
+    (home / "pymupdf4llm" / "__init__.py").write_text("", encoding="utf-8")
+    (home / "pymupdf" / "layout").mkdir(parents=True)
+    (home / "pymupdf" / "__init__.py").write_text("", encoding="utf-8")
+    (home / "pymupdf" / "layout" / "__init__.py").write_text(layout_body, encoding="utf-8")
+    return home
+
+
+def test_verify_reports_a_pdf_layout_model_that_cannot_load(tmp_path: Path) -> None:
+    # pymupdf4llm swallows this ImportError and switches to its classic
+    # converter, so a review would run on different text than LSAR's
+    # benchmark was calibrated with. On Windows the cause is onnxruntime's
+    # MSVCP140.dll / MSVCP140_1.dll, which no wheel ships.
+    home = _home_with_converter(tmp_path, f"raise ImportError({DLL_ERROR!r})\n")
+    problems = lsar.verify(home)
+    assert len(problems) == 1
+    assert "Visual C++ Redistributable" in problems[0]
+    assert lsar.VC_REDIST_URL in problems[0]
+    assert "edmars setup reviewer" in problems[0]
+
+
+def test_verify_passes_when_the_pdf_layout_model_loads(tmp_path: Path) -> None:
+    assert lsar.verify(_home_with_converter(tmp_path, "LOADED = True\n")) == []
+
+
 def test_runtime_requirements_drop_dev_tools(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text(REQUIREMENTS, encoding="utf-8")
     assert lsar.runtime_requirements(tmp_path) == [

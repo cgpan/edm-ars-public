@@ -581,8 +581,10 @@ class FakeLsar:
         self.installed = False
         self.install_calls = 0
         self.commit = "0123abc4567def"
+        self.deep_calls: list[bool] = []
 
     def checks(self, settings: dict[str, Any], *, deep: bool = False) -> list[Check]:
+        self.deep_calls.append(deep)
         if self.installed:
             return [Check("Automated reviewer", "ok", f"LSAR installed at {self.home}")]
         return [Check("Automated reviewer", "fail", "LSAR is not installed", "Run `edmars setup reviewer`.")]
