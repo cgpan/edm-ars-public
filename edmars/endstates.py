@@ -807,7 +807,8 @@ def literature_concerns(lit: dict[str, Any]) -> list[str]:
     rate-limited, and the old line said only that the search was "partly
     unavailable".
     """
-    sources = lit.get("sources") if isinstance(lit.get("sources"), dict) else {}
+    raw = lit.get("sources")
+    sources: dict[str, Any] = raw if isinstance(raw, dict) else {}
     notes = literature_notes(sources)
     key_hint = (" A free Semantic Scholar key (`edmars setup literature`) makes that much "
                 "less likely." if sources.get("semantic_scholar") == "rate_limited" else "")
