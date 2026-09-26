@@ -117,6 +117,8 @@ def tiny_hsls(monkeypatch: pytest.MonkeyPatch) -> None:
                                disk_needed_bytes=10_000)
     monkeypatch.setitem(datasets.CATALOG, "hsls09_public", info)
     monkeypatch.setitem(datasets.EXPECTED_SHA256, "hsls09_public", None)
+    # A developer's own stand-in for the download must not reach these tests.
+    monkeypatch.delenv("EDMARS_TEST_ZIP_HSLS09_PUBLIC", raising=False)
 
 
 @pytest.fixture
@@ -429,6 +431,85 @@ def test_installing_again_repairs_a_damaged_copy(fake_nces: bytes, tmp_path: Pat
     assert again.calls, "a damaged copy is fetched again"
     assert path.read_bytes() == LABELLED_CSV
     assert datasets.verify("hsls09_public", settings_dict).status == "ok"
+
+
+def test_a_local_zip_can_stand_in_for_the_download_in_tests(
+    fake_nces: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local = tmp_path / "local copy.zip"
+    local.write_bytes(fake_nces)
+    monkeypatch.setenv("EDMARS_TEST_ZIP_HSLS09_PUBLIC", str(local))
+    settings_dict = _load_settings()
+    datasets.accept_terms("hsls09_public", settings_dict)
+    raw = datasets.raw_data_dir(settings_dict)
+    session = serve_bytes(b"never requested")
+
+    path = datasets.download("hsls09_public", raw, settings=settings_dict, session=session)
+
+    assert session.calls == []
+    assert path.read_bytes() == LABELLED_CSV
+    assert settings_dict["datasets"]["hsls09_public"]["source"] == "local zip:local copy.zip"
+    assert local.read_bytes() == fake_nces, "a zip EDM-ARS did not download is not deleted"
+    assert not (raw / ".downloads").exists()
+
+
+def test_a_local_zip_is_still_checked_against_the_pin(
+    fake_nces: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local = tmp_path / "other.zip"
+    local.write_bytes(_zip({MEMBER: LABELLED_CSV}))
+    monkeypatch.setenv("EDMARS_TEST_ZIP_HSLS09_PUBLIC", str(local))
+    with pytest.raises(datasets.UnknownReleaseError):
+        datasets.download("hsls09_public", tmp_path / "raw", session=serve_bytes(b""))
+    assert local.is_file()
+    assert not (tmp_path / "raw" / "hsls_17_student_pets_sr_v1_0.csv").exists()
+
+
+def test_a_local_zip_is_refused_where_nothing_pins_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local = tmp_path / "els.zip"
+    local.write_bytes(_zip({"els_02_12_byf3pststu_v1_0.csv": b"x\n"}))
+    monkeypatch.setenv("EDMARS_TEST_ZIP_ELS_2002", str(local))
+    with pytest.raises(datasets.DatasetError, match="EDMARS_TEST_ZIP_ELS_2002 is set"):
+        datasets.download("els_2002", tmp_path / "raw", session=serve_bytes(b""))
+    monkeypatch.setenv("EDMARS_TEST_ZIP_HSLS09_PUBLIC", str(tmp_path / "missing.zip"))
+    with pytest.raises(datasets.DatasetError, match="not a file"):
+        datasets.download("hsls09_public", tmp_path / "raw", session=serve_bytes(b""))
+
+
+REAL_ZIP_ENV = "EDMARS_REAL_HSLS_ZIP"
+
+
+@pytest.mark.skipif(not os.environ.get(REAL_ZIP_ENV),
+                    reason=f"set {REAL_ZIP_ENV} to the real NCES HSLS:09 zip to run this")
+def test_the_real_nces_zip_installs_as_the_pinned_labelled_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end on the real 297 MB zip: `edmars data install`, no network.
+
+    Writes the 2.0 GB labelled file into this test's EDMARS_HOME and takes
+    about a minute.
+    """
+    from typer.testing import CliRunner
+
+    from edmars.cli import app
+
+    real = Path(os.environ[REAL_ZIP_ENV])
+    monkeypatch.setenv("EDMARS_TEST_ZIP_HSLS09_PUBLIC", str(real))
+    result = CliRunner().invoke(
+        app, ["data", "install", "hsls09_public", "--accept-terms", "--plain"])
+    assert result.exit_code == 0, result.output
+    assert "converted 100%" in result.output
+    settings_dict = _load_settings()
+    path = datasets.expected_path("hsls09_public", settings_dict)
+    assert path.stat().st_size == 1_998_219_907
+    assert fetch.sha256_file(path) == datasets.EXPECTED_SHA256["hsls09_public"]
+    record = settings_dict["datasets"]["hsls09_public"]
+    assert record["sha256"] == datasets.EXPECTED_SHA256["hsls09_public"]
+    assert record["terms_accepted_at"]
+    assert real.is_file()
+    assert datasets.validate_file("hsls09_public", path).status == "ok"
 
 
 def test_els_is_still_extracted_as_it_comes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

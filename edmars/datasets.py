@@ -20,7 +20,11 @@ match the pinned SHA-256 of the labelled file; otherwise nothing is
 installed.
 
 Nothing here touches the network except :func:`download`, which the
-caller runs only after the user accepted the dataset's terms.
+caller runs only after the user accepted the dataset's terms. For
+testing, ``EDMARS_TEST_ZIP_<NAME>`` (e.g. ``EDMARS_TEST_ZIP_HSLS09_PUBLIC``)
+names a local copy of the zip to use instead of downloading it; it is
+honoured only for a zip whose SHA-256 is pinned, so it can never install
+anything but the known release.
 """
 
 from __future__ import annotations
@@ -55,6 +59,10 @@ EXPECTED_SHA256: dict[str, str | None] = {
 }
 
 _ISSUES_URL = "https://github.com/cgpan/edm-ars-public/issues"
+
+#: A local copy of a dataset's zip to use instead of downloading it, for
+#: testing (see :func:`_local_zip`), e.g. EDMARS_TEST_ZIP_HSLS09_PUBLIC.
+TEST_ZIP_ENV = "EDMARS_TEST_ZIP_{name}"
 
 _NCES_TERMS_COMMON = (
     "This is a public-use file published by the National Center for "
@@ -809,15 +817,19 @@ def download(
         # The copy on disk no longer matches what was verified: asking to
         # install it again is asking for a repair, so fetch a fresh copy.
 
-    zip_path = dest_dir / ".downloads" / PurePosixPath(info.url).name
-    partial = zip_path.with_name(zip_path.name + ".part")
-    already = partial.stat().st_size if partial.exists() else 0
-    already += zip_path.stat().st_size if zip_path.exists() else 0
-    _require_space(dest_dir, max(0, info.disk_needed_bytes - already), f"{info.label}")
-
-    if not zip_path.is_file():
-        fetch.download_file(info.url, zip_path, progress=progress, session=session)
-    if not zipfile.is_zipfile(zip_path):
+    local = _local_zip(info)
+    # ``ours``: the zip is EDM-ARS's download, deleted once it is used. A
+    # local zip (EDMARS_TEST_ZIP_<NAME>) belongs to whoever set it.
+    ours = local is None
+    zip_path = local or dest_dir / ".downloads" / PurePosixPath(info.url).name
+    if ours:
+        partial = zip_path.with_name(zip_path.name + ".part")
+        already = partial.stat().st_size if partial.exists() else 0
+        already += zip_path.stat().st_size if zip_path.exists() else 0
+        _require_space(dest_dir, max(0, info.disk_needed_bytes - already), f"{info.label}")
+        if not zip_path.is_file():
+            fetch.download_file(info.url, zip_path, progress=progress, session=session)
+    if ours and not zipfile.is_zipfile(zip_path):
         _unlink_quiet(zip_path)
         inside = "the .zip" if info.label_table else "csv inside it"
         instead = (
@@ -834,6 +846,8 @@ def download(
         try:
             digest = convert_zip(name, zip_path, dest, progress)
         except UnknownReleaseError:
+            if not ours:
+                raise
             # Downloading again gets the same unknown zip; keeping it only
             # fills the disk. A zip that matched is kept on other errors:
             # it is the right file, and a fixed EDM-ARS can use it.
@@ -864,9 +878,33 @@ def download(
         # The user asked for this download, so keep it, and keep the old
         # hash on record so the change is visible.
         extra["replaced_sha256"] = rec["sha256"]
-    _store_record(name, settings, dest, digest, info.url, extra=extra)
-    _remove_download(zip_path)
+    source = info.url if ours else f"local zip:{zip_path.name}"
+    _store_record(name, settings, dest, digest, source, extra=extra)
+    if ours:
+        _remove_download(zip_path)
     return dest
+
+
+def _local_zip(info: DatasetInfo) -> Path | None:
+    """The zip named by ``EDMARS_TEST_ZIP_<NAME>``, if that is set.
+
+    Honoured only for a zip that :func:`convert_zip` checks against a
+    pinned SHA-256, so it can stand in for the download but can never
+    install anything else.
+    """
+    var = TEST_ZIP_ENV.format(name=info.name.upper())
+    value = os.environ.get(var, "").strip()
+    if not value:
+        return None
+    if not (info.zip_sha256 and info.label_table):
+        raise DatasetError(
+            f"{var} is set, but EDM-ARS cannot check a local zip for {info.label} "
+            "(it has no pinned zip SHA-256). Unset it to download the file."
+        )
+    path = Path(value).expanduser()
+    if not path.is_file():
+        raise DatasetError(f"{var} is set to {path}, which is not a file.")
+    return path
 
 
 def _remove_download(zip_path: Path) -> None:
