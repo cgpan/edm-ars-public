@@ -1153,7 +1153,14 @@ class _Wizard:
             self.info("Skipping the live key check (check_keys is off).")
         if source_var != env_var:
             return self._store_key(env_var, key)
-        self.ok(f"Using the {label} key from {_doctor.store_label(secrets.secret_source(env_var) or 'env', env_var)}.")
+        source = secrets.secret_source(env_var) or "env"
+        self.ok(f"Using the {label} key from {_doctor.store_label(source, env_var)}.")
+        if source == "env" and not secrets.stored_location(env_var):
+            # Nothing is copied from the provider's own variable, so a later
+            # terminal without it has no key. Say so here, not at the first study.
+            self.info(f"The key was not saved, so EDM-ARS can use it only while {env_var} is set. "
+                      "To save it, run `edmars setup ai` and paste it, or pass it to setup in a "
+                      "variable with another name: --key-env OTHER_NAME.")
         return True
 
     # -- local model server ---------------------------------------------------------

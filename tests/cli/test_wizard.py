@@ -557,6 +557,17 @@ def test_noninteractive_full_setup_with_the_standard_key_variable(
     assert fx.secrets.set_calls == []  # already in the standard variable: nothing copied
     assert fx.ui.prompts == []
     assert GOOD_KEY not in fx.ui.output
+    # Nothing was saved, so a later terminal without the variable has no
+    # key; setup says so instead of only "Using the key".
+    assert "The key was not saved" in fx.ui.output and "--key-env" in fx.ui.output
+
+
+def test_noninteractive_key_in_the_variable_and_already_saved_needs_no_warning(
+        fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", GOOD_KEY)
+    fx.secrets.store["DEEPSEEK_API_KEY"] = GOOD_KEY
+    assert run("ai", non_interactive=True, options={"check_keys": "false"}) == 0
+    assert "The key was not saved" not in fx.ui.output
 
 
 def test_noninteractive_reads_options_from_the_environment(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
