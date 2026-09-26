@@ -340,7 +340,9 @@ def _explain_left_in_place(current: dict[str, Any]) -> None:
     TinyTeX installer uses, where other programs can use it too, so it is
     listed for the user to delete rather than deleted. R packages from
     `edmars setup r` went into the user's own R library, shared with their
-    other R work, and are only mentioned.
+    other R work: they are named, with the library and an R command that
+    removes them, when setup recorded them (``r.added_packages``), and only
+    mentioned otherwise.
     """
     from edmars import settings as settings_mod
     from edmars import toolchain, ui
@@ -354,7 +356,22 @@ def _explain_left_in_place(current: dict[str, Any]) -> None:
                 "run `tlmgr path remove` (this undoes the PATH change TinyTeX's installer made), "
                 "then delete that folder."
             )
-    if settings_mod.get(current, "r.packages_ok", False):
+    added = settings_mod.get(current, "r.added_packages", {}) or {}
+    listed = False
+    if isinstance(added, dict):
+        for library, names in added.items():
+            names = [str(n) for n in (names or []) if n]
+            if not names:
+                continue
+            listed = True
+            lib = str(library).replace("\\", "/").replace("'", "\\'")
+            ui.info(
+                f"Uninstall does not touch R. `edmars setup r` added {len(names)} R packages to "
+                f"{library}; your other R work may use them, so they stay. "
+                "If nothing else needs them, remove them in R with: "
+                f"remove.packages(c({', '.join(repr(n) for n in names)}), lib = '{lib}')"
+            )
+    if not listed and settings_mod.get(current, "r.packages_ok", False):
         ui.info("Uninstall does not touch R: any R packages `edmars setup r` added stay in your R "
                 "library, where your other R work may use them.")
 

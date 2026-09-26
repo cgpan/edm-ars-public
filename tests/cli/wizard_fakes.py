@@ -566,9 +566,10 @@ class FakeToolchain:
                                                        "Run `edmars setup r`.")]
         return [Check("R", "ok", "R 4.5.1"), Check("R packages", "ok", "all installed")]
 
-    def install_r_packages(self, rscript: str, packages: Any = None, *, repo: str = "",
-                           timeout_s: float = 1800) -> Check:
+    def install_r_packages(self, rscript: str, packages: Any = None, *, repo: str | None = None,
+                           timeout_s: float = 1800, settings: dict[str, Any] | None = None) -> Check:
         self.packages_missing = False
+        self.install_settings = settings
         return Check("R packages", "ok", "installed")
 
     def docker_info(self) -> Check:
@@ -584,8 +585,10 @@ class FakeLsar:
         self.installed = False
         self.install_calls = 0
         self.commit = "0123abc4567def"
+        self.deep_calls: list[bool] = []
 
     def checks(self, settings: dict[str, Any], *, deep: bool = False) -> list[Check]:
+        self.deep_calls.append(deep)
         if self.installed:
             return [Check("Automated reviewer", "ok", f"LSAR installed at {self.home}")]
         return [Check("Automated reviewer", "fail", "LSAR is not installed", "Run `edmars setup reviewer`.")]

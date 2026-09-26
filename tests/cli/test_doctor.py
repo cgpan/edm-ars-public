@@ -270,6 +270,18 @@ def test_r_is_optional(fx: Fakes) -> None:
     assert statuses(run_checks(settings), "R packages") == ["warn"]
 
 
+def test_only_the_deep_check_loads_the_reviewer(fx: Fakes) -> None:
+    # lsar.checks(deep=True) loads LSAR and its PDF layout model in a child
+    # Python; doctor --deep never asked for it, so a reviewer that would
+    # skip or quietly change every review still showed as ready.
+    from edmars.doctor import run_checks
+
+    settings = healthy(fx, lsar={"enabled": True, "auto_review": True})
+    run_checks(settings)
+    run_checks(settings, deep=True)
+    assert fx.lsar.deep_calls == [False, True]
+
+
 def test_reviewer_without_a_deepseek_key_fails(fx: Fakes) -> None:
     from edmars.doctor import run_checks
 

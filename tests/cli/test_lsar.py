@@ -232,13 +232,46 @@ def test_links_are_skipped_and_one_top_folder_is_required(tmp_path: Path) -> Non
     archive = tmp_path / "a.tar.gz"
     archive.write_bytes(_targz(_tree(), links={"LSAR-public-master/link": "../../outside"}))
     top, commit = lsar._safe_extract(archive, tmp_path / "out")
-    assert top.name == "LSAR-public-master" and commit == COMMIT
+    assert top == (tmp_path / "out").resolve() and commit == COMMIT
     assert not (top / "link").exists()
 
     two = tmp_path / "b.tar.gz"
     two.write_bytes(_targz(_tree(extra={"second/x.txt": b"x"})))
     with pytest.raises(lsar.LsarInstallError, match="one folder"):
         lsar._safe_extract(two, tmp_path / "out2")
+
+
+def test_the_archive_top_folder_is_not_recreated_on_disk(tmp_path: Path) -> None:
+    # Found on Windows: GitHub names the archive's folder LSAR-public-<40-hex
+    # commit>; unpacked under the data folder's staging folder it pushed
+    # lsar/stage4_review_generation/templates/aera_open_template.md to 260
+    # characters, past Windows' path limit, and the install stopped with
+    # "No such file or directory". Its contents now land in dest directly.
+    top = f"LSAR-public-{COMMIT}"
+    deep = "lsar/stage4_review_generation/templates/aera_open_template.md"
+    archive = tmp_path / "a.tar.gz"
+    archive.write_bytes(_targz(_tree(top=top, extra={f"{top}/{deep}": b"x"})))
+    dest = tmp_path / "staging"
+    unpacked, commit = lsar._safe_extract(archive, dest)
+    assert unpacked == dest.resolve() and commit == COMMIT
+    assert not (dest / top).exists()
+    assert (dest / deep).read_bytes() == b"x"
+    for rel in lsar.REQUIRED_FILES:
+        assert (dest / rel).is_file()
+    deepest = max(len(str(p)) for p in dest.rglob("*"))
+    assert deepest == len(str(dest.resolve() / deep))
+
+
+def test_install_puts_the_files_directly_in_the_home_folder(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any
+) -> None:
+    monkeypatch.setattr(proc, "run", FakePip(real_run))
+    top = f"LSAR-public-{COMMIT}"
+    home = lsar.install(_load_settings(), session=serve_bytes(_targz(_tree(top=top))))
+    assert home == lsar.home_for_ref()
+    assert not (home / top).exists()
+    assert (home / "lsar" / "pipeline.py").is_file()
+    assert not list(lsar.lsar_root().glob(".staging-*"))
 
 
 def test_the_pinned_ref_is_a_commit_id_not_a_branch() -> None:
@@ -286,6 +319,46 @@ def test_verify_names_missing_files_and_missing_modules(tmp_path: Path) -> None:
     assert problems and "tenacity_missing_for_test" in problems[0]
     (home / "config.yaml").unlink()
     assert "config.yaml is missing" in lsar.verify(home)[0]
+
+
+DLL_ERROR = ("DLL load failed while importing onnxruntime_pybind11_state: "
+             "The specified module could not be found.")
+
+
+def _home_with_converter(tmp_path: Path, layout_body: str) -> Path:
+    """An LSAR home whose folder also shadows pymupdf4llm and pymupdf.layout.
+
+    The import check puts the home first on sys.path, so these stand-ins
+    are what the child Python imports.
+    """
+    home = tmp_path / "home"
+    for rel, data in _tree(top="x").items():
+        target = home / rel.split("/", 1)[1]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    (home / "pymupdf4llm").mkdir()
+    (home / "pymupdf4llm" / "__init__.py").write_text("", encoding="utf-8")
+    (home / "pymupdf" / "layout").mkdir(parents=True)
+    (home / "pymupdf" / "__init__.py").write_text("", encoding="utf-8")
+    (home / "pymupdf" / "layout" / "__init__.py").write_text(layout_body, encoding="utf-8")
+    return home
+
+
+def test_verify_reports_a_pdf_layout_model_that_cannot_load(tmp_path: Path) -> None:
+    # pymupdf4llm swallows this ImportError and switches to its classic
+    # converter, so a review would run on different text than LSAR's
+    # benchmark was calibrated with. On Windows the cause is onnxruntime's
+    # MSVCP140.dll / MSVCP140_1.dll, which no wheel ships.
+    home = _home_with_converter(tmp_path, f"raise ImportError({DLL_ERROR!r})\n")
+    problems = lsar.verify(home)
+    assert len(problems) == 1
+    assert "Visual C++ Redistributable" in problems[0]
+    assert lsar.VC_REDIST_URL in problems[0]
+    assert "edmars setup reviewer" in problems[0]
+
+
+def test_verify_passes_when_the_pdf_layout_model_loads(tmp_path: Path) -> None:
+    assert lsar.verify(_home_with_converter(tmp_path, "LOADED = True\n")) == []
 
 
 def test_runtime_requirements_drop_dev_tools(tmp_path: Path) -> None:

@@ -25,6 +25,7 @@ Versions kept outside LSAR's pins are recorded and reported by
 
 from __future__ import annotations
 
+import copy
 import importlib.metadata
 import importlib.util
 import json
@@ -204,7 +205,22 @@ def _tail(text: str, lines: int = 4) -> str:
 # Verification
 # ---------------------------------------------------------------------------
 
-_IMPORT_CHECK = "import sys; sys.path.insert(0, sys.argv[1]); import lsar.pipeline"
+#: Loads LSAR the way the review gate does, then the PDF layout model.
+#: LSAR imports pymupdf4llm only when it converts a PDF, and pymupdf4llm
+#: SILENTLY drops to its classic converter when ``pymupdf.layout`` cannot
+#: be imported. The layout model runs on onnxruntime, whose Windows DLLs
+#: need MSVCP140.dll and MSVCP140_1.dll (the Microsoft Visual C++
+#: Redistributable), which neither Python nor any wheel supplies. Without
+#: them every review would be scored on text from a converter other than
+#: the one LSAR's benchmark was calibrated with, and nothing would say so.
+_IMPORT_CHECK = (
+    "import sys; sys.path.insert(0, sys.argv[1]); import lsar.pipeline\n"
+    "import importlib.util\n"
+    "if importlib.util.find_spec('pymupdf4llm') is not None:\n"
+    "    import pymupdf.layout\n"
+)
+
+VC_REDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
 
 def _file_problems(home: Path) -> list[str]:
@@ -232,7 +248,9 @@ def verify(home: Path) -> list[str]:
     Checks the files the review gate reads, then imports ``lsar.pipeline``
     in a child Python started like the pipeline's own run (no user site,
     no PYTHONPATH), so a missing dependency shows up here and not as a
-    silently skipped review at the end of a paid run.
+    silently skipped review at the end of a paid run. It also loads the
+    PDF layout model (see ``_IMPORT_CHECK``), whose failure would not skip
+    reviews but would quietly change what they score.
     """
     home = Path(home)
     problems = _file_problems(home)
@@ -242,7 +260,15 @@ def verify(home: Path) -> list[str]:
                         timeout=180, cwd=home)
     if code != 0:
         missing = re.findall(r"No module named '([^'.]+)", output)
-        if missing:
+        if "DLL load failed" in output and ("onnxruntime" in output or "pymupdf" in output):
+            problems.append(
+                "The PDF layout model LSAR's scores were calibrated with cannot load "
+                f"({_tail(output, 1)}). Reviews would quietly use a different PDF "
+                "converter, so their scores would not match the benchmark. On Windows "
+                "this means the Microsoft Visual C++ Redistributable (x64) is missing: "
+                f"install it from {VC_REDIST_URL}, then run `edmars setup reviewer` again."
+            )
+        elif missing:
             problems.append(
                 f"LSAR needs the Python package '{missing[-1]}', which is not installed "
                 "for the Python that runs EDM-ARS."
@@ -344,7 +370,7 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
                              fix="edmars setup reviewer"))
         else:
             out.append(Check("LSAR loads in Python", "ok",
-                             "lsar.pipeline imports in a fresh Python."))
+                             "lsar.pipeline and the PDF layout model load in a fresh Python."))
     return out
 
 
@@ -356,10 +382,14 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
 def _safe_extract(archive: Path, dest: Path) -> tuple[Path, str | None]:
     """Unpack a GitHub source archive into ``dest``; refuse anything unsafe.
 
-    Returns (the single top-level folder, the commit id GitHub records in
-    the archive's pax header, if any). Absolute paths, ``..`` components,
-    drive letters and backslashes are refused outright; links, devices and
-    FIFOs are skipped (LSAR has none).
+    The archive's single top-level folder (``LSAR-public-<40-hex commit>``)
+    is dropped: its contents land directly in ``dest``, which is returned
+    with the commit id GitHub records in the archive's pax header, if any.
+    That folder name is 52 characters, and on Windows (260-character path
+    limit unless long paths are turned on) it pushed LSAR's deepest file
+    past the limit under a data folder that was only moderately deep.
+    Absolute paths, ``..`` components, drive letters and backslashes are
+    refused outright; links, devices and FIFOs are skipped (LSAR has none).
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -389,11 +419,19 @@ def _safe_extract(archive: Path, dest: Path) -> tuple[Path, str | None]:
             raise LsarInstallError(
                 f"The LSAR archive should hold one folder; it holds {sorted(tops)[:5]}."
             )
+        inner: list[tarfile.TarInfo] = []
+        for member in members:
+            rest = PurePosixPath(member.name).parts[1:]
+            if not rest:
+                continue  # the top-level folder itself; dest stands in for it
+            moved = copy.copy(member)
+            moved.name = "/".join(rest)
+            inner.append(moved)
         if hasattr(tarfile, "data_filter"):
-            tf.extractall(root, members=members, filter="data")
+            tf.extractall(root, members=inner, filter="data")
         else:  # pragma: no cover - Python < 3.11.4
-            tf.extractall(root, members=members)
-    return root / tops.pop(), commit
+            tf.extractall(root, members=inner)
+    return root, commit
 
 
 # ---------------------------------------------------------------------------

@@ -158,6 +158,25 @@ def test_uninstall_names_the_tinytex_it_leaves_in_place(
     assert "automated reviewer and caches were removed" in out
 
 
+def test_uninstall_names_the_r_packages_setup_added_and_where(
+    edmars_home: Path, fake_keyring: FakeKeyring, capsys: pytest.CaptureFixture[str],
+) -> None:
+    # "any R packages `edmars setup r` added stay in your R library" named
+    # neither the packages nor the library; a real install added 74.
+    _populate(edmars_home, fake_keyring)
+    current = settings.load()
+    lib = "D:/R/O'Neil lab/win-library/4.4"
+    settings.set_(current, "r.packages_ok", True)
+    settings.set_(current, "r.added_packages", {lib: ["CDM", "Deriv", "mirt"]})
+    settings.save(current)
+
+    assert maintenance.uninstall(assume_yes=True) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert f"added 3 R packages to {lib};" in out
+    assert "remove.packages(c('CDM', 'Deriv', 'mirt'), lib = 'D:/R/O\\'Neil lab/" in out
+    assert "any R packages" not in out
+
+
 def test_uninstall_can_remove_data_but_only_study_folders(
     edmars_home: Path, fake_keyring: FakeKeyring
 ) -> None:

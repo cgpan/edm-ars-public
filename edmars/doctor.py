@@ -664,13 +664,15 @@ def check_r(settings: dict[str, Any]) -> list["Check"]:
     return _downgrade(toolchain.r_checks(settings))
 
 
-def check_lsar(settings: dict[str, Any]) -> list["Check"]:
+def check_lsar(settings: dict[str, Any], *, deep: bool = False) -> list["Check"]:
     if not cfg(settings, "lsar.enabled", False):
         return [make_check("Automated reviewer", "info", "Off (LSAR is not turned on)",
                            "Run `edmars setup reviewer` to turn it on.")]
     from edmars import lsar, secrets
 
-    out = list(lsar.checks(settings))
+    # deep: load LSAR and its PDF layout model in a child Python, the one
+    # check that catches a reviewer that would skip or quietly change reviews.
+    out = list(lsar.checks(settings, deep=deep))
     if secrets.secret_source(DEEPSEEK_ENV) is None:
         out.append(make_check("Reviewer key", "fail",
                               "The automated reviewer needs a DeepSeek key (its scoring was calibrated with DeepSeek), "
@@ -900,7 +902,8 @@ def run_checks(settings: dict[str, Any], *, deep: bool = False) -> list["Check"]
     """Every doctor check, in reading order. Never raises, never prompts.
 
     ``deep=True`` adds live key checks (each key goes only to its own
-    service), retired-model detection and a LaTeX test compile.
+    service), retired-model detection, a LaTeX test compile and a load
+    test of the automated reviewer.
     """
     groups: list[tuple[str, Callable[[], list["Check"]]]] = [
         ("Computer", check_os),
@@ -914,7 +917,7 @@ def run_checks(settings: dict[str, Any], *, deep: bool = False) -> list["Check"]
         ("Datasets", lambda: check_datasets(settings)),
         ("PDF typesetting", lambda: check_latex(settings, deep=deep)),
         ("R", lambda: check_r(settings)),
-        ("Automated reviewer", lambda: check_lsar(settings)),
+        ("Automated reviewer", lambda: check_lsar(settings, deep=deep)),
         ("Disk space", lambda: check_disk(settings)),
         ("Memory", check_memory),
         ("Cloud sync", lambda: check_sync_folders(settings)),

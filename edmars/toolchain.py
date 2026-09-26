@@ -84,12 +84,25 @@ _TL_PACKAGE_FOR: dict[str, str | None] = {
 }
 
 R_PACKAGES: tuple[str, ...] = ("jsonlite", "lavaan", "mirt", "CDM", "MASS")
-#: Posit Package Manager snapshot: a fixed date, so every user gets the
-#: same package versions, served as binaries on Windows and macOS.
-R_REPO_SNAPSHOT = "https://packagemanager.posit.co/cran/2026-09-01"
+#: Posit Package Manager snapshots: fixed dates, so every user of the same
+#: R version gets the same package versions, served as binaries on Windows
+#: and macOS. The newest is tried first. A snapshot only counts for an R
+#: when it has a binary of every package still needed AND of everything
+#: they depend on: CRAN moves on without older R, so the 2026-09-01
+#: snapshot has no R 4.4 binary of mirt 1.47 (its dependency Deriv 4.3.0
+#: calls a C function added in R 4.5), and R then compiles the source,
+#: which fails with Rtools and cannot even start without it. The last date
+#: is from when R 4.4 (R_MIN_VERSION) was the current release.
+R_REPO_SNAPSHOTS: tuple[str, ...] = (
+    "https://packagemanager.posit.co/cran/2026-09-01",
+    "https://packagemanager.posit.co/cran/2026-04-01",
+    "https://packagemanager.posit.co/cran/2025-04-01",
+)
+R_REPO_SNAPSHOT = R_REPO_SNAPSHOTS[0]
 R_MIN_VERSION: tuple[int, int] = (4, 4)
 R_DOWNLOAD_PAGE = "https://cran.r-project.org/"
 
+_R_NAME = re.compile(r"[A-Za-z][A-Za-z0-9.]*")
 _R_VERSION_DIR = re.compile(r"R-(\d+)\.(\d+)(?:\.(\d+))?", re.IGNORECASE)
 
 TEST_BIB = r"""@article{edmarstest2026,
@@ -909,8 +922,19 @@ def _probe_code(packages: Sequence[str]) -> str:
     )
 
 
-def _install_code(packages: Sequence[str], repo: str) -> str:
+def _install_code(packages: Sequence[str], repos: Sequence[str]) -> str:
+    """R code that installs ``packages`` from the first snapshot that fits this R.
+
+    On a platform with binary packages, each snapshot's binary index is
+    read for this R version (``.Platform$pkgType``) and the first one that
+    has every needed package and dependency not already installed is used;
+    it prints ``EDMARS_REPO <url>`` so the caller can name it. Where R only
+    builds from source (Linux), the first snapshot is used. Afterwards it
+    prints ``EDMARS_LIB <library>`` and ``EDMARS_ADDED <names>``: every
+    package the install put into that library, dependencies included.
+    """
     pkgs = ", ".join(f"'{p}'" for p in packages)
+    candidates = ", ".join(f"'{r}'" for r in repos)
     return (
         f"pkgs <- c({pkgs})\n"
         "lib <- strsplit(Sys.getenv('R_LIBS_USER'), .Platform$path.sep, fixed = TRUE)[[1]][1]\n"
@@ -919,7 +943,25 @@ def _install_code(packages: Sequence[str], repo: str) -> str:
         "dir.create(lib, recursive = TRUE, showWarnings = FALSE)\n"
         ".libPaths(c(lib, .libPaths()))\n"
         "options(timeout = max(600, getOption('timeout')))\n"
-        f"install.packages(pkgs, lib = lib, repos = c(CRAN = '{repo}'))\n"
+        f"repos <- c({candidates})\n"
+        "repo <- repos[1]\n"
+        "if (length(repos) > 1 && .Platform$pkgType != 'source') {\n"
+        "  have <- rownames(installed.packages())\n"
+        "  for (r in repos) {\n"
+        "    db <- tryCatch(available.packages(repos = c(CRAN = r), type = .Platform$pkgType),\n"
+        "                   error = function(e) NULL)\n"
+        "    if (is.null(db) || !nrow(db)) next\n"
+        "    deps <- unlist(tools::package_dependencies(pkgs, db = db, recursive = TRUE,\n"
+        "                   which = c('Depends', 'Imports', 'LinkingTo')))\n"
+        "    need <- setdiff(unique(c(pkgs, deps)), c(have, 'R'))\n"
+        "    if (all(need %in% rownames(db))) { repo <- r; break }\n"
+        "  }\n"
+        "}\n"
+        "cat('EDMARS_REPO', repo, '\\n')\n"
+        "had <- rownames(installed.packages(lib.loc = lib))\n"
+        "install.packages(pkgs, lib = lib, repos = c(CRAN = repo))\n"
+        "cat('EDMARS_LIB', lib, '\\n')\n"
+        "cat('EDMARS_ADDED', setdiff(rownames(installed.packages(lib.loc = lib)), had), '\\n')\n"
         "for (p in pkgs) if (!requireNamespace(p, quietly = TRUE)) cat('MISSING', p, '\\n')\n"
     )
 
@@ -992,31 +1034,58 @@ def install_r_packages(
     rscript: str,
     packages: Sequence[str] | None = None,
     *,
-    repo: str = R_REPO_SNAPSHOT,
+    repo: str | None = None,
     timeout_s: float = 1800,
+    settings: dict[str, Any] | None = None,
 ) -> Check:
-    """Install the missing R packages into the user's R library (consent first)."""
+    """Install the missing R packages into the user's R library (consent first).
+
+    ``repo`` pins one repository; by default the first of
+    :data:`R_REPO_SNAPSHOTS` that has binaries of everything needed for
+    this R version is used. With ``settings``, every package the install
+    added (dependencies included, even when the install then fails) is
+    saved under ``r.added_packages`` by library, so ``edmars uninstall``
+    can say exactly what it leaves in the user's R library.
+    """
     title = "R packages"
     wanted = list(packages) if packages is not None else list(R_PACKAGES)
+    repos = [repo] if repo else list(R_REPO_SNAPSHOTS)
     before = probe_r(rscript, wanted)
     if before.error:
         return Check(title, "fail", f"R did not run: {before.error}", fix="edmars setup r")
     if not before.missing:
         return Check(title, "ok", "All present: " + ", ".join(wanted))
     with tempfile.TemporaryDirectory(prefix="edmars-r-") as tmp:
-        script = _r_script_file(Path(tmp), "install.R", _install_code(before.missing, repo))
+        script = _r_script_file(Path(tmp), "install.R", _install_code(before.missing, repos))
         result = _run([rscript, "--vanilla", str(script)], timeout=timeout_s, cwd=tmp)
+    chosen = re.search(r"^EDMARS_REPO\s+(\S+)", result.stdout, flags=re.MULTILINE)
+    used = chosen.group(1) if chosen else repos[0]
+    library, added = _added_packages(result.stdout)
+    if settings is not None and library and added:
+        record = dict(_settings_get(settings, "r.added_packages") or {})
+        record[library] = sorted(set(record.get(library) or []) | set(added), key=str.lower)
+        _settings_set_and_save(settings, {"r.added_packages": record})
     after = probe_r(rscript, wanted)
     if not after.error and not after.missing:
-        return Check(title, "ok", "Installed: " + ", ".join(before.missing))
+        where = (f"; {len(added)} packages in all, with what they need, into {library}"
+                 if library and added else "")
+        return Check(title, "ok", "Installed: " + ", ".join(before.missing) + f" (from {used}{where})")
     why = result.error or _tail(result.output, 4)
     still = ", ".join(after.missing) if after.missing else "unknown"
     return Check(
         title, "fail",
         f"Still missing after the install attempt: {still}. R said: {why}",
         fix=(f"In R, run install.packages(c({', '.join(repr(p) for p in after.missing)}), "
-             f"repos = '{repo}')"),
+             f"repos = '{used}')"),
     )
+
+
+def _added_packages(stdout: str) -> tuple[str | None, list[str]]:
+    """(library, packages added to it) from the install script's report lines."""
+    lib = re.search(r"^EDMARS_LIB (.+?)\s*$", stdout or "", flags=re.MULTILINE)
+    added = re.search(r"^EDMARS_ADDED(.*)$", stdout or "", flags=re.MULTILINE)
+    names = [n for n in (added.group(1).split() if added else []) if _R_NAME.fullmatch(n)]
+    return (lib.group(1) if lib else None), names
 
 
 def remember_rscript(settings: dict[str, Any], rscript: str | None, packages_ok: bool) -> None:
