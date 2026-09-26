@@ -110,10 +110,11 @@ class FakeR:
     """Answers Rscript --vanilla <file>.R the way the probe/install scripts expect."""
 
     def __init__(self, missing: list[str], version: str = "4.4.1",
-                 installable: bool = True) -> None:
+                 installable: bool = True, chosen: str | None = None) -> None:
         self.missing = list(missing)
         self.version = version
         self.installable = installable
+        self.chosen = chosen
         self.scripts: list[str] = []
 
     def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -121,10 +122,11 @@ class FakeR:
         script = Path(args[2]).read_text(encoding="utf-8")
         self.scripts.append(script)
         if "install.packages" in script:
+            said = f"EDMARS_REPO {self.chosen} \n" if self.chosen else ""
             if self.installable:
                 self.missing = []
-                return completed(args, 0, "", "installing *binary* package 'mirt'")
-            return completed(args, 1, "", "Warning: unable to access index for repository")
+                return completed(args, 0, said, "installing *binary* package 'mirt'")
+            return completed(args, 1, said, "Warning: unable to access index for repository")
         out = "".join(f"MISSING {p} \n" for p in self.missing)
         return completed(args, 0, out + f"R_VERSION {self.version} \n", "")
 
@@ -180,6 +182,50 @@ def test_install_r_packages_failure_says_what_is_still_missing(
     check = toolchain.install_r_packages("Rscript")
     assert check.status == "fail"
     assert "lavaan" in check.detail and "unable to access index" in check.detail
+
+
+def test_install_tries_older_snapshots_when_the_newest_has_no_binary_for_this_r() -> None:
+    # Found on a real R 4.4.1: the 2026-09-01 snapshot has no R 4.4 binary
+    # of mirt 1.47 (Deriv 4.3.0 needs R 4.5), so R compiled the source and
+    # the install failed. The script must read each snapshot's binary index
+    # for this R, newest first, and use the first that has the package AND
+    # its dependencies; source-only platforms keep the newest.
+    snapshots = toolchain.R_REPO_SNAPSHOTS
+    assert len(snapshots) >= 2 and snapshots[0] == toolchain.R_REPO_SNAPSHOT
+    dates = [s.rsplit("/", 1)[-1] for s in snapshots]
+    assert dates == sorted(dates, reverse=True)
+    code = toolchain._install_code(["mirt"], snapshots)
+    listed = "repos <- c(" + ", ".join(f"'{s}'" for s in snapshots) + ")"
+    assert listed in code
+    assert "type = .Platform$pkgType" in code
+    assert ".Platform$pkgType != 'source'" in code
+    assert "tools::package_dependencies(pkgs, db = db, recursive = TRUE" in code
+    assert "'Depends', 'Imports', 'LinkingTo'" in code
+    assert "cat('EDMARS_REPO', repo" in code
+    assert "install.packages(pkgs, lib = lib, repos = c(CRAN = repo))" in code
+
+
+def test_the_snapshot_r_chose_is_named_in_the_result_and_the_fix(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    older = toolchain.R_REPO_SNAPSHOTS[1]
+    monkeypatch.setattr(proc, "run", FakeR(["mirt"], chosen=older))
+    ok = toolchain.install_r_packages("Rscript")
+    assert ok.status == "ok" and older in ok.detail
+
+    monkeypatch.setattr(proc, "run", FakeR(["mirt"], installable=False, chosen=older))
+    failed = toolchain.install_r_packages("Rscript")
+    assert failed.status == "fail"
+    assert f"repos = '{older}'" in (failed.fix or "")
+
+
+def test_a_repo_passed_in_is_the_only_one_tried(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeR(["CDM"])
+    monkeypatch.setattr(proc, "run", fake)
+    toolchain.install_r_packages("Rscript", repo="https://cran.example.invalid")
+    install_script = next(s for s in fake.scripts if "install.packages" in s)
+    assert "repos <- c('https://cran.example.invalid')" in install_script
+    assert not any(s in install_script for s in toolchain.R_REPO_SNAPSHOTS)
 
 
 def test_r_that_times_out_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:

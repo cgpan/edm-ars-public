@@ -84,9 +84,21 @@ _TL_PACKAGE_FOR: dict[str, str | None] = {
 }
 
 R_PACKAGES: tuple[str, ...] = ("jsonlite", "lavaan", "mirt", "CDM", "MASS")
-#: Posit Package Manager snapshot: a fixed date, so every user gets the
-#: same package versions, served as binaries on Windows and macOS.
-R_REPO_SNAPSHOT = "https://packagemanager.posit.co/cran/2026-09-01"
+#: Posit Package Manager snapshots: fixed dates, so every user of the same
+#: R version gets the same package versions, served as binaries on Windows
+#: and macOS. The newest is tried first. A snapshot only counts for an R
+#: when it has a binary of every package still needed AND of everything
+#: they depend on: CRAN moves on without older R, so the 2026-09-01
+#: snapshot has no R 4.4 binary of mirt 1.47 (its dependency Deriv 4.3.0
+#: calls a C function added in R 4.5), and R then compiles the source,
+#: which fails with Rtools and cannot even start without it. The last date
+#: is from when R 4.4 (R_MIN_VERSION) was the current release.
+R_REPO_SNAPSHOTS: tuple[str, ...] = (
+    "https://packagemanager.posit.co/cran/2026-09-01",
+    "https://packagemanager.posit.co/cran/2026-04-01",
+    "https://packagemanager.posit.co/cran/2025-04-01",
+)
+R_REPO_SNAPSHOT = R_REPO_SNAPSHOTS[0]
 R_MIN_VERSION: tuple[int, int] = (4, 4)
 R_DOWNLOAD_PAGE = "https://cran.r-project.org/"
 
@@ -846,8 +858,17 @@ def _probe_code(packages: Sequence[str]) -> str:
     )
 
 
-def _install_code(packages: Sequence[str], repo: str) -> str:
+def _install_code(packages: Sequence[str], repos: Sequence[str]) -> str:
+    """R code that installs ``packages`` from the first snapshot that fits this R.
+
+    On a platform with binary packages, each snapshot's binary index is
+    read for this R version (``.Platform$pkgType``) and the first one that
+    has every needed package and dependency not already installed is used;
+    it prints ``EDMARS_REPO <url>`` so the caller can name it. Where R only
+    builds from source (Linux), the first snapshot is used.
+    """
     pkgs = ", ".join(f"'{p}'" for p in packages)
+    candidates = ", ".join(f"'{r}'" for r in repos)
     return (
         f"pkgs <- c({pkgs})\n"
         "lib <- strsplit(Sys.getenv('R_LIBS_USER'), .Platform$path.sep, fixed = TRUE)[[1]][1]\n"
@@ -856,7 +877,22 @@ def _install_code(packages: Sequence[str], repo: str) -> str:
         "dir.create(lib, recursive = TRUE, showWarnings = FALSE)\n"
         ".libPaths(c(lib, .libPaths()))\n"
         "options(timeout = max(600, getOption('timeout')))\n"
-        f"install.packages(pkgs, lib = lib, repos = c(CRAN = '{repo}'))\n"
+        f"repos <- c({candidates})\n"
+        "repo <- repos[1]\n"
+        "if (length(repos) > 1 && .Platform$pkgType != 'source') {\n"
+        "  have <- rownames(installed.packages())\n"
+        "  for (r in repos) {\n"
+        "    db <- tryCatch(available.packages(repos = c(CRAN = r), type = .Platform$pkgType),\n"
+        "                   error = function(e) NULL)\n"
+        "    if (is.null(db) || !nrow(db)) next\n"
+        "    deps <- unlist(tools::package_dependencies(pkgs, db = db, recursive = TRUE,\n"
+        "                   which = c('Depends', 'Imports', 'LinkingTo')))\n"
+        "    need <- setdiff(unique(c(pkgs, deps)), c(have, 'R'))\n"
+        "    if (all(need %in% rownames(db))) { repo <- r; break }\n"
+        "  }\n"
+        "}\n"
+        "cat('EDMARS_REPO', repo, '\\n')\n"
+        "install.packages(pkgs, lib = lib, repos = c(CRAN = repo))\n"
         "for (p in pkgs) if (!requireNamespace(p, quietly = TRUE)) cat('MISSING', p, '\\n')\n"
     )
 
@@ -929,30 +965,38 @@ def install_r_packages(
     rscript: str,
     packages: Sequence[str] | None = None,
     *,
-    repo: str = R_REPO_SNAPSHOT,
+    repo: str | None = None,
     timeout_s: float = 1800,
 ) -> Check:
-    """Install the missing R packages into the user's R library (consent first)."""
+    """Install the missing R packages into the user's R library (consent first).
+
+    ``repo`` pins one repository; by default the first of
+    :data:`R_REPO_SNAPSHOTS` that has binaries of everything needed for
+    this R version is used.
+    """
     title = "R packages"
     wanted = list(packages) if packages is not None else list(R_PACKAGES)
+    repos = [repo] if repo else list(R_REPO_SNAPSHOTS)
     before = probe_r(rscript, wanted)
     if before.error:
         return Check(title, "fail", f"R did not run: {before.error}", fix="edmars setup r")
     if not before.missing:
         return Check(title, "ok", "All present: " + ", ".join(wanted))
     with tempfile.TemporaryDirectory(prefix="edmars-r-") as tmp:
-        script = _r_script_file(Path(tmp), "install.R", _install_code(before.missing, repo))
+        script = _r_script_file(Path(tmp), "install.R", _install_code(before.missing, repos))
         result = _run([rscript, "--vanilla", str(script)], timeout=timeout_s, cwd=tmp)
+    chosen = re.search(r"^EDMARS_REPO\s+(\S+)", result.stdout, flags=re.MULTILINE)
+    used = chosen.group(1) if chosen else repos[0]
     after = probe_r(rscript, wanted)
     if not after.error and not after.missing:
-        return Check(title, "ok", "Installed: " + ", ".join(before.missing))
+        return Check(title, "ok", "Installed: " + ", ".join(before.missing) + f" (from {used})")
     why = result.error or _tail(result.output, 4)
     still = ", ".join(after.missing) if after.missing else "unknown"
     return Check(
         title, "fail",
         f"Still missing after the install attempt: {still}. R said: {why}",
         fix=(f"In R, run install.packages(c({', '.join(repr(p) for p in after.missing)}), "
-             f"repos = '{repo}')"),
+             f"repos = '{used}')"),
     )
 
 
