@@ -394,6 +394,62 @@ def test_existing_latex_is_test_compiled(fx: Fakes) -> None:
     assert fx.toolchain.compile_calls == 1
 
 
+def _miktex(fx: Fakes, auto: str | None) -> None:
+    # MiKTeX keeps initexmf in the same folder as its pdflatex.
+    fx.proc.tools["pdflatex"] = "/opt/miktex/bin/pdflatex"
+    fx.proc.tools["initexmf"] = "/opt/miktex/bin/initexmf"
+    fx.toolchain.miktex_auto = auto
+
+
+def test_setup_pdf_offers_miktex_automatic_package_install(fx: Fakes) -> None:
+    # CLI_SPEC section 6: toolchain.set_miktex_autoinstall existed, doctor
+    # told users to run `edmars setup pdf`, and setup never offered it.
+    _miktex(fx, "2")
+    fx.ui.script = ["system", DEFAULT]
+    assert run("pdf") == 0
+    assert "background, where nobody sees that question" in fx.ui.output
+    assert fx.toolchain.miktex_auto == "1"
+    # Changed before the test compile, which would otherwise fail fast.
+    assert fx.toolchain.events == ["set_miktex_autoinstall", "test_compile"]
+
+
+def test_declining_the_miktex_change_leaves_it_and_says_how(fx: Fakes) -> None:
+    _miktex(fx, "2")
+    fx.ui.script = ["system", False]
+    assert run("pdf") == 0
+    assert fx.toolchain.miktex_auto == "2"
+    assert "set_miktex_autoinstall" not in fx.toolchain.events
+    assert "Always install missing packages on-the-fly" in fx.ui.output
+
+
+def test_no_miktex_question_when_it_already_installs_packages(fx: Fakes) -> None:
+    _miktex(fx, "1")
+    fx.ui.script = ["system"]  # a MiKTeX question would find no scripted answer
+    assert run("pdf") == 0
+    assert "set_miktex_autoinstall" not in fx.toolchain.events
+
+
+def test_no_miktex_question_when_another_latex_makes_the_pdfs(fx: Fakes) -> None:
+    # TeX Live's pdflatex first on PATH, MiKTeX's initexmf elsewhere.
+    _miktex(fx, "2")
+    fx.proc.tools["pdflatex"] = "/usr/local/texlive/bin/pdflatex"
+    fx.ui.script = ["system"]
+    assert run("pdf") == 0
+    assert fx.toolchain.miktex_auto == "2"
+
+
+@pytest.mark.parametrize("allow", [True, False])
+def test_noninteractive_setup_pdf_changes_miktex_only_when_told(fx: Fakes, allow: bool) -> None:
+    _miktex(fx, "2")
+    options: dict[str, object] = {"latex_action": "system"}
+    if allow:
+        options["miktex_autoinstall"] = "yes"
+    assert run("pdf", non_interactive=True, options=options) == 0, fx.ui.output
+    assert fx.toolchain.miktex_auto == ("1" if allow else "2")
+    if not allow:
+        assert "--option miktex_autoinstall=yes" in fx.ui.output
+
+
 def test_tinytex_install_needs_consent(fx: Fakes) -> None:
     fx.ui.script = ["tinytex", False, "skip"]
     assert run("pdf") == 0

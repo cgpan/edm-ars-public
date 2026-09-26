@@ -519,6 +519,8 @@ class FakeToolchain:
         self.latex_error: BaseException | None = None
         self.compile_calls = 0
         self.xgboost: list[Check] = [Check("XGBoost", "ok", "XGBoost 2.1.4 loads together with scikit-learn")]
+        self.miktex_auto: str | None = "1"
+        self.events: list[str] = []
 
     def latex_checks(self, settings: dict[str, Any] | None = None) -> list[Check]:
         if self.latex_error is not None:
@@ -527,7 +529,17 @@ class FakeToolchain:
 
     def test_compile(self, timeout_s: float = 120, settings: dict[str, Any] | None = None) -> list[Check]:
         self.compile_calls += 1
+        self.events.append("test_compile")
         return list(self.compile)
+
+    def miktex_autoinstall(self, settings: dict[str, Any] | None = None) -> str | None:
+        return self.miktex_auto
+
+    def set_miktex_autoinstall(self, settings: dict[str, Any] | None = None) -> Check:
+        self.events.append("set_miktex_autoinstall")
+        self.miktex_auto = "1"
+        return Check("MiKTeX automatic package install", "ok",
+                     "MiKTeX will now install missing LaTeX packages automatically.")
 
     def tinytex_bin_dirs(self) -> list[Path]:
         return [self.tinytex_dir]
@@ -721,7 +733,8 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fakes:
         "toolchain": _module("toolchain", fakes.toolchain, ("latex_checks", "test_compile", "install_tinytex",
                                                              "tinytex_bin_dirs", "find_tex_tool",
                                                              "find_rscript", "r_checks", "install_r_packages",
-                                                             "docker_info", "xgboost_checks")),
+                                                             "docker_info", "xgboost_checks",
+                                                             "miktex_autoinstall", "set_miktex_autoinstall")),
         "lsar": _module("lsar", fakes.lsar, ("LSAR_REPO", "LSAR_REF", "checks", "install", "verify",
                                                     "benchmark_for")),
         "runner": _module("runner", fakes.runner, ("latest_run",)),
