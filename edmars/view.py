@@ -34,6 +34,7 @@ from rich.cells import cell_len
 from edmars.runstate import (
     EXPERIMENTAL_LINE,
     RunState,
+    StageState,
     StateReader,
     fmt_duration,
     progress,
@@ -202,10 +203,12 @@ def render_screen(
     for number, st in enumerate(state.visible_stages(), start=1):
         title = stage_title(state, st)
         stage_left = f" {glyphs.get(st.status, '·')} {number} {title}"
-        dur = fmt_duration(st.duration_s(ref)) if st.status != "pending" else ""
+        dur = stage_time(st, ref) if st.status != "pending" else ""
         detail = st.detail
         if st.status == "running" and not detail:
             detail = _running_hint(state)
+        if st.status == "failed" and st.interrupted:
+            detail = "interrupted" + (f" · {detail}" if detail else "")
         stage_right = "  ".join(p for p in (dur, detail) if p)
         for text in _two_col(stage_left, stage_right, width, plain):
             add(text, STYLES.get(st.status, ""))
@@ -238,6 +241,19 @@ def render_screen(
     if not state.finished:
         add("Ctrl+C: leave or stop", "dim")
     return out
+
+
+def stage_time(st: StageState, ref: datetime | None = None, *, bracketed: bool = False) -> str:
+    """A step's time in this attempt; after a resume, also the total with
+    the interrupted attempt (the Mac view showed only the sum, 7m20s, for
+    an analysis that took 6m12s after the resume). ``bracketed`` is for
+    text already inside brackets: "6m12s; 7m20s incl. ..." instead of
+    "6m12s (7m20s incl. ...)"."""
+    dur = fmt_duration(st.duration_s(ref))
+    if st.earlier_s and dur:
+        total = f"{fmt_duration(st.total_s(ref))} incl. the interrupted attempt"
+        dur += f"; {total}" if bracketed else f" ({total})"
+    return dur
 
 
 def _running_hint(state: RunState) -> str:
@@ -304,7 +320,7 @@ class PlainPrinter:
                 continue
             self._status[st.key] = st.status
             title = stage_title(state, st)
-            dur = fmt_duration(st.duration_s(ref))
+            dur = stage_time(st, ref, bracketed=True)
             if st.status == "running":
                 out += self._emit(f"[..] Step {number} of {total}: {title}")
             elif st.status == "done":
@@ -314,6 +330,10 @@ class PlainPrinter:
                 if st.detail:
                     text += f" - {st.detail}"
                 out += self._emit(text)
+            elif st.status == "failed" and st.interrupted:
+                text = f"[x] Step {number} of {total} interrupted"
+                text += f" after {dur}" if dur else ""
+                out += self._emit(f"{text}: {title}")
             elif st.status == "failed":
                 out += self._emit(f"[x] Step {number} of {total} did not finish: {title}")
             elif st.status == "skipped" and before is not None:

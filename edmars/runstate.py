@@ -103,15 +103,33 @@ class StageState:
     rounds: int = 0
     cycle: int | None = None
     detail: str = ""
+    #: The last round was cut off by a stop (Ctrl+C, `edmars stop`, the
+    #: computer sleeping), not failed by an error. Shown as interrupted,
+    #: never as done; status is "failed" so the step counts as not finished.
+    interrupted: bool = False
+    #: Seconds of the interrupted round; moved to ``earlier_s`` when a
+    #: resume starts the step again.
+    interrupted_round_s: float = 0.0
+    #: Seconds spent in attempts that were interrupted and then restarted.
+    #: Not part of ``duration_s``, which is this attempt's time.
+    earlier_s: float = 0.0
 
     def duration_s(self, now: datetime | None = None) -> float | None:
-        """Total seconds in this stage, including a round still running."""
+        """Seconds in this stage in the current attempt, including a round
+        still running (earlier interrupted attempts are in ``earlier_s``)."""
         if self.status == "running" and self.started is not None:
             ref = now or datetime.now(timezone.utc)
             return self.elapsed_s + max(0.0, (ref - self.started).total_seconds())
         if self.rounds or self.elapsed_s:
             return self.elapsed_s
         return None
+
+    def total_s(self, now: datetime | None = None) -> float | None:
+        """Seconds in this stage including interrupted earlier attempts."""
+        current = self.duration_s(now)
+        if not self.earlier_s:
+            return current
+        return (current or 0.0) + self.earlier_s
 
 
 def _new_stages() -> list[StageState]:
@@ -328,6 +346,14 @@ def _stage_start(state: RunState, key: str, ts: datetime | None, cycle: int | No
         if other.key != key and other.status == "running":
             _stage_end(state, other.key, ts, "ok")
     st = state.stage(key)
+    if st.interrupted:
+        # A resume starts the interrupted round again: its time so far
+        # belongs to an earlier attempt, and it is the same round.
+        st.elapsed_s = max(0.0, st.elapsed_s - st.interrupted_round_s)
+        st.earlier_s += st.interrupted_round_s
+        st.interrupted_round_s = 0.0
+        st.interrupted = False
+        st.rounds = max(0, st.rounds - 1)
     st.status = "running"
     st.started = ts
     st.ended = None
@@ -349,15 +375,29 @@ def _stage_start(state: RunState, key: str, ts: datetime | None, cycle: int | No
                 prev.status = "skipped" if prev.key in ("REVISING", "REVIEWING") else "done"
 
 
+#: stage.end outcomes of a round that a stop cut off (the pipeline writes
+#: "interrupted" for Ctrl+C, `edmars stop` and a termination signal).
+_INTERRUPTED_OUTCOMES = frozenset({"interrupted", "stopped"})
+
+
 def _stage_end(state: RunState, key: str, ts: datetime | None, outcome: Any) -> None:
     st = state.stage(key)
+    round_s = 0.0
     if st.status == "running" and st.started is not None and ts is not None:
-        st.elapsed_s += max(0.0, (ts - st.started).total_seconds())
+        round_s = max(0.0, (ts - st.started).total_seconds())
+        st.elapsed_s += round_s
     if st.rounds == 0:
         st.rounds = 1
     st.ended = ts
     text = str(outcome or "ok").lower()
-    st.status = "failed" if text in ("failed", "fail", "error", "aborted", "abort") else "done"
+    if text in _INTERRUPTED_OUTCOMES:
+        # Not "done": the Mac test's live view printed "[ok] Step 3 of 8
+        # done" for an analysis `edmars stop` had cut off after 68 s.
+        st.status = "failed"
+        st.interrupted = True
+        st.interrupted_round_s = round_s
+        return
+    st.status = "failed" if text in ("failed", "fail", "error", "aborted", "abort", "crashed") else "done"
     if key == "ENGINEERING" or key == "ANALYZING":
         state.code_running = False
 
@@ -369,6 +409,7 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
         if seq <= state.last_seq:
             return
         state.last_seq = seq
+    last_seen = state.updated
     ts = parse_ts(ev.get("ts"))
     if ts is not None:
         if state.updated is None or ts > state.updated:
@@ -389,6 +430,12 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
     if etype == "run.start":
         if state.finished or data.get("resumed"):
             state.resumed += 1
+        for st in state.stages:
+            if st.status == "running":
+                # The earlier process ended mid-step without a stage.end
+                # (killed, or the computer went to sleep): that round was
+                # interrupted at the last thing it wrote.
+                _stage_end(state, st.key, last_seen, "interrupted")
         state.run_started_at = ts or state.run_started_at
         state.finished = False
         state.final_state = None
@@ -520,8 +567,11 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
         state.code_running = False
         for st in state.stages:
             if st.status == "running":
-                failed = state.final_state in ("ABORTED", "INTERRUPTED", "CRASHED")
-                _stage_end(state, st.key, ts, "failed" if failed else "ok")
+                if state.final_state == "INTERRUPTED":
+                    _stage_end(state, st.key, ts, "interrupted")
+                else:
+                    failed = state.final_state in ("ABORTED", "CRASHED")
+                    _stage_end(state, st.key, ts, "failed" if failed else "ok")
 
 
 def fold(events: Iterable[dict[str, Any]], base: RunState | None = None) -> RunState:
@@ -1464,7 +1514,15 @@ def _enrich(state: RunState, run_dir: Path, files: _FileCache, *, tail: bool) ->
         state.code_running = False
         for st in state.stages:
             if st.status == "running":
-                st.status = "failed" if state.final_state in ("ABORTED", "CRASHED", "STOPPED", "INTERRUPTED") else "done"
+                # The process is gone mid-step: count the step's time up to
+                # the last thing it wrote, and say how it ended.
+                if state.final_state in ("STOPPED", "INTERRUPTED"):
+                    outcome = "interrupted"
+                elif state.final_state in ("ABORTED", "CRASHED"):
+                    outcome = "failed"
+                else:
+                    outcome = "ok"
+                _stage_end(state, st.key, state.updated or st.started, outcome)
         if state.final_state in ("COMPLETED", "INCOMPLETE"):
             for st in state.stages:
                 if st.status == "pending" and st.key in ("REVISING", "REVIEWING"):

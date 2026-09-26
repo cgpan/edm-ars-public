@@ -258,3 +258,79 @@ def test_an_error_in_the_recent_list_is_wrapped_not_cut(plain: bool) -> None:
 def test_the_view_docstring_says_its_codes_are_not_exit_codes() -> None:
     doc = " ".join((view.__doc__ or "").split())
     assert "not exit codes" in doc and "edmars.model.EXIT_" in doc
+
+
+
+def _ev(seq: int, etype: str, clock: str, *, stage: str | None = None, **data: object) -> dict:
+    """An event at 13:<clock> (mm:ss), for timings finer than a minute."""
+    return {"v": 1, "seq": seq, "ts": f"2026-09-25T13:{clock}.000Z", "run_id": "run", "type": etype,
+            "stage": stage, "cycle": None, "agent": None, "plain": None, "data": data}
+
+
+_BEFORE_STOP = [
+    _ev(1, "run.start", "41:24", task_type="prediction", dataset="hsls09_public", provider="deepseek"),
+    _ev(2, "stage.start", "41:24", stage="FORMULATING"),
+    _ev(3, "stage.end", "42:47", stage="FORMULATING", outcome="ok"),
+    _ev(4, "stage.start", "42:47", stage="ENGINEERING"),
+    _ev(5, "stage.end", "47:29", stage="ENGINEERING", outcome="ok"),
+    _ev(6, "stage.start", "47:29", stage="ANALYZING"),
+]
+_THE_STOP = [
+    _ev(7, "stage.end", "48:37", stage="ANALYZING", outcome="interrupted"),
+    _ev(8, "error", "48:37", stage="ANALYZING", code="INTERRUPTED",
+        message="Interrupted (Ctrl-C or a termination signal)"),
+    _ev(9, "run.end", "48:37", state="INTERRUPTED"),
+]
+_AFTER_RESUME = [
+    _ev(10, "run.start", "49:09", resumed=True),
+    _ev(11, "stage.start", "49:09", stage="ANALYZING"),
+    _ev(12, "stage.end", "55:21", stage="ANALYZING", outcome="ok"),
+]
+
+
+def test_an_interrupted_step_is_shown_as_interrupted_not_done() -> None:
+    # After `edmars stop`, the Mac's `status --plain` feed printed
+    # "[ok] Step 3 of 8 done (1m08s): Running the analysis" for an
+    # analysis that had not finished.
+    printer = view.PlainPrinter(width=100)
+    printer.lines(fold(_BEFORE_STOP), now=NOW, clock=0.0)
+    stopped = fold(_BEFORE_STOP + _THE_STOP)
+    out = printer.lines(stopped, now=NOW, clock=1.0)
+    assert "[x] Step 3 of 7 interrupted after 1m08s: Running the analysis" in out
+    assert not any("done" in line and "Running the analysis" in line for line in out)
+    analysis = stopped.stage("ANALYZING")
+    assert analysis.status == "failed" and analysis.interrupted
+    screen = view.screen_text(stopped, width=100, now=NOW)
+    assert "Stopped at step 3 of 7" in screen
+    row = next(line for line in screen.splitlines() if "Running the analysis" in line)
+    assert row.startswith(" [x] 3 ") and "interrupted" in row and "1m08s" in row
+
+
+def test_after_a_resume_a_step_shows_this_attempts_time_and_the_total() -> None:
+    # The Mac view showed 7m20s (1m08s + 6m12s) for an analysis that took
+    # 6m12s after the resume.
+    state = fold(_BEFORE_STOP + _THE_STOP + _AFTER_RESUME)
+    analysis = state.stage("ANALYZING")
+    assert analysis.status == "done" and not analysis.interrupted
+    assert analysis.duration_s() == 372.0 and analysis.total_s() == 440.0
+    assert analysis.rounds == 1
+    assert view.stage_time(analysis) == "6m12s (7m20s incl. the interrupted attempt)"
+    row = next(line for line in view.screen_text(state, width=100, now=NOW).splitlines()
+               if "Running the analysis" in line)
+    assert row.startswith(" [ok] 3 ") and "6m12s (7m20s incl. the interrupted attempt)" in row
+    printer = view.PlainPrinter(width=120)
+    printer.lines(fold(_BEFORE_STOP + _THE_STOP + _AFTER_RESUME[:2]), now=NOW, clock=0.0)
+    out = printer.lines(state, now=NOW, clock=1.0)
+    assert ("[ok] Step 3 of 7 done (6m12s; 7m20s incl. the interrupted attempt): "
+            "Running the analysis") in out
+
+
+def test_a_step_cut_off_without_a_stage_end_counts_as_an_earlier_attempt() -> None:
+    # A killed process writes no stage.end: the round ends at the last
+    # event it wrote, and the resumed round is timed on its own.
+    killed = _BEFORE_STOP + [_ev(7, "llm.start", "48:29", stage="ANALYZING")]
+    state = fold(killed + [_ev(8, "run.start", "50:00", resumed=True),
+                           _ev(9, "stage.start", "50:00", stage="ANALYZING"),
+                           _ev(10, "stage.end", "53:00", stage="ANALYZING", outcome="ok")])
+    analysis = state.stage("ANALYZING")
+    assert analysis.duration_s() == 180.0 and analysis.earlier_s == 60.0
