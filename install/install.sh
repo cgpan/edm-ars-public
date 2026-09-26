@@ -410,6 +410,12 @@ main() {
     fi
 
     # ---- the plan --------------------------------------------------------------
+    # Step 7 decides the same way, so the plan never promises a PATH change
+    # the install then skips.
+    case ":$PATH:" in
+        *":$BIN_DIR:"*) BIN_ON_PATH=1 ;;
+        *) BIN_ON_PATH=0 ;;
+    esac
     say ""
     say "EDM-ARS installer"
     say "================="
@@ -441,6 +447,8 @@ main() {
     say "  6. Create the command $BIN_DIR/edmars."
     if [ "$NO_MODIFY_PATH" = 1 ]; then
         say "  7. Leave your PATH alone (--no-modify-path)."
+    elif [ "$BIN_ON_PATH" = 1 ]; then
+        say "  7. Leave your PATH as it is: $BIN_DIR is already on it."
     else
         say "  7. Add $BIN_DIR to your PATH (your shell start-up files, your account only)."
     fi
@@ -692,10 +700,6 @@ main() {
     PATH_LIST=""
     PATH_MODIFIED=false
     step "7/8" "PATH"
-    case ":$PATH:" in
-        *":$BIN_DIR:"*) BIN_ON_PATH=1 ;;
-        *) BIN_ON_PATH=0 ;;
-    esac
     if [ "$NO_MODIFY_PATH" = 1 ]; then
         say "Left unchanged (--no-modify-path)."
     elif [ "$BIN_ON_PATH" = 1 ]; then

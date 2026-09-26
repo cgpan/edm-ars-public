@@ -205,7 +205,7 @@ def _function_probe(calls: str) -> str:
         f"'{name}'"
         for name in ("Test-UnderPath", "Merge-UserPath", "ConvertTo-CmdPath",
                      "Get-SyncProvider", "Test-Excluded", "Get-Download",
-                     "Get-ShLauncherText")
+                     "Get-ShLauncherText", "Get-PathPlanLine")
     )
     return f"""
 $tokens = $null; $errors = $null
@@ -253,6 +253,25 @@ $out.bin = $bin
     assert out["empty"] == r"D:\tools\bin"
     assert out["trailing_semicolon"] == r"C:\a;D:\b"
     assert out["plain_string_kind"] == "C:\\a;" + out["bin"]
+
+
+@pytest.mark.skipif(not (ON_WINDOWS and POWERSHELL), reason="Windows PowerShell only")
+def test_ps1_plan_does_not_promise_a_path_change_when_the_folder_is_on_path(tmp_path: Path) -> None:
+    # The plan said "Add <bin> to your user PATH" even when step 7 then
+    # said "already on your user PATH". Both now decide with Merge-UserPath.
+    calls = r"""
+$bin = Join-Path $env:USERPROFILE '.local\bin'
+$out.absent = Get-PathPlanLine 'C:\tools' $bin $false
+$out.present = Get-PathPlanLine 'C:\tools;%USERPROFILE%\.local\bin\' $bin $false
+$out.no_modify = Get-PathPlanLine 'C:\tools' $bin $true
+$out.bin = $bin
+"""
+    result = _powershell(_function_probe(calls), tmp_path)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out["absent"] == f"  7. Add {out['bin']} to your user PATH (your account only)."
+    assert out["present"] == f"  7. Leave your PATH as it is: {out['bin']} is already on your user PATH."
+    assert out["no_modify"] == "  7. Leave your PATH alone (-NoModifyPath)."
 
 
 @pytest.mark.skipif(not (ON_WINDOWS and POWERSHELL), reason="Windows PowerShell only")
@@ -347,6 +366,7 @@ def test_ps1_dry_run_changes_nothing(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Dry run: nothing was downloaded or changed." in result.stdout
     assert "This will:" in result.stdout
+    assert f"  7. Add {bin_dir} to your user PATH" in result.stdout
     assert not base.exists() and not bin_dir.exists()
     # GNU spellings are the same options.
     result = _run_ps1(tmp_path, "--dry-run", f"--dir={base}", "--bin-dir", str(bin_dir),
@@ -563,6 +583,36 @@ def test_install_sh_makes_a_uv_found_through_a_relative_path_absolute(tmp_path: 
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"({_sh_path(fake_uv)}, version 0.10.6)" in result.stdout, result.stdout
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+@pytest.mark.parametrize("on_path", [True, False])
+def test_install_sh_plan_does_not_promise_a_path_change_when_the_folder_is_on_path(
+    tmp_path: Path, on_path: bool
+) -> None:
+    # The plan said "Add <bin> to your PATH" even when step 7 then said
+    # "already on your PATH"; it now decides the same way before the plan.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _clean_env(tmp_path, HOME=_sh_path(home))
+    if on_path:
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    result = subprocess.run(
+        [SH, _sh_path(INSTALL_SH), "--dry-run", "--from-local", _sh_path(REPO_ROOT),
+         "--dir", _sh_path(tmp_path / "base"), "--bin-dir", _sh_path(bin_dir)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, env=env, stdin=subprocess.DEVNULL,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    already = f"  7. Leave your PATH as it is: {_sh_path(bin_dir)} is already on it."
+    add = f"  7. Add {_sh_path(bin_dir)} to your PATH"
+    if on_path:
+        assert already in result.stdout and add not in result.stdout
+    else:
+        assert add in result.stdout and already not in result.stdout
+    assert list(home.iterdir()) == []
 
 
 @pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")
