@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from edmars import estimates, study  # real modules, imported before the fakes replace their neighbours
 from tests.cli.wizard_fakes import DEFAULT, Fakes, KeyCheck, NonInteractiveError, install_fakes
 
 GOOD_KEY = "sk-fake-deepseek-0123456789abcdef"
@@ -438,8 +439,6 @@ def test_reviewer_asks_for_a_deepseek_key_even_with_another_service(fx: Fakes) -
 
 def test_reviewer_quotes_the_same_price_as_the_confirmation_card(fx: Fakes) -> None:
     import re
-
-    from edmars import estimates, study
 
     fx.ui.script = ["manual", "skip"]
     assert run("reviewer") == 0
