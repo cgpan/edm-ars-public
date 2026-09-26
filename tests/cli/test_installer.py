@@ -586,17 +586,24 @@ def test_install_sh_makes_a_uv_found_through_a_relative_path_absolute(tmp_path: 
 
 
 @pytest.mark.skipif(SH is None, reason="sh is not installed")
-@pytest.mark.parametrize("on_path", [True, False])
-def test_install_sh_plan_does_not_promise_a_path_change_when_the_folder_is_on_path(
-    tmp_path: Path, on_path: bool
+@pytest.mark.parametrize("in_file, on_path", [(True, True), (False, True), (True, False), (False, False)])
+def test_install_sh_decides_the_path_change_from_the_shell_start_up_files(
+    tmp_path: Path, in_file: bool, on_path: bool
 ) -> None:
-    # The plan said "Add <bin> to your PATH" even when step 7 then said
-    # "already on your PATH"; it now decides the same way before the plan.
+    # On the owner's Mac the installer ran under an app whose PATH already
+    # had ~/.local/bin, so it wrote no block and a new Terminal window could
+    # not find edmars (on_path without in_file). The folder is left alone
+    # only when a start-up file puts it on PATH and this PATH has it too;
+    # the plan says which file it found, or which files it will change, and
+    # step 7 then does what the plan said.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     home = tmp_path / "home"
     home.mkdir()
-    env = _clean_env(tmp_path, HOME=_sh_path(home))
+    zprofile = home / ".zprofile"
+    if in_file:
+        zprofile.write_text(f'export PATH="{_sh_path(bin_dir)}:$PATH"\n', encoding="utf-8")
+    env = _clean_env(tmp_path, HOME=_sh_path(home), SHELL="/bin/zsh")
     if on_path:
         env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
     result = subprocess.run(
@@ -606,13 +613,76 @@ def test_install_sh_plan_does_not_promise_a_path_change_when_the_folder_is_on_pa
         timeout=120, env=env, stdin=subprocess.DEVNULL,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    already = f"  7. Leave your PATH as it is: {_sh_path(bin_dir)} is already on it."
-    add = f"  7. Add {_sh_path(bin_dir)} to your PATH"
-    if on_path:
-        assert already in result.stdout and add not in result.stdout
+    already = (f"  7. Leave your PATH as it is: {_sh_path(zprofile)} already puts "
+               f"{_sh_path(bin_dir)} on it.")
+    add = (f"  7. Add {_sh_path(bin_dir)} to your PATH (your account only), in a marked block at\n"
+           "     the end of ~/.profile, ~/.zshrc.")
+    if in_file and on_path:
+        assert already in result.stdout and "7. Add" not in result.stdout
     else:
-        assert add in result.stdout and already not in result.stdout
-    assert list(home.iterdir()) == []
+        assert add in result.stdout and "7. Leave" not in result.stdout
+    assert sorted(p.name for p in home.iterdir()) == ([".zprofile"] if in_file else [])
+
+
+_START_UP_LINES = [
+    ('export PATH="$HOME/.local/bin:$PATH"', True),
+    ('export PATH="${HOME}/.local/bin:${PATH}"', True),
+    ("PATH=~/.local/bin:$PATH", True),
+    ("path=(~/.local/bin $path)", True),
+    ("fish_add_path ~/.local/bin", True),
+    ('. "$HOME/.local/bin/env"', True),  # uv's installer writes this line
+    ('[ -f ~/.local/bin/env ] && source ~/.local/bin/env', True),
+    ('case ":${PATH}:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac', True),
+    ('  # export PATH="$HOME/.local/bin:$PATH"', False),
+    ('export PYTHONPATH="$HOME/.local/bin"', False),
+    ('export PATH="$HOME/.local/bin2:$PATH"', False),
+    ("alias e=~/.local/bin/edmars", False),
+    ('if [ -d "$HOME/.local/bin" ] ; then', False),
+]
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_puts_on_path_reads_start_up_lines_without_running_them(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    body = "set -eu\n" + _sh_function("puts_on_path") + (
+        'for f in "$@"; do if puts_on_path "$f" "$HOME/.local/bin"; then echo yes; else echo no; fi; done\n')
+    files = []
+    for i, (line, _) in enumerate(_START_UP_LINES):
+        path = home / f"rc{i}"
+        # A line that ran would print; the function only reads it.
+        path.write_text("echo RAN\n" + line + "\n", encoding="utf-8")
+        files.append(_sh_path(path))
+    script = tmp_path / "probe.sh"
+    script.write_bytes(body.encode("utf-8"))
+    result = subprocess.run([str(SH), _sh_path(script), *files], capture_output=True, text=True,
+                            env=_clean_env(tmp_path, HOME=_sh_path(home)), timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "RAN" not in result.stdout
+    got = result.stdout.split()
+    assert got == ["yes" if expected else "no" for _, expected in _START_UP_LINES], list(
+        zip([line for line, _ in _START_UP_LINES], got))
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+@pytest.mark.parametrize("shell, found", [
+    ("/bin/zsh", ".zshrc"), ("/bin/bash", ".bashrc"), ("/usr/bin/fish", "config.fish"), ("/bin/sh", None)])
+def test_path_setup_file_reads_the_files_of_the_login_shell(tmp_path: Path, shell: str, found: str | None) -> None:
+    home = tmp_path / "home"
+    (home / ".config" / "fish").mkdir(parents=True)
+    line = 'export PATH="$HOME/.local/bin:$PATH"\n'
+    for name in (".zshrc", ".bashrc", ".config/fish/config.fish"):
+        (home / name).write_text(line, encoding="utf-8")
+    body = ("set -eu\n" + _sh_function("puts_on_path") + _sh_function("path_setup_file")
+            + 'path_setup_file "$HOME/.local/bin" || echo none\n')
+    script = tmp_path / "probe.sh"
+    script.write_bytes(body.encode("utf-8"))
+    result = subprocess.run([str(SH), _sh_path(script)], capture_output=True, text=True,
+                            env=_clean_env(tmp_path, HOME=_sh_path(home), SHELL=shell), timeout=60)
+    assert result.returncode == 0, result.stderr
+    out = result.stdout.strip()
+    assert out == ("none" if found is None else _sh_path(home) + "/" + (
+        ".config/fish/config.fish" if found == "config.fish" else found))
 
 
 # --- macOS: an OpenMP library for XGBoost without Homebrew ------------------------------
@@ -969,6 +1039,47 @@ def test_install_sh_keeps_its_own_uvs_cache_in_the_install_folder(tmp_path: Path
     assert all(line.endswith(expected) for line in installs), calls
     record = json.loads((base / "install.json").read_text(encoding="utf-8"))
     assert record["uv_private"] is private
+
+
+@pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")
+def test_install_sh_writes_the_path_block_when_only_the_calling_app_had_the_folder(tmp_path: Path) -> None:
+    # The Mac test: the installer ran under an app whose PATH had
+    # ~/.local/bin; the user's zsh start-up files did not. A block now goes
+    # into the start-up files, the output names them and says to open a new
+    # window, and install.json lists them for `edmars uninstall`. Run again
+    # from that new window, it changes nothing and still lists them.
+    base, home = tmp_path / "base", tmp_path / "home"
+    bin_dir = home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    uv = tmp_path / "own" / "uv"
+    uv.parent.mkdir(parents=True)
+    uv.write_text(_FAKE_UV, encoding="utf-8")
+    uv.chmod(0o755)
+    env = {"FAKE_UV_LOG": str(tmp_path / "uv.log"), "FAKE_BASE_PY": str(tmp_path / "python3"),
+           "HOME": str(home), "SHELL": "/bin/zsh",
+           "PATH": f"{bin_dir}{os.pathsep}{uv.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+    args = ("--yes", "--no-onboard", "--from-local", str(REPO_ROOT), "--dir", str(base))
+
+    result = _run_sh(tmp_path, *args, **env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert f"  7. Add {bin_dir} to your PATH (your account only)" in out
+    assert f"Added {bin_dir} to your PATH in:\n      {home}/.profile\n      {home}/.zshrc\n" in out
+    assert "To use EDM-ARS, type:  edmars   (in a NEW terminal window" in out
+    block = (home / ".zshrc").read_text(encoding="utf-8")
+    assert '# >>> edm-ars >>>' in block and 'export PATH="$HOME/.local/bin:$PATH"' in block
+    record = json.loads((base / "install.json").read_text(encoding="utf-8"))
+    assert record["path_modified"] is True
+    assert record["path_files"] == [str(home / ".profile"), str(home / ".zshrc")]
+
+    result = _run_sh(tmp_path, *args, **env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"  7. Leave your PATH as it is: {home}/.zshrc already puts {bin_dir} on it." in result.stdout
+    assert block == (home / ".zshrc").read_text(encoding="utf-8")
+    assert "To use EDM-ARS, type:  edmars\n" in result.stdout
+    record = json.loads((base / "install.json").read_text(encoding="utf-8"))
+    assert record["path_modified"] is True
+    assert record["path_files"] == [str(home / ".profile"), str(home / ".zshrc")]
 
 
 def test_install_ps1_keeps_its_own_uvs_cache_in_the_install_folder() -> None:

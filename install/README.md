@@ -145,8 +145,17 @@ the whole folder, or run `edmars uninstall` first.
 folder is added to your PATH for your account only: on Windows in your user
 environment variables, on macOS and Linux in a clearly marked block at the
 end of `~/.profile`, `~/.bashrc` and `~/.zshrc` (and a fish `conf.d` file if
-you use fish). Nothing is added when the folder is already there, and
-running the installer again does not add it twice.
+you use fish). The plan and the PATH step name the files. On macOS and
+Linux the installer decides from your shell's start-up files (for zsh
+`~/.zshenv`, `~/.zprofile`, `~/.zshrc` and `~/.zlogin`; for bash
+`~/.bash_profile`, `~/.bash_login`, `~/.profile` and `~/.bashrc`; always
+`~/.profile`), which it reads but never runs, and not only from the PATH of
+the program that started it: an app that runs the installer can have the
+folder on its own PATH while a new terminal window does not. Nothing is
+added when a start-up file already puts the folder on PATH and the current
+PATH has it too, and running the installer again does not add it twice.
+Open a new terminal window afterwards; windows that are already open keep
+their old PATH.
 
 **Cloud-sync folders.** The installer refuses to install inside OneDrive,
 Google Drive, Dropbox or iCloud Drive folders: syncing thousands of package
