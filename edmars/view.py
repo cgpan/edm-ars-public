@@ -23,8 +23,11 @@ stopped from the view), 1 no matching study.
 """
 from __future__ import annotations
 
+import signal
 import textwrap
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -473,6 +476,50 @@ def _watch_plain(reader: StateReader, run_dir: Path, *, poll_s: float) -> int:
         return _ask_leave_or_stop(run_dir, _say_plain)
 
 
+#: Signals that end the full-screen view the way Ctrl+C ends a command:
+#: through Python, so rich's Live shows the cursor again on the way out.
+_END_SIGNALS = ("SIGTERM", "SIGHUP")
+
+
+@contextmanager
+def _terminal_restored_on_signals(console: Any) -> Iterator[None]:
+    """While the full-screen view runs, turn SIGTERM and SIGHUP into
+    ``SystemExit(128 + signal)`` and show the cursor again at the end.
+
+    rich hides the cursor while Live draws and only Live.stop shows it
+    again. Python's default for SIGTERM ends the process at once, so
+    `kill`-ing `edmars status` left the terminal without a cursor (it
+    needed `tput cnorm`). Ctrl+C already arrives as KeyboardInterrupt.
+    The previous handlers are put back afterwards; in a thread other than
+    the main one, where handlers cannot be set, nothing changes.
+    """
+    previous: dict[int, Any] = {}
+
+    def _end(signum: int, _frame: Any) -> None:
+        raise SystemExit(128 + signum)
+
+    for name in _END_SIGNALS:
+        sig = getattr(signal, name, None)
+        if sig is None:  # no SIGHUP on Windows
+            continue
+        try:
+            previous[sig] = signal.signal(sig, _end)
+        except (ValueError, OSError):
+            continue
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError, TypeError):
+                pass
+        try:
+            console.show_cursor(True)
+        except Exception:  # noqa: BLE001 - a closed terminal has no cursor to show
+            pass
+
+
 def _watch_live(reader: StateReader, run_dir: Path, *, poll_s: float) -> int:
     from rich.console import Group
     from rich.live import Live
@@ -495,8 +542,9 @@ def _watch_live(reader: StateReader, run_dir: Path, *, poll_s: float) -> int:
     state = reader.refresh()
     last_read = time.monotonic()
     try:
-        with Live(renderable(state), console=console, refresh_per_second=4,
-                  transient=False, auto_refresh=False) as live:
+        with _terminal_restored_on_signals(console), \
+                Live(renderable(state), console=console, refresh_per_second=4,
+                     transient=False, auto_refresh=False) as live:
             while True:
                 if time.monotonic() - last_read >= poll_s:
                     state = reader.refresh()

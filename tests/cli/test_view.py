@@ -375,3 +375,45 @@ def test_a_call_still_waiting_when_the_process_died_is_cut_off() -> None:
                   event(3, "run.start", 5, resumed=True)])
     assert (state.llm_calls, state.calls_cut_off) == (2, 1)
     assert not state.waiting_ai
+
+
+
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+def test_killing_the_full_screen_view_shows_the_cursor_again(
+    run_home: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    # On the Mac, `kill` (SIGTERM) on `edmars status` in a terminal left the
+    # cursor hidden: Python's default handler ended the process before rich
+    # could show it again. The signal now ends the view through Python.
+    import signal
+
+    from edmars import ui
+
+    sig = getattr(signal, name, None)
+    if sig is None:
+        pytest.skip(f"this system has no {name}")
+    run = make_run(run_home, pid=alive_pid(), pdf=False, log=log_lines((0, "Starting FORMULATING stage")))
+    console = Console(file=io.StringIO(), width=100, force_terminal=True)
+    monkeypatch.setattr(ui, "get_console", lambda stderr=False: console)
+    monkeypatch.setattr(ui, "is_plain", lambda: False)
+
+    class _NotHandled(Exception):
+        pass
+
+    def _unhandled(signum: int, frame: object) -> None:
+        raise _NotHandled(f"the view left {name} to the previous handler")
+
+    # A stand-in for the default handler, which would end pytest itself.
+    previous = signal.signal(sig, _unhandled)
+    try:
+        monkeypatch.setattr(view.time, "sleep", lambda seconds: signal.raise_signal(sig))
+        with pytest.raises(SystemExit) as ended:
+            view.watch(run)
+        restored = signal.getsignal(sig)
+    finally:
+        signal.signal(sig, previous)
+    assert ended.value.code == 128 + sig
+    out = console.file.getvalue()  # type: ignore[attr-defined]
+    hidden, shown = out.rfind("\x1b[?25l"), out.rfind("\x1b[?25h")
+    assert hidden >= 0 and shown > hidden, "the cursor was left hidden"
+    assert restored is _unhandled  # the earlier handler is put back
