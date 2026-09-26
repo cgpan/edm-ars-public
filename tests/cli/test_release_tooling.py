@@ -140,6 +140,8 @@ def test_cli_requirements_are_the_agreed_list() -> None:
         ("dist/edm-ars-1.0.0.tar.gz", True),
         ("src/main.py", False),
         ("data_registry/datasets/hsls09_public.yaml", False),
+        # Package data the app needs (the HSLS:09 label table), not raw data.
+        ("edmars/data/hsls09_public.labels.json.gz", False),
         ("config/local.env", True),
         (".env", True),
         ("install/install.sh", False),

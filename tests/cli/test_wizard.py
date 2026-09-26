@@ -362,8 +362,10 @@ def test_dataset_download_records_terms_and_shows_progress(fx: Fakes) -> None:
     assert fx.datasets.progress_calls
     assert saved["sha256"]  # the fingerprint install() records on first download
     assert "Cite NCES" in fx.ui.output
-    # Plain mode: the unzip after the download gets its own lines.
-    assert "Unpacking:" in fx.ui.output
+    # Plain mode: the check and the conversion after the download get their
+    # own lines, so the 2 GB conversion does not look like a hang.
+    assert "Checking:" in fx.ui.output
+    assert "Converting:" in fx.ui.output
 
 
 def test_dataset_download_failure_is_explained(fx: Fakes) -> None:

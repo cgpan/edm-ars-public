@@ -538,9 +538,12 @@ def _dataset_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]
     def install(name: str, settings_: dict, progress: Any = None) -> Path:
         downloads.append(name)
         if progress is not None:
+            # The real HSLS:09 sequence: download the zip, check its
+            # SHA-256, convert the CSV inside it to the labelled one.
             progress(50, 100, "download")
             progress(100, 100, "download")
-            progress(100, 100, "extract")
+            progress(100, 100, "verify")
+            progress(100, 100, "convert")
         target = tmp_path / "hsls.csv"
         target.write_text("X1SEX\nMale\n", encoding="utf-8")
         settings.set_(settings_, f"datasets.{name}.sha256", "ab" * 32)
@@ -598,7 +601,8 @@ def test_data_install_records_the_dataset(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert result.exit_code == 0, result.output
     assert downloads == ["hsls09_public"]
     assert "downloaded 100%" in result.output
-    assert "unpacked 100%" in result.output
+    assert "checked 100%" in result.output
+    assert "converted 100%" in result.output
     entry = settings.load()["datasets"]["hsls09_public"]
     assert entry["path"] == str(tmp_path / "hsls.csv")
     assert entry["verified_at"].endswith("Z")

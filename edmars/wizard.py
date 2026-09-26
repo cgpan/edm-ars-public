@@ -1384,7 +1384,8 @@ class _Wizard:
             return
         body = (
             "The High School Longitudinal Study of 2009 (HSLS:09) followed 23,503 U.S. 9th graders into "
-            "college and work. EDM-ARS uses the public-use file from NCES.\n"
+            "college and work. EDM-ARS downloads the public-use file from NCES and converts its numeric "
+            "codes to text labels (for example 1 to 'Male'), then checks the result.\n"
             "Download: about 297 MB \u00b7 On disk: about 2.0 GB \u00b7 Source: nces.ed.gov\n"
             "Supports prediction, cause-and-effect and measurement studies.\n\n"
             "Use it under NCES public-use terms (for example, no attempts to identify individuals) and cite "
@@ -2234,7 +2235,8 @@ class _DownloadProgress:
         self._last_mb = 0
         self._phase = "download"
 
-    _PHASES = {"download": "Downloading", "extract": "Unpacking", "verify": "Checking"}
+    _PHASES = {"download": "Downloading", "extract": "Unpacking", "convert": "Converting",
+               "verify": "Checking"}
 
     def __call__(self, *args: Any, **kwargs: Any) -> None:
         try:

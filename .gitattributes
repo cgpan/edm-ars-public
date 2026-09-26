@@ -3,3 +3,5 @@
 # first line ("set: Illegal option -"). scripts/make_release.py also pins
 # line-ending conversion off when it builds the release tarball.
 *.sh text eol=lf
+# Package data shipped gzipped (edmars/data): bytes, never text.
+*.gz binary

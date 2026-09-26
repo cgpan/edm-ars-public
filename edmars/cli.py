@@ -989,15 +989,16 @@ def _dataset_info(datasets: ModuleType, name: str) -> Any:
     return catalog[name]
 
 
-_PHASE_WORDS = {"download": "downloaded", "extract": "unpacked", "verify": "checked"}
+_PHASE_WORDS = {"download": "downloaded", "extract": "unpacked", "convert": "converted",
+                "verify": "checked"}
 
 
 def _progress_printer() -> Callable[..., None]:
     """A download progress callback: one line per 10% of each phase.
 
     ``datasets`` reports ``(done, total, phase)`` with the phases
-    download, extract and verify; a line per phase keeps a 2 GB unzip
-    from looking like a hang after "downloaded 100%".
+    download, verify, extract or convert, and verify; a line per phase
+    keeps a 2 GB unzip from looking like a hang after "downloaded 100%".
     """
     state: dict[str, Any] = {"phase": "", "last": -1}
 
