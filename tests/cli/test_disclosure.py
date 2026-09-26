@@ -64,6 +64,23 @@ def test_privacy_notice_does_not_imply_stored_keys_are_out_of_reach() -> None:
         assert ref in headings, f"the privacy notice points at a section that does not exist: {ref!r}"
 
 
+def test_privacy_notice_scopes_the_tlmgr_step_as_uninstall_does() -> None:
+    """On a Mac, setup installs TinyTeX with --no-path, so uninstall leaves
+    out "run `tlmgr path remove`" there (maintenance._TINYTEX_PATH_UNCHANGED):
+    there is no PATH change to undo, and tlmgr is not on PATH to run. The
+    notice once told everyone to run it, Mac users included."""
+    from edmars import maintenance
+
+    flat = " ".join(disclosure.privacy_text().split())
+    assert flat.count("tlmgr path remove") == 1
+    start = flat.index("It does not remove TinyTeX")
+    sentence = flat[start:flat.index(")", start) + 1]
+    assert "tlmgr path remove" in sentence
+    assert "on Windows and Linux" in sentence
+    assert "on a Mac" in sentence and "without changing your PATH" in sentence
+    assert maintenance._TINYTEX_PATH_UNCHANGED == (maintenance.sys.platform == "darwin")
+
+
 def test_not_acknowledged_by_default() -> None:
     assert not disclosure.is_acknowledged(settings.load())
 

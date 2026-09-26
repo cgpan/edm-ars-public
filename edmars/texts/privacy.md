@@ -140,9 +140,11 @@ program, its private Python, the `edmars` command and any PATH change) for
 you to delete once the window is closed, because a running program cannot
 delete itself. It does not remove TinyTeX, if `edmars setup pdf` installed
 it, because other programs can use it: it names the folder for you to
-delete (run `tlmgr path remove` first). R packages from `edmars setup r`
-stay in your R library. Keys you set as environment variables, and data
-held by an AI provider, are removed the same way as described above.
+delete (on Windows and Linux, run `tlmgr path remove` first; on a Mac,
+setup installs TinyTeX without changing your PATH, so there is nothing
+to undo). R packages from `edmars setup r` stay in your R library. Keys
+you set as environment variables, and data held by an AI provider, are
+removed the same way as described above.
 
 ## Questions
 
