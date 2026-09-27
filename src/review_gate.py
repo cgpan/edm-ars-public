@@ -745,12 +745,13 @@ class ReviewGate:
             if isinstance(exc, ImportError):
                 self._last_lsar_failure = f"lsar_import_failed: {detail}"
                 # G2: usually one of LSAR's own dependencies is missing
-                # from this Python; say how to install them.
+                # from this Python; say how to install them, in a form
+                # that works in a venv without pip and under edmars.
+                from src.preflight import lsar_install_fix
+
                 self._log(
-                    "LSAR could not be imported; install its requirements "
-                    "into the Python that runs EDM-ARS: "
-                    f"{Path(sys.executable).name} -m pip install -r "
-                    f"\"{Path(lsar_root) / 'requirements.txt'}\""
+                    "LSAR could not be imported. "
+                    + lsar_install_fix(str(lsar_root))
                 )
             elif type(exc).__name__ == "ScoringFailedError":
                 # LSAR (fix/released-issues) raises this instead of

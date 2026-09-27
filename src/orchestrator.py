@@ -30,6 +30,7 @@ from src.context import PipelineContext, PipelineState
 from src.dataset_adapter import create_dataset_adapter
 from src.errors import code_for_exception, is_resumable, reopened_pre_critic_stop
 from src.findings_memory import FindingsMemory, RunEntry
+from src.outcome_guard import guard_outcome_in_predictors
 from src.pre_critic_checks import PreCriticResult, run_pre_critic_checks
 from src.review_gate import ReviewGate
 from src.sandbox import compile_latex, create_executor
@@ -1445,16 +1446,38 @@ class Orchestrator:
         """
         return check_design_matrix_width(self.ctx.output_dir)
 
-    def _run_post_de_preflight(self) -> str | None:
-        """Run the causal-mode post-DE contract checks.
+    def _run_post_de_preflight(self, after_retry: bool = False) -> str | None:
+        """Run the post-DE contract checks.
 
         Returns the violation message (str) or None when compliant.
-        No-op (returns None) for non-causal task types and when the
-        research spec is absent. Unexpected probe errors are logged and
-        treated as non-violations — the pre-flight must never be the
-        thing that breaks a healthy run.
+        Every task type gets the checks that apply to it; the causal_soo
+        matrix contract is the last of them. Unexpected probe errors are
+        logged and treated as non-violations — the pre-flight must never
+        be the thing that breaks a healthy run.
+
+        ``after_retry`` is True once the DataEngineer has had its targeted
+        retry. The outcome check then removes an outcome column instead of
+        returning it as a violation (see ``src.outcome_guard``).
         """
         spec = self.ctx.research_spec or {}
+
+        # The outcome among the predictors (prediction studies). On the
+        # owner's Mac (round 2) the generated code left X4EVRATNDCLG in
+        # train_X.csv and test_X.csv; nothing looked until pcc_01, after
+        # the paid analysis had fitted every model with the answer as an
+        # input, and the study stopped. First: the targeted retry. After
+        # it: drop exactly those columns and say so.
+        violation = guard_outcome_in_predictors(
+            self.ctx,
+            repair=after_retry,
+            after=(
+                "the DataEngineer's targeted retry" if after_retry
+                else "data preparation"
+            ),
+            log=lambda message: self._log("Orchestrator", message),
+        )
+        if violation:
+            return violation
 
         # V4 Phase A (F-A1-ELS-EMPTY-TEST-SPLIT): task-type-agnostic split
         # sanity. On the first ELS run, HSLS-specific school-fingerprint
@@ -1618,10 +1641,13 @@ class Orchestrator:
             # assertions (3b.23.7: treatment binary, no object dtypes,
             # continuous-vars-stay-continuous, propensity-overlap sanity).
             # V4 Phase A adds a task-type-agnostic test-split sanity check
-            # (empty/degenerate test set -> violation; causal_did exempt).
+            # (empty/degenerate test set -> violation; causal_did exempt),
+            # and prediction studies are checked for the outcome among the
+            # predictors (src.outcome_guard).
             # On violation: ONE targeted DataEngineer retry with the
             # violation text injected, then abort if the retry still
-            # violates (fail-fast preserved).
+            # violates (fail-fast preserved) -- except an outcome column,
+            # which the second pre-flight removes by name.
             violation = self._run_post_de_preflight()
             if violation is not None:
                 self._log(
@@ -1649,7 +1675,7 @@ class Orchestrator:
                         code=_engineering_failure_code(self.ctx, result),
                     )
                     return
-                second_violation = self._run_post_de_preflight()
+                second_violation = self._run_post_de_preflight(after_retry=True)
                 if second_violation is not None:
                     self._abort(
                         f"ENGINEERING aborted (causal data contract, "
@@ -2676,6 +2702,18 @@ class Orchestrator:
             self._note_literature_status()
         elif agent_name == "DataEngineer":
             self.ctx.data_report = result
+            # A revision regenerates the data preparation code, and the
+            # Analyst runs next: the same outcome check as after
+            # ENGINEERING, repairing at once (the revision was the retry).
+            # A repair that could not be written leaves the leak to pcc_01.
+            problem = guard_outcome_in_predictors(
+                self.ctx,
+                repair=True,
+                after="a DataEngineer revision",
+                log=lambda message: self._log("Orchestrator", message),
+            )
+            if problem:
+                self._log("Orchestrator", f"Outcome check after revision: {problem}")
             _emit_sample_metric(self.ctx, result, stage="REVISING")
         elif agent_name == "Analyst":
             self.ctx.results_object = result

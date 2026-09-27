@@ -31,13 +31,16 @@ Why: SPEC §4.4 lists the ABORT conditions as a fundamental flaw
 (unanswerable question, analytic_n < 1,000, confirmed leakage) and SPEC §8
 aborts on ``validation_passed == false``. pcc_01 is confirmed leakage by
 construction and pcc_06 is the §8 condition, on which the ENGINEERING
-stage also stops after its one targeted retry. pcc_02 and pcc_07 are
-neither: the data and the question are sound. pcc_07 means the Analyst
-left out an analysis it can run on the same files (the helpers exist);
-pcc_02 means its generated code failed on every attempt, which a fresh
-Analyst run starts over from. Stopping on either throws away a study a
-revision could finish. The ``major`` checks never short-circuit; the
-Critic reads them.
+stage also stops after its one targeted retry. In a prediction study an
+outcome column normally never gets this far: the check that follows data
+preparation (``src.outcome_guard``) sends the DataEngineer back and then
+removes the column, so pcc_01 sees only what got past it or never met it.
+pcc_02 and pcc_07 are neither: the data and the question are sound.
+pcc_07 means the Analyst left out an analysis it can run on the same
+files (the helpers exist); pcc_02 means its generated code failed on
+every attempt, which a fresh Analyst run starts over from. Stopping on
+either throws away a study a revision could finish. The ``major`` checks
+never short-circuit; the Critic reads them.
 """
 from __future__ import annotations
 
@@ -48,6 +51,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
+
+from src.outcome_guard import describe_guard
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +177,7 @@ def run_pre_critic_checks(
     result = PreCriticResult()
 
     # Universal checks (run for every task type)
-    _check_outcome_not_in_train_x(ctx, output_dir, result)
+    _check_outcome_not_in_train_x(ctx, output_dir, result, task_type=task_type)
     _check_data_report_validation_passed(ctx, result)
     _check_research_question_is_answered(ctx, result, task_type=task_type)
 
@@ -238,12 +243,82 @@ def run_pre_critic_checks(
 #: the Analyst prompt tells regression runs to do exactly that for
 #: calibration, so making those strict would stop runs the contract
 #: allows.
+#:
+#: ``patterns`` are regular expressions for wordings a fixed phrase cannot
+#: hold; ``prediction_patterns`` apply to prediction studies only (see
+#: :data:`_INCREMENTAL_PREDICTION_PATTERNS`).
 class _Commitment(NamedTuple):
     kind: str
     phrases: tuple[str, ...]
     evidence_keys: tuple[str, ...]
     description: str
     strict: bool = False
+    patterns: tuple[re.Pattern[str], ...] = ()
+    prediction_patterns: tuple[re.Pattern[str], ...] = ()
+
+
+#: Words that name what a baseline block is made of. "beyond" alone is
+#: not a commitment ("persistence beyond the first year", "outcomes beyond
+#: high school"); "beyond prior achievement" is. Words that also qualify a
+#: model or the literature ("standard", "traditional", "existing") are
+#: left out, and a baseline word followed by one of those nouns does not
+#: count: "beyond a baseline logistic regression" and "beyond prior
+#: research" compare models or studies, not predictor blocks.
+_BASELINE_WORD = (
+    r"(?:prior|previous|earlier|baseline|base-year|achievement"
+    r"|test[- ]scores?|gpa|grades|ses|socio-?economic|demographics?"
+    r"|background|controls|covariates?|cognitive|academic\s+(?:achievement"
+    r"|performance|preparation|record|factors|predictors|measures"
+    r"|indicators|variables|characteristics))\b"
+    r"(?![\s-]+(?:models?|classifiers?|logistic|regressions?|methods?"
+    r"|approach\w*|algorithms?|research|stud\w*|work|literature|findings?"
+    r"|evidence)\b)"
+)
+
+#: Up to two words between the marker and that baseline word ("beyond
+#: the prior-achievement block", "beyond a model with demographics").
+_TO_BASELINE = r"\s+(?:(?:what|that\s+of|those\s+of)\s+)?(?:[\w'+./-]+\s+){0,2}?"
+
+#: A synonym of the fixed phrases, for every task type.
+_INCREMENTAL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bover and beyond\b"),
+)
+
+#: Wordings of the incremental promise the fixed phrases missed, for
+#: prediction studies. On the owner's Mac (round 2) the question read
+#: "improve prediction of college enrollment ... beyond what baseline
+#: academic achievement and socioeconomic status alone provide"; archived
+#: questions say "add(s) predictive value beyond", "beyond what ...
+#: explain", "unique predictive signal beyond" and "controlling for prior
+#: achievement". Each promises that the focal predictors add predictive
+#: power to a baseline block, which only a nested comparison shows.
+#:
+#: Prediction only. In a causal question "controlling for SES" is
+#: ordinary adjustment language; a psychometric one can ask whether items
+#: differ "beyond what sampling error explains", or whether added items
+#: give "incremental information". Neither study needs a nested-model
+#: comparison of predictor blocks, and the fixed phrases above still
+#: apply to them as before.
+_INCREMENTAL_PREDICTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p) for p in (
+        r"\bbeyond what\b",
+        r"\bincremental(?:ly)?\s+(?:[\w-]+\s+)?(?:valid\w*|predict\w*|value"
+        r"|contribut\w*|explanat\w*|information|utility|power|signal"
+        r"|benefit|improvement|accuracy|variance|r2|r-squared|auc)\b",
+        r"\b(?:add(?:s|ed|ing)?|additional|unique)\s+(?:[\w-]+\s+){0,2}?"
+        r"(?:predictive|discriminative|discriminatory|explanatory|prognostic"
+        r"|incremental)\s+(?:value|power|information|signal|utility"
+        r"|validity|contribution|variance|accuracy|performance|ability)\b",
+        r"\bunique\s+(?:contributions?|variance)\b",
+    )
+) + tuple(
+    re.compile(marker + _TO_BASELINE + _BASELINE_WORD) for marker in (
+        r"\bbeyond",
+        r"\bnet\s+of",
+        r"\b(?:after\s+)?(?:controlling|adjusting)\s+for",
+        r"\bafter\s+accounting\s+for",
+    )
+)
 
 
 _RQ_COMMITMENTS: tuple[_Commitment, ...] = (
@@ -260,6 +335,8 @@ _RQ_COMMITMENTS: tuple[_Commitment, ...] = (
         ("incremental_validity", "nested_model", "delta_auc", "delta_r2"),
         "an incremental-validity / nested-model comparison",
         strict=True,
+        patterns=_INCREMENTAL_PATTERNS,
+        prediction_patterns=_INCREMENTAL_PREDICTION_PATTERNS,
     ),
     _Commitment(
         "mediation",
@@ -447,16 +524,15 @@ def _check_research_question_is_answered(
 
     haystack = _evidence_text(results)
     for commitment in _RQ_COMMITMENTS:
-        phrases = commitment.phrases
         description = commitment.description
-        if not any(p in question for p in phrases):
+        matched = _commitment_match(commitment, question, task_type)
+        if not matched:
             continue
         if commitment.strict:
             if _strict_evidence(results, commitment.evidence_keys):
                 continue
         elif any(k.lower() in haystack for k in commitment.evidence_keys):
             continue
-        matched = next(p for p in phrases if p in question)
         declined = (
             _declined_reason(results, commitment.evidence_keys)
             if commitment.strict else ""
@@ -487,6 +563,24 @@ def _check_research_question_is_answered(
         )
 
 
+def _commitment_match(
+    commitment: _Commitment, question: str, task_type: str = "prediction"
+) -> str:
+    """The words of ``question`` (lower-cased) that make ``commitment``,
+    or "" when it makes none: a fixed phrase first, then the pattern that
+    matches earliest in the question."""
+    for phrase in commitment.phrases:
+        if phrase in question:
+            return phrase
+    patterns = commitment.patterns + (
+        commitment.prediction_patterns if task_type == "prediction" else ()
+    )
+    found = [m for m in (p.search(question) for p in patterns) if m]
+    if not found:
+        return ""
+    return min(found, key=lambda m: m.start()).group(0)
+
+
 #: Where the clause holding a question's named baseline ends: the next
 #: clause ("... above and beyond achievement and SES, and does ..."), or
 #: the verb the baseline was inserted before ("..., over and above prior
@@ -495,13 +589,17 @@ def _check_research_question_is_answered(
 #: and demographic controls" reached the Analyst as the baseline
 #: "academic achievement", with SES and the controls left for the focal
 #: block, where the comparison would credit their predictive power to
-#: the constructs the question is about.
+#: the constructs the question is about. The verbs include the ones a
+#: "beyond what ..." clause closes with ("... alone provide", "...
+#: already explains"), and "among"/"for" start the population or the
+#: purpose ("... and SES among U.S. students"), not more baseline.
 _CLAUSE_END = re.compile(
     r"[;?]|\.(?=\s|$)"
     r"|,?\s(?:and|or)\s+(?:does|do|did|is|are|was|were|can|could|will|would"
     r"|how|whether|to what|which|what)\b"
-    r"|\s(?:(?:in|when|for)\s+)?(?:explains?|explaining|predicts?|predicting"
-    r"|accounts? for)\b",
+    r"|\s(?:(?:in|when|for)\s+)?(?:explains?|explained|explaining|predicts?"
+    r"|predicting|accounts? for|provides?|provided|offers?|captures?"
+    r"|contributes?|alone|already|among|for)\b",
     re.IGNORECASE,
 )
 
@@ -522,8 +620,9 @@ _CLOSES_A_LIST = re.compile(r"^(?:and|or)\s|\s(?:and|or)\s", re.IGNORECASE)
 #: commitment phrase but names nothing after it ("the incremental
 #: validity of X" used to give the baseline "ity of X").
 _BASELINE_MARKER = re.compile(
-    r"\b(?:above and beyond|over and above|beyond|relative to"
-    r"|compared (?:with|to))\s+",
+    r"\b(?:above and beyond|over and above|over and beyond|beyond"
+    r"|relative to|compared (?:with|to)|net of"
+    r"|(?:after\s+)?(?:controlling|adjusting|accounting)\s+for)\s+",
     re.IGNORECASE,
 )
 
@@ -557,8 +656,11 @@ def _named_after(question: str, phrase: str) -> str:
     if marker is None:
         return ""
     tail = question[marker.end():]
-    tail = re.sub(r"^\s*(?:what|that which|those of|the effects? of)\s+", "",
-                  tail, flags=re.IGNORECASE)
+    tail = re.sub(
+        r"^\s*(?:what|that which|that of|those of|the effects? of"
+        r"|the contributions? of)\s+",
+        "", tail, flags=re.IGNORECASE,
+    )
     depths = _paren_depths(tail)
     cut = next(
         (m.start() for m in _CLAUSE_END.finditer(tail) if depths[m.start()] == 0),
@@ -845,9 +947,19 @@ def _check_refuters_attempted(ctx: object, result: PreCriticResult) -> None:
 
 
 def _check_outcome_not_in_train_x(
-    ctx: object, output_dir: str, result: PreCriticResult
+    ctx: object,
+    output_dir: str,
+    result: PreCriticResult,
+    task_type: str = "prediction",
 ) -> None:
-    """pcc_01 (critical): outcome variable must NOT appear as a column in train_X.csv."""
+    """pcc_01 (critical): outcome variable must NOT appear as a column in train_X.csv.
+
+    Prediction studies meet an outcome check right after data preparation
+    (``src.outcome_guard``), which sends the DataEngineer back and then
+    removes the column itself. What reaches this check got past that one
+    or never met it, and the message says which: the two call for
+    different fixes.
+    """
     spec = getattr(ctx, "research_spec", None) or {}
     outcome = spec.get("outcome_variable", "")
     if not outcome:
@@ -868,7 +980,8 @@ def _check_outcome_not_in_train_x(
                     severity="critical",
                     message=(
                         f"Outcome variable '{outcome}' found as a column in train_X.csv "
-                        "— confirmed target leakage."
+                        "— confirmed target leakage. "
+                        + describe_guard(getattr(ctx, "data_report", None), task_type)
                     ),
                     target_agent="DataEngineer",
                     # Not revisable: SPEC §4.4 names confirmed leakage as

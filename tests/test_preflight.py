@@ -367,6 +367,52 @@ def test_gate_with_unimportable_lsar_warns(
     assert str(root) not in sys.path
 
 
+def _unimportable_lsar(root: Path) -> Path:
+    (root / "lsar").mkdir(parents=True)
+    (root / "lsar" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "lsar" / "pipeline.py").write_text(
+        "import a_dependency_that_is_not_installed\n", encoding="utf-8")
+    sys.modules.pop("lsar", None)
+    return root
+
+
+def test_under_edmars_the_lsar_fix_is_the_setup_command(
+    config: dict, data_file: str, all_tools: None, tmp_path: Path,
+    _restore_lsar_modules: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Mac test (round 2): the study's console.log said "python -m pip
+    install -r ...", which the edmars Python (a uv venv) cannot run: it
+    has no pip. edmars has a command for exactly this."""
+    monkeypatch.setenv("EDMARS_RUN_ID", "2026-09-27_1419_x")
+    root = _unimportable_lsar(tmp_path / "LSAR-fake")
+    config["review_gate"]["lsar_project_path"] = str(root)
+    findings = check_run_prerequisites(
+        config, "prediction", "hsls09_public", data_file, True
+    )
+    [lsar] = [f for f in findings if f.code == "LSAR_IMPORT_FAILED"]
+    assert lsar.fix == "Run `edmars setup reviewer`."
+
+
+def test_outside_edmars_the_lsar_fix_works_with_pip_or_uv(
+    config: dict, data_file: str, all_tools: None, tmp_path: Path,
+    _restore_lsar_modules: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EDMARS_RUN_ID", raising=False)
+    root = _unimportable_lsar(tmp_path / "Application Support" / "LSAR-fake")
+    config["review_gate"]["lsar_project_path"] = str(root)
+    findings = check_run_prerequisites(
+        config, "prediction", "hsls09_public", data_file, True
+    )
+    [lsar] = [f for f in findings if f.code == "LSAR_IMPORT_FAILED"]
+    requirements = f'"{root / "requirements.txt"}"'
+    python = (
+        f'"{sys.executable}"' if any(c.isspace() for c in sys.executable)
+        else sys.executable
+    )
+    assert f"{python} -m pip install -r {requirements}" in lsar.fix
+    assert f"uv pip install --python {python} -r {requirements}" in lsar.fix
+
+
 def test_gate_disabled_skips_lsar(
     config: dict, data_file: str, all_tools: None, tmp_path: Path
 ) -> None:
