@@ -31,13 +31,16 @@ Why: SPEC §4.4 lists the ABORT conditions as a fundamental flaw
 (unanswerable question, analytic_n < 1,000, confirmed leakage) and SPEC §8
 aborts on ``validation_passed == false``. pcc_01 is confirmed leakage by
 construction and pcc_06 is the §8 condition, on which the ENGINEERING
-stage also stops after its one targeted retry. pcc_02 and pcc_07 are
-neither: the data and the question are sound. pcc_07 means the Analyst
-left out an analysis it can run on the same files (the helpers exist);
-pcc_02 means its generated code failed on every attempt, which a fresh
-Analyst run starts over from. Stopping on either throws away a study a
-revision could finish. The ``major`` checks never short-circuit; the
-Critic reads them.
+stage also stops after its one targeted retry. In a prediction study an
+outcome column normally never gets this far: the check that follows data
+preparation (``src.outcome_guard``) sends the DataEngineer back and then
+removes the column, so pcc_01 sees only what got past it or never met it.
+pcc_02 and pcc_07 are neither: the data and the question are sound.
+pcc_07 means the Analyst left out an analysis it can run on the same
+files (the helpers exist); pcc_02 means its generated code failed on
+every attempt, which a fresh Analyst run starts over from. Stopping on
+either throws away a study a revision could finish. The ``major`` checks
+never short-circuit; the Critic reads them.
 """
 from __future__ import annotations
 
@@ -48,6 +51,8 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
+
+from src.outcome_guard import describe_guard
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +177,7 @@ def run_pre_critic_checks(
     result = PreCriticResult()
 
     # Universal checks (run for every task type)
-    _check_outcome_not_in_train_x(ctx, output_dir, result)
+    _check_outcome_not_in_train_x(ctx, output_dir, result, task_type=task_type)
     _check_data_report_validation_passed(ctx, result)
     _check_research_question_is_answered(ctx, result, task_type=task_type)
 
@@ -845,9 +850,19 @@ def _check_refuters_attempted(ctx: object, result: PreCriticResult) -> None:
 
 
 def _check_outcome_not_in_train_x(
-    ctx: object, output_dir: str, result: PreCriticResult
+    ctx: object,
+    output_dir: str,
+    result: PreCriticResult,
+    task_type: str = "prediction",
 ) -> None:
-    """pcc_01 (critical): outcome variable must NOT appear as a column in train_X.csv."""
+    """pcc_01 (critical): outcome variable must NOT appear as a column in train_X.csv.
+
+    Prediction studies meet an outcome check right after data preparation
+    (``src.outcome_guard``), which sends the DataEngineer back and then
+    removes the column itself. What reaches this check got past that one
+    or never met it, and the message says which: the two call for
+    different fixes.
+    """
     spec = getattr(ctx, "research_spec", None) or {}
     outcome = spec.get("outcome_variable", "")
     if not outcome:
@@ -868,7 +883,8 @@ def _check_outcome_not_in_train_x(
                     severity="critical",
                     message=(
                         f"Outcome variable '{outcome}' found as a column in train_X.csv "
-                        "— confirmed target leakage."
+                        "— confirmed target leakage. "
+                        + describe_guard(getattr(ctx, "data_report", None), task_type)
                     ),
                     target_agent="DataEngineer",
                     # Not revisable: SPEC §4.4 names confirmed leakage as
