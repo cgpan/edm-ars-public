@@ -32,6 +32,15 @@ EXIT_CODES_HELP = (
     "could not be read (a mistyped option) gives 2, as with most commands."
 )
 
+#: `edmars doctor --help`. With --bundle the command's job is the support
+#: file, so its exit code says whether that was written, not what the
+#: checks inside it found.
+DOCTOR_EXIT_CODES_HELP = (
+    "Exit codes: 0 no check failed; 1 at least one check failed. With "
+    "--bundle: 0 the support file was written (the checks in it may still "
+    "have found problems), 1 it could not be written."
+)
+
 #: Task types the pipeline can run, in the order menus show them.
 TASK_TYPES: tuple[str, ...] = (
     "prediction",

@@ -437,6 +437,28 @@ def test_json_with_bundle_reports_the_path(fx: Fakes, capsys: pytest.CaptureFixt
     assert Path(payload["bundle"]).is_file()
 
 
+def test_a_written_bundle_exits_0_whatever_the_checks_found(
+    fx: Fakes, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The Mac test: `doctor --bundle` wrote its bundle and exited 1 because
+    # doctor had found a problem (LSAR's packages), so a script would take
+    # the bundle for failed. Finding problems is what the bundle is for.
+    from edmars.doctor import main
+
+    healthy(fx)
+    make_study(fx, "x")
+    fx.datasets.ready.clear()  # "No dataset is ready": a failing check
+    assert main() == 1
+    fx.ui.script = [True]
+    assert main(bundle=True) == 0
+    assert "problem(s) to fix" in fx.ui.output  # the findings are still shown
+    assert len(list((fx.home / "EDM-ARS").glob("edmars-support-*.zip"))) == 1
+    capsys.readouterr()
+    assert main(json_out=True, bundle=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False and Path(payload["bundle"]).is_file()
+
+
 def test_bundle_write_failure_is_reported(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
     import edmars.doctor as doctor
 

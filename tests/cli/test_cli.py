@@ -178,6 +178,12 @@ def test_doctor_passes_flags_and_exit_code(monkeypatch: pytest.MonkeyPatch) -> N
     assert calls[-1] == {"deep": False, "json_out": False, "bundle": True, "quick": True}
 
 
+def test_doctor_help_says_what_its_exit_codes_mean() -> None:
+    text = " ".join(invoke("doctor", "--help").output.split())
+    assert "Exit codes: 0 no check failed; 1 at least one check failed." in text
+    assert "With --bundle: 0 the support file was written" in text
+
+
 def test_setup_passes_section_and_options(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[Any, ...]] = []
 

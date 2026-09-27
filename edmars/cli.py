@@ -34,7 +34,7 @@ import click
 import typer
 
 from edmars import __version__, ui
-from edmars.model import EXIT_CODES_HELP, EXIT_ERROR, EXIT_READY, EXIT_STOPPED
+from edmars.model import DOCTOR_EXIT_CODES_HELP, EXIT_CODES_HELP, EXIT_ERROR, EXIT_READY, EXIT_STOPPED
 
 ISSUES_URL = "https://github.com/cgpan/edm-ars-public/issues"
 
@@ -710,7 +710,7 @@ def setup_cmd(
     raise _exit(wizard.run_setup(section, non_interactive=non_interactive, options=options or None))
 
 
-@app.command("doctor")
+@app.command("doctor", epilog=DOCTOR_EXIT_CODES_HELP)
 @_friendly
 def doctor_cmd(
     deep: Annotated[
