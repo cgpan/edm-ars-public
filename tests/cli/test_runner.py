@@ -424,6 +424,31 @@ def test_resume_refuses_non_resumable_abort(run_home: Path, spawner: Spawner,
     assert spawner.calls == []
 
 
+def test_resume_reopens_an_old_pre_review_stop_a_revision_can_fix(
+    run_home: Path, spawner: Spawner, monkeypatch: pytest.MonkeyPatch,
+    fake_keys: dict[str, str],
+) -> None:
+    # The Mac study: stopped as PRE_CRITIC_ABORT (resumable: false) for
+    # pcc_07 before the pipeline sent such findings back for revision.
+    # The pipeline now resumes it at CRITIQUING (src/errors.py
+    # reopened_pre_critic_stop); `edmars resume` refused it.
+    def stopped(name: str, message: str, **extra: object) -> Path:
+        return make_run(run_home / "studies", name=name, pdf=False, log=None,
+                        status=v2_status("ABORTED", released=False, reason_code="ABORTED",
+                                         abort={"stage": "CRITIQUING", "code": "PRE_CRITIC_ABORT",
+                                                "message": message, "resumable": False, **extra}))
+
+    monkeypatch.setattr(runner, "retry_stage_support", lambda root=None: (True, True))
+    runner.resume(stopped("mac", "pcc_07: The research question says 'above and beyond'"))
+    assert spawner.calls[-1]["args"][-3:] == ["--resume", "--retry-stage", "CRITIQUING"]
+
+    for run in (stopped("leak", "pcc_01: Outcome variable found in train_X.csv"),
+                stopped("new", "pcc_07: x", checks=[{"check_id": "pcc_01", "revisable": False}])):
+        with pytest.raises(RunnerError, match="cannot be resumed"):
+            runner.resume(run)
+    assert len(spawner.calls) == 1
+
+
 def test_retry_stage_support_reads_the_pipeline(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     main = tmp_path / "src" / "main.py"

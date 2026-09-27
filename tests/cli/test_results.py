@@ -258,7 +258,10 @@ def test_a_study_the_checks_stopped_shows_what_they_found(run_home: Path,
     assert "What the automatic checks found: - " + PCC_07.split(": ", 1)[1] in flat
     assert f'The study worded your question as: "{WORKED_Q}"' in flat
     assert "simpler question" not in flat
-    assert "What to do: The question the study worked from promised a comparison" in flat
+    # The record predates abort.checks and is led by pcc_07, which a
+    # resume now sends back for revision.
+    assert "What to do: This version of EDM-ARS sends this finding back to be fixed" in flat
+    assert "If it stops again: the question the study worked from promised a comparison" in flat
     html = (run / "summary.html").read_text(encoding="utf-8")
     assert "What the automatic checks found:" in html and "above and beyond" in html
 

@@ -260,14 +260,15 @@ failures:
     fix: "Read what the checks found, then start a new study that avoids it."
     command: "edmars new"
   # A finding the study sent back for revision was still there when its
-  # revision rounds ran out; no paper is written, and a resume would find
-  # no rounds left (the count is restored from the checkpoint).
+  # revision rounds ran out, or a revision came back saying another
+  # would not fix it; no paper is written, and a resume would not help
+  # (the round count is restored from the checkpoint).
   PRE_CRITIC_UNRESOLVED:
     title: "Automatic checks stopped the study after its revisions"
     why: >-
       Built-in checks that run before the methods review found {checks}.
-      The study sent the work back to be fixed and used all its revision
-      rounds, but the problem was still there, so no paper was written.
+      The study sent the work back to be fixed, but the revisions did not
+      fix it, so no paper was written.
     # Used when the check is not in pre_critic_checks below.
     fix: >-
       Resuming would not help, because no revision rounds are left. Read
@@ -420,6 +421,23 @@ pre_critic_revise:
     DataEngineer: "the data preparation step"
     Analyst: "the analysis step"
     default: "the step that made them"
+
+# Leads for the "what to do" of a stop the automatic checks made.
+# unresolved_*: PRE_CRITIC_UNRESOLVED, when the rounds ran out and when
+# a revision came back saying another would not fix it (a record that the
+# test cannot run, or a second time-out). reopened: a PRE_CRITIC_ABORT
+# written before the checks told findings a revision can fix from ones it
+# cannot, for one it can (src/errors.py reopened_pre_critic_stop); a
+# resume now sends it back for revision.
+pre_critic_stops:
+  unresolved_rounds_used: "Resuming would not help, because no revision rounds are left."
+  unresolved_early: >-
+    Resuming would not help: the step the work went back to reported that
+    another revision would not fix it.
+  reopened: >-
+    This version of EDM-ARS sends this finding back to be fixed instead of
+    stopping the study. Resume the study to let it do that; the steps it
+    already finished are kept.
 
 # Advice for the automatic pre-review checks (src/pre_critic_checks.py)
 # that stop a study: the result screen shows the check's own sentence,

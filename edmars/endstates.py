@@ -485,8 +485,36 @@ _NOT_RESUMABLE = frozenset({"SAMPLE_TOO_SMALL", "PRE_CRITIC_ABORT", "PRE_CRITIC_
                             "CRITIC_ABORT", "LEAKAGE_SUSPECTED"})
 
 
+#: Checks whose critical finding the pipeline sends back for revision
+#: rather than stopping on (``REVISABLE_PRE_CRITIC_CHECKS`` in
+#: src/errors.py).
+_REVISABLE_CHECKS = frozenset({"pcc_02", "pcc_07"})
+_LEAD_CHECK = re.compile(r"^(pcc_[a-z0-9]+):")
+
+
+def _reopened(code: str, status: dict[str, Any] | None) -> bool:
+    """A PRE_CRITIC_ABORT the pipeline now resumes into a revision.
+
+    Mirrors ``reopened_pre_critic_stop`` in src/errors.py: a stop written
+    before the checks told findings a revision can fix from ones it
+    cannot, recognised by having no ``abort.checks`` (every later one has
+    them) and a message led by pcc_07 or pcc_02. The Mac study that
+    prompted fix/pcc-revise is one; its run_status.json says
+    ``resumable: false``, which that release made untrue.
+    """
+    abort = as_dict(status.get("abort")) if isinstance(status, dict) else {}
+    if code != "PRE_CRITIC_ABORT" or abort.get("code") != code:
+        return False
+    if abort.get("stage") != "CRITIQUING" or "checks" in abort:
+        return False
+    lead = _LEAD_CHECK.match(str(abort.get("message") or "").strip())
+    return lead is not None and lead.group(1) in _REVISABLE_CHECKS
+
+
 def _resumable(code: str, status: dict[str, Any] | None) -> bool:
     abort = as_dict(status.get("abort")) if isinstance(status, dict) else {}
+    if _reopened(code, status):
+        return True
     if abort.get("code") == code and isinstance(abort.get("resumable"), bool):
         return bool(abort["resumable"])
     return code not in _NOT_RESUMABLE
@@ -512,6 +540,12 @@ _REVIEW_ABORTS = frozenset({"PRE_CRITIC_ABORT", "PRE_CRITIC_UNRESOLVED", "CRITIC
 
 #: The stops the automatic pre-review checks make (src/pre_critic_checks.py).
 _PRE_CRITIC_CODES = frozenset({"PRE_CRITIC_ABORT", "PRE_CRITIC_UNRESOLVED"})
+
+#: How src/orchestrator.py words a PRE_CRITIC_UNRESOLVED that came before
+#: the revision rounds ran out: the revision returned the agent's own
+#: word that another would not fix it ("pcc_07 was still failing after
+#: revision 1 of 2, and another revision would not change it: ...").
+_STOPPED_EARLY = "another revision would not change it"
 
 #: "pcc_07: <sentence>", or "pcc_07 was still failing when the revision
 #: cycles ran out (2 of 2 used): <sentence>" for PRE_CRITIC_UNRESOLVED.
@@ -642,15 +676,26 @@ def _review_abort_advice(run_dir: Path, state: RunState, code: str, message: str
     fixes = [str(advice[i]["fix"]) for i in fix_ids
              if isinstance(advice, dict) and isinstance(advice.get(i), dict) and advice[i].get("fix")]
     fix = " ".join(" ".join(f.split()) for f in fixes) or fill(entry.get("fix"), **ctx)
+    stops = messages().get("pre_critic_stops") or {}
     if fixes and code == "PRE_CRITIC_UNRESOLVED":
-        fix = f"Resuming would not help, because no revision rounds are left. {fix}"
+        early = _STOPPED_EARLY in (message or "")
+        lead = stops.get("unresolved_early" if early else "unresolved_rounds_used")
+        if lead:
+            fix = f"{' '.join(str(lead).split())} {fix}"
     command = fill(entry.get("command"), **ctx) or None
     note = ""
     if "pcc_07" in ids:
         worded = _reworded_question(run_dir, state)
         if worded:
             note = f'The study worded your question as: "{worded}"'
-    if resumable:
+    abort = as_dict(status.get("abort")) if isinstance(status, dict) else {}
+    if resumable and _reopened(code, status) and abort.get("resumable") is not True:
+        # Stopped by a rule this version no longer has: a resume sends
+        # the finding back for revision (src/errors.py).
+        lead = " ".join(str(stops.get("reopened") or "").split())
+        fix = f"{lead} If it stops again: {fix[:1].lower()}{fix[1:]}".strip()
+        command = f"edmars resume {ctx['run']}"
+    elif resumable:
         # The pipeline recorded that a resume can deal with it (run_status.json).
         fix = ("Resume the study to let it try again from the step that failed. If it "
                f"stops the same way again: {fix[:1].lower()}{fix[1:]}")

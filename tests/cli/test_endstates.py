@@ -533,17 +533,35 @@ def test_a_pre_critic_abort_says_what_the_checks_found_and_advice_that_fits(run_
     # "Start a new study, possibly with a simpler question", although the
     # researcher's question was simple and pcc_07's sentence said exactly
     # what was missing.
+    # Its record predates abort.checks and is led by pcc_07, which this
+    # version sends back for revision, so the study can now be resumed
+    # (src/errors.py reopened_pre_critic_stop); the checks' own advice
+    # follows for the case it stops again.
     out = classify(_pre_critic_run(run_home))
-    assert out.code == "PRE_CRITIC_ABORT" and out.resumable is False
+    assert out.code == "PRE_CRITIC_ABORT" and out.resumable is True
     assert out.details_heading == "What the automatic checks found:"
     assert out.details[0] == PCC_07.split(": ", 1)[1]  # in full, without "pcc_07:"
     assert out.details[1] == "No individual models are present in results.json."
     assert len(out.details) == 2  # a major finding did not stop the study
     assert out.note == f'The study worded your question as: "{WORKED_Q}"'
     assert "simpler question" not in out.fix
-    assert out.fix.startswith("The question the study worked from promised a comparison")
+    assert out.fix.startswith("This version of EDM-ARS sends this finding back to be fixed "
+                              "instead of stopping the study. Resume the study")
+    assert "If it stops again: the question the study worked from promised a comparison" in out.fix
     assert "no trained models" in out.fix  # pcc_02's advice too
-    assert out.command == "edmars new"
+    assert out.command is not None and out.command.startswith("edmars resume ")
+
+
+@pytest.mark.parametrize("lead", ["pcc_01", "pcc_06", "pcc_99"])
+def test_an_old_stop_no_revision_can_fix_stays_final(run_home: Path, lead: str) -> None:
+    out = classify(_pre_critic_run(run_home, second=False, message=f"{lead}: something"))
+    assert out.resumable is False and out.command == "edmars new"
+
+
+def test_an_old_stop_read_from_the_log_alone_stays_final(run_home: Path) -> None:
+    # Without run_status.json there is no abort record to recognise it by.
+    out = classify(_pre_critic_run(run_home, second=False, status=False))
+    assert out.code == "PRE_CRITIC_ABORT" and out.resumable is False
 
 
 def test_a_pre_critic_abort_says_what_was_found_in_its_why(run_home: Path) -> None:
@@ -582,13 +600,28 @@ def test_a_finding_still_failing_after_the_revisions_is_not_resumable(run_home: 
     assert out.code == "PRE_CRITIC_UNRESOLVED" and out.resumable is False
     assert out.title == "Automatic checks stopped the study after its revisions"
     assert "a test the question promises missing from the analysis." in out.why
-    assert "used all its revision rounds" in out.why and "no paper was written" in out.why
+    assert "the revisions did not fix it" in out.why and "no paper was written" in out.why
     assert out.details_heading == "What the automatic checks found:"
     assert out.details == [PCC_07.split(": ", 1)[1]]  # without the "pcc_07 was still failing" lead
     assert out.fix.startswith("Resuming would not help, because no revision rounds are left. "
                               "The question the study worked from promised")
     assert out.command == "edmars new"
     assert out.note == f'The study worded your question as: "{WORKED_Q}"'
+
+
+def test_a_stop_before_the_rounds_ran_out_does_not_claim_they_did(run_home: Path) -> None:
+    # The pipeline stops with rounds left when the revision comes back
+    # saying another would not fix it; "no revision rounds are left" and
+    # "used all its revision rounds" were both untrue of that stop.
+    early = ("pcc_07 was still failing after revision 1 of 2, and another revision would not "
+             "change it: the Analyst recorded that the test cannot run: baseline block is empty. "
+             + PCC_07.split(": ", 1)[1])
+    out = classify(_pre_critic_run(run_home, code="PRE_CRITIC_UNRESOLVED", message=early,
+                                   second=False))
+    assert out.code == "PRE_CRITIC_UNRESOLVED" and out.resumable is False
+    assert out.fix.startswith("Resuming would not help: the step the work went back to "
+                              "reported that another revision would not fix it. The question")
+    assert "rounds" not in out.why and "rounds are left" not in out.fix
 
 
 PCC_01_TEXT = "Outcome variable 'X4EVRATNDCLG' found as a column in train_X.csv - confirmed target leakage."

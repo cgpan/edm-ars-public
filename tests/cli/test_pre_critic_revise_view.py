@@ -166,10 +166,21 @@ def test_the_now_line_says_the_checks_sent_it_back_not_the_reviewer() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _pipeline_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, resolved: bool) -> Path:
-    """Run the orchestrator with stub agents (no provider call, no TeX)."""
+def _pipeline_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, resolved: bool,
+                  declined: bool = False) -> Path:
+    """Run the orchestrator with stub agents (no provider call, no TeX).
+
+    Unresolved: each revision returns a null record, which goes back until
+    the rounds run out; ``declined``: the first revision returns the
+    helper's skipped record with its reason, which stops the run at once.
+    """
     from tests.test_orchestrator_terminal import _config, _fake_compile_ok, _orch
-    from tests.test_pre_critic_revise import _INCREMENTAL_OK, _INCREMENTAL_SKIPPED, _stage_study
+    from tests.test_pre_critic_revise import (
+        _INCREMENTAL_OK,
+        _INCREMENTAL_SKIPPED,
+        _NULL_WITH_WARNING,
+        _stage_study,
+    )
 
     monkeypatch.setattr("src.orchestrator.compile_latex", _fake_compile_ok)
     # The clients are built but never called; the CLI tests clear real keys.
@@ -177,7 +188,10 @@ def _pipeline_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, resolved: 
     run = tmp_path / "run"
     run.mkdir()
     orch = _orch(run, _config(run))
-    _stage_study(orch, revised_incremental=_INCREMENTAL_OK if resolved else _INCREMENTAL_SKIPPED)
+    revised: Any = _INCREMENTAL_OK if resolved else _NULL_WITH_WARNING
+    if declined:
+        revised = _INCREMENTAL_SKIPPED
+    _stage_study(orch, revised_incremental=revised)
     orch.run()
     return run
 
@@ -215,3 +229,22 @@ def test_an_unresolved_study_from_the_real_pipeline(
     assert "Internal methods review: not scored; the automatic checks stopped the study before the review" in html
     status = json.loads((run / "run_status.json").read_text(encoding="utf-8"))
     assert status["abort"]["code"] == "PRE_CRITIC_UNRESOLVED"
+    assert outcome.fix.startswith("Resuming would not help, because no revision rounds are left.")
+
+
+def test_a_study_stopped_after_one_revision_from_the_real_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_home: Path,
+) -> None:
+    # The revision came back with the helper's skipped record and its
+    # reason: the pipeline stops with a round left instead of sending the
+    # same instruction again.
+    run = _pipeline_run(tmp_path, monkeypatch, resolved=False, declined=True)
+    state = load_state(run)
+    assert state.final_state == "ABORTED"
+    assert [line for line in state.recent if line.startswith("Automatic check:")] == [MAC_LINE]
+    outcome = classify(run)
+    assert outcome.code == "PRE_CRITIC_UNRESOLVED" and outcome.resumable is False
+    assert outcome.fix.startswith("Resuming would not help: the step the work went back to "
+                                  "reported that another revision would not fix it.")
+    assert "rounds" not in outcome.why
+    assert outcome.command == "edmars new"
