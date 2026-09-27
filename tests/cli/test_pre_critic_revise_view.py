@@ -112,6 +112,19 @@ def test_the_log_line_of_a_run_without_events_is_the_same_notice() -> None:
     assert fold(events).recent == [MAC_LINE]
 
 
+def test_a_stop_read_from_the_log_is_not_given_the_wrong_title() -> None:
+    # The log's short-circuit ABORT line comes before the line naming the
+    # code, so it cannot know whether the stop was PRE_CRITIC_UNRESOLVED.
+    lines = log_lines(
+        (9, "Pre-Critic guard found critical failures → short-circuit verdict: ABORT"),
+        (9, "Pre-Critic guard stopped the run [PRE_CRITIC_UNRESOLVED]: pcc_07 was still failing "
+            "when the revision cycles ran out (2 of 2 used): " + PCC_07_TEXT),
+    )
+    state = fold([ev for line in lines.splitlines() for ev in parse_log_line(line)])
+    assert not [line for line in state.recent if line.startswith("Automatic checks stopped")]
+    assert state.abort is not None and state.abort["code"] == "PRE_CRITIC_UNRESOLVED"
+
+
 # ---------------------------------------------------------------------------
 # The live screen
 # ---------------------------------------------------------------------------

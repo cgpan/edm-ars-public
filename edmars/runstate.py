@@ -626,7 +626,9 @@ def _pre_critic_verdict_words(state: RunState, data: Mapping[str, Any], plain: s
     verdict = str(data.get("verdict") or "").upper()
     if verdict == "REVISE":
         return None
-    if verdict != "ABORT":
+    if verdict != "ABORT" or not plain:
+        # A verdict read from pipeline.log has no line of its own, and
+        # comes before the line naming the stop's code.
         return plain
     abort = state.abort if isinstance(state.abort, dict) else {}
     code = str(abort.get("code") or "")
