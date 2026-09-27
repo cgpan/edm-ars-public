@@ -388,6 +388,127 @@ def test_a_first_analysis_with_a_null_record_is_revised(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A revision that comes back saying another will not help stops the run
+# ---------------------------------------------------------------------------
+
+
+def test_a_revision_that_says_the_test_cannot_run_stops_the_run(
+    tmp_path: Path,
+) -> None:
+    """The instruction tells the Analyst to leave the helper's skipped
+    record with its reason when the test truly cannot run, and says the
+    study then stops. It used to be sent the identical instruction until
+    every cycle was spent: four Analyst runs with three cycles."""
+    orch = _orch(tmp_path, _config(tmp_path), max_revision_cycles=3)
+    calls, instructions = _stage_study(orch, revised_incremental=_INCREMENTAL_SKIPPED)
+
+    ctx = orch.run()
+
+    assert ctx.current_state == PipelineState.ABORTED
+    assert calls == {"pf": 1, "de": 1, "analyst": 2, "critic": 0, "writer": 0}
+    assert "leave the helper's record, with its reason" in instructions[1]
+    assert not (tmp_path / "paper.tex").exists()
+    abort = _status(tmp_path)["abort"]
+    assert abort["code"] == "PRE_CRITIC_UNRESOLVED"
+    assert abort["resumable"] is False
+    assert abort["message"].startswith(
+        "pcc_07 was still failing after revision 1 of 3, and another revision "
+        "would not change it: the Analyst recorded that the test cannot run: "
+        "no focal column present in the design matrix."
+    )
+    assert [c["check_id"] for c in abort["checks"]] == ["pcc_07"]
+
+
+def test_a_first_analysis_that_says_it_cannot_run_still_gets_a_revision(
+    tmp_path: Path,
+) -> None:
+    """The helper's own skipped record in the FIRST analysis is usually a
+    wrong column list, which the revision's instruction fixes. Only a
+    revision that returns it again stops the run."""
+    orch = _orch(tmp_path, _config(tmp_path))
+    calls, _ = _stage_study(orch, first_incremental=_INCREMENTAL_SKIPPED)
+
+    assert orch.run().current_state == PipelineState.COMPLETED
+    assert calls["analyst"] == 2 and calls["writer"] == 1
+
+
+def _empty_battery(calls: dict, instructions: list, errors_by_run: list[list[str]],
+                   staged: Any) -> Any:
+    """An Analyst whose first ``len(errors_by_run)`` runs train nothing."""
+
+    def analyst(revision_instructions: str | None = None, **kw: Any) -> dict:
+        run = calls["analyst"]
+        if run < len(errors_by_run):
+            calls["analyst"] += 1
+            instructions.append(revision_instructions)
+            return {"all_models": {}, "errors": list(errors_by_run[run]),
+                    "warnings": []}
+        return staged(revision_instructions=revision_instructions, **kw)
+
+    return analyst
+
+
+_TIMED_OUT = (
+    "Analysis code did not execute successfully and wrote no results.json. "
+    "returncode=-1, stdout=empty, stderr=Timeout after 600s"
+)
+
+
+def test_an_analysis_that_times_out_twice_stops_the_run(tmp_path: Path) -> None:
+    """A try/except cannot make code finish inside the time limit. The
+    instruction now says so, and a second timeout stops the run instead
+    of spending the last cycle on a third."""
+    orch = _orch(tmp_path, _config(tmp_path))
+    calls, instructions = _stage_study(orch, question="What predicts enrolment?")
+    orch.analyst.run = _empty_battery(
+        calls, instructions, [[_TIMED_OUT], [_TIMED_OUT], [_TIMED_OUT]],
+        orch.analyst.run,
+    )
+
+    assert orch.run().current_state == PipelineState.ABORTED
+    assert calls["analyst"] == 2 and calls["writer"] == 0
+    assert "The code ran out of time" in instructions[1]
+    abort = _status(tmp_path)["abort"]
+    assert abort["code"] == "PRE_CRITIC_UNRESOLVED"
+    assert abort["message"].startswith(
+        "pcc_02 was still failing after revision 1 of 2, and another revision "
+        "would not change it: the analysis code ran out of time"
+    )
+
+
+def test_one_timeout_still_gets_its_revision(tmp_path: Path) -> None:
+    orch = _orch(tmp_path, _config(tmp_path))
+    calls, instructions = _stage_study(orch, question="What predicts enrolment?")
+    orch.analyst.run = _empty_battery(
+        calls, instructions, [[_TIMED_OUT]], orch.analyst.run
+    )
+
+    assert orch.run().current_state == PipelineState.COMPLETED
+    assert calls["analyst"] == 2
+    assert "The code ran out of time" in instructions[1]
+
+
+def test_an_empty_battery_without_a_timeout_uses_every_cycle(
+    tmp_path: Path,
+) -> None:
+    """A code failure is not a declaration: a fresh run may fix it."""
+    orch = _orch(tmp_path, _config(tmp_path))
+    calls, instructions = _stage_study(orch, question="What predicts enrolment?")
+    failed = ["KeyError: 'X1SES'"]
+    orch.analyst.run = _empty_battery(
+        calls, instructions, [failed, failed, failed], orch.analyst.run
+    )
+
+    assert orch.run().current_state == PipelineState.ABORTED
+    assert calls["analyst"] == 3
+    assert "ran out of time" not in instructions[1]
+    abort = _status(tmp_path)["abort"]
+    assert abort["message"].startswith(
+        "pcc_02 was still failing when the revision cycles ran out (2 of 2 used)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Checkpoints and --resume across a pre-review revision
 # ---------------------------------------------------------------------------
 

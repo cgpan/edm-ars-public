@@ -12,7 +12,10 @@ Every critical finding says whether a revision can fix it (``revisable``).
 A revisable one sends its ``revision_instruction`` to ``target_agent``
 through the ordinary REVISING cascade (SPEC §5.3); if it is still failing
 when the revision cycles run out, the run stops with PRE_CRITIC_UNRESOLVED
-and no paper is written. Any finding that is not revisable stops the run at
+and no paper is written. It stops the same way sooner when the revision
+comes back with the agent's own word that another would not help
+(``stop_on_repeat``: its not-run record with a reason, or a second
+timeout). Any finding that is not revisable stops the run at
 once with PRE_CRITIC_ABORT. A check that sets nothing is not revisable, so
 a new critical check keeps the old stop-the-run behaviour until someone
 decides otherwise.
@@ -65,6 +68,15 @@ class CheckFailure:
     #: says what is wrong; this says what to change. Empty means the
     #: message is the instruction.
     revision_instruction: str = ""
+    #: Revisable findings only: set when the target agent's own output
+    #: says that running it again will not clear the finding -- its
+    #: not-run record with a reason (what the instruction tells it to
+    #: leave when the test truly cannot run), or a time limit hit. The
+    #: orchestrator acts on it only when the previous cycle already sent
+    #: this check back, so the agent always gets one revision first; after
+    #: that it stops the run instead of repeating the same instruction.
+    stop_on_repeat: str = ""
+
     @property
     def instruction(self) -> str:
         return self.revision_instruction or self.message
@@ -354,6 +366,42 @@ def _strict_evidence(value: Any, keys: tuple[str, ...], top: bool = True) -> boo
     return False
 
 
+def _declined_reason(results: dict, keys: tuple[str, ...]) -> str:
+    """The reason in a not-run record under one of ``keys``, or "".
+
+    This is the Analyst saying the analysis cannot run: the instruction
+    tells it to leave the helper's skipped record, with its reason, when
+    the test truly cannot run on its files.
+    """
+    names = [k for k in keys if k not in _DELTA_FIELDS]
+
+    def walk(value: Any, top: bool) -> str:
+        if isinstance(value, list):
+            for item in value:
+                found = walk(item, False)
+                if found:
+                    return found
+            return ""
+        if not isinstance(value, dict):
+            return ""
+        for key, item in value.items():
+            name = str(key).strip().lower()
+            if top and name in _LOG_KEYS:
+                continue
+            if isinstance(item, dict) and any(name.startswith(k) for k in names):
+                status = _status_of(item)
+                reason = item.get("reason")
+                if (status is not None and status not in _COMPUTED_STATUSES
+                        and isinstance(reason, str) and reason.strip()):
+                    return " ".join(reason.split())[:300]
+            found = walk(item, False)
+            if found:
+                return found
+        return ""
+
+    return walk(results, True)
+
+
 def _evidence_text(results: dict) -> str:
     """The lower-cased text pcc_07 searches for a non-strict commitment.
 
@@ -409,6 +457,10 @@ def _check_research_question_is_answered(
         elif any(k.lower() in haystack for k in commitment.evidence_keys):
             continue
         matched = next(p for p in phrases if p in question)
+        declined = (
+            _declined_reason(results, commitment.evidence_keys)
+            if commitment.strict else ""
+        )
         result.failures.append(
             CheckFailure(
                 check_id="pcc_07",
@@ -426,6 +478,10 @@ def _check_research_question_is_answered(
                 revisable=True,
                 revision_instruction=_commitment_instruction(
                     commitment, matched, original, ctx, task_type
+                ),
+                stop_on_repeat=(
+                    f"the Analyst recorded that the test cannot run: {declined}"
+                    if declined else ""
                 ),
             )
         )
@@ -558,7 +614,11 @@ _DESCOPE_ENDING = (
     "still stands. Keep every other part of the analysis as it was."
 )
 
-#: How the incremental-validity instruction ends.
+#: How the incremental-validity instruction ends. It says what the
+#: orchestrator does: a not-run record with a reason, returned by the
+#: revision this instruction ordered, stops the study at once
+#: (stop_on_repeat); anything else not run is sent back while revision
+#: cycles remain.
 _STRICT_ENDING = (
     "Only a record with 'status': 'ok' and its numbers answers the "
     "question. null, an empty record, a string, a 'skipped' or 'error' "
@@ -821,6 +881,11 @@ def _check_outcome_not_in_train_x(
         pass  # Can't read file — not a pre-critic error, pipeline will surface it
 
 
+#: How a run out of wall-clock time reads in results.errors: the
+#: executor's "Timeout after 600s", or "timed out".
+_TIMEOUT = re.compile(r"\btimed?[\s-]?out\b", re.IGNORECASE)
+
+
 def _check_model_count(ctx: object, result: PreCriticResult) -> None:
     """pcc_02 (major): results.json must have at least 4 individual models."""
     results = getattr(ctx, "results_object", None) or {}
@@ -844,6 +909,23 @@ def _check_model_count(ctx: object, result: PreCriticResult) -> None:
         # stops (PRE_CRITIC_UNRESOLVED) and still writes no paper.
         errors = results.get("errors") if isinstance(results, dict) else None
         recorded = "; ".join(str(e) for e in (errors or [])[:2])
+        # A wall-clock timeout is not a failing model, and wrapping each
+        # model in try/except does not make the code finish in time. The
+        # instruction says so, and a second timeout after that revision
+        # stops the run instead of spending the remaining cycles, each up
+        # to four executions at the full time limit, on the same outcome.
+        timed_out = next(
+            (str(e) for e in (errors or []) if _TIMEOUT.search(str(e))), ""
+        )
+        timeout_advice = (
+            " The code ran out of time: every model then failed together, "
+            "and a try/except does not change that. Keep the battery and "
+            "its grids, but spend less time on them: run grid searches "
+            "with n_jobs=-1, never fit the same model twice, and keep SHAP, "
+            "bootstrap and permutation work at the sample sizes the skills "
+            "give."
+            if timed_out else ""
+        )
         result.failures.append(
             CheckFailure(
                 check_id="pcc_02",
@@ -865,6 +947,11 @@ def _check_model_count(ctx: object, result: PreCriticResult) -> None:
                     "and continues with the next model (SPEC section 8), so "
                     "one failing model cannot empty the battery, and write "
                     "results.json even when some models fail."
+                    + timeout_advice
+                ),
+                stop_on_repeat=(
+                    f"the analysis code ran out of time ({' '.join(timed_out.split())[:300]})"
+                    if timed_out else ""
                 ),
             )
         )
