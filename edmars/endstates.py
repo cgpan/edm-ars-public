@@ -722,6 +722,7 @@ def _stopped(run_dir: Path, state: RunState, code: str, message: str,
     if code in _REVIEW_ABORTS:
         details, heading, note, fix, command = _review_abort_advice(
             run_dir, state, code, message, entry, ctx, resumable, status)
+    removed = outcome_removed_concern(run_dir, state)
     return Outcome(
         label=str(labels.get("stopped", "Stopped")),
         headline=headline,
@@ -737,6 +738,7 @@ def _stopped(run_dir: Path, state: RunState, code: str, message: str,
         details=details,
         details_heading=heading,
         note=note,
+        concerns=[removed] if removed else [],
     )
 
 
@@ -848,10 +850,56 @@ def _not_ready(run_dir: Path, state: RunState, status: dict[str, Any] | None,
     )
 
 
+#: data_report.json's record of the pipeline's outcome check after data
+#: preparation (src/outcome_guard.py RECORD_KEY): {"after": ..., "removed":
+#: {"train_X.csv": [columns], ...}}.
+_OUTCOME_CHECK_KEY = "post_de_outcome_check"
+
+
+def outcome_removed_concern(run_dir: Path, state: RunState) -> str | None:
+    """The "Please check" line when EDM-ARS removed the outcome from the
+    predictors, else None.
+
+    On the round-2 Mac test the data preparation left the outcome among
+    the predictors and the study stopped after the paid analysis; the
+    pipeline now removes such a column and goes on. Removing it cannot
+    undo its use in filling in other predictors, so the reader is told.
+
+    data_report.json says what the data the paper uses went through: a
+    later data preparation (a revision) that left no outcome column
+    replaces the record, and then there is nothing to say. Without the
+    record, the warning event decides.
+    """
+    report = load_json(run_dir / "data_report.json")
+    report = report if isinstance(report, dict) else {}
+    record = report.get(_OUTCOME_CHECK_KEY)
+    if isinstance(record, dict):
+        if not record.get("removed"):
+            return None
+    elif not state.outcome_removed:
+        return None
+    outcome = str(report.get("outcome_variable") or "").strip()
+    if not outcome:
+        spec = load_json(run_dir / "research_spec.json")
+        outcome = str(spec.get("outcome_variable") or "").strip() if isinstance(spec, dict) else ""
+    words = messages().get("outcome_removed")
+    template = str((words.get("concern") if isinstance(words, dict) else None) or (
+        "The data preparation step left the outcome ({outcome}) among the predictors; "
+        "EDM-ARS removed it before the analysis. If that step also used the outcome to "
+        "fill in other predictors' missing values, those predictors can still carry it, "
+        "so be wary of results that look too good."))
+    if not outcome:
+        template = template.replace(" ({outcome})", "")
+    return " ".join(fill(template, outcome=outcome).split())
+
+
 def _concerns(run_dir: Path, state: RunState, status: dict[str, Any] | None,
               *, skip_gate: bool) -> list[str]:
     """Plain lines for the "Please check" list besides invariant findings."""
     out: list[str] = []
+    removed = outcome_removed_concern(run_dir, state)
+    if removed:
+        out.append(removed)
     unverified = (status.get("critic_unverified") if isinstance(status, dict) else None)
     if unverified is None:
         unverified = state.metrics.get("critic_unverified")
@@ -1049,6 +1097,7 @@ __all__ = [
     "invariant_title",
     "load_findings",
     "messages",
+    "outcome_removed_concern",
     "quote_path",
     "step_words",
     "redact",

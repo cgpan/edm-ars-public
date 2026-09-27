@@ -178,8 +178,12 @@ class RunState:
     warnings: list[str] = field(default_factory=list)
     #: Recent lines the live view shows whole instead of cutting at the
     #: screen's edge: warnings that change the course of the study (the
-    #: automatic checks sending the work back for revision).
+    #: automatic checks sending the work back for revision, the outcome
+    #: removed from the predictors).
     notices: list[str] = field(default_factory=list)
+    #: The pipeline removed the outcome from the predictor files after the
+    #: data preparation step left it there (OUTCOME_REMOVED_FROM_PREDICTORS).
+    outcome_removed: bool = False
     verdict: dict[str, Any] | None = None
     compile: dict[str, Any] | None = None
     gate: dict[str, Any] | None = None
@@ -615,6 +619,29 @@ def pre_critic_revise_words(data: Mapping[str, Any]) -> str | None:
     )
 
 
+#: The pipeline's warning code when it removed the outcome from train_X.csv
+#: and test_X.csv (src/outcome_guard.py REPAIR_CODE).
+OUTCOME_REMOVED_CODE = "OUTCOME_REMOVED_FROM_PREDICTORS"
+#: pipeline.log's side of that warning (a run with no events.jsonl).
+_RE_OUTCOME_REMOVED = re.compile(r"^Removed the outcome from the predictors: ")
+
+
+def outcome_removed_words() -> str:
+    """An ``OUTCOME_REMOVED_FROM_PREDICTORS`` warning in plain words.
+
+    The pipeline's message names files and columns ("Removed the outcome
+    from the predictors: after the DataEngineer's targeted retry,
+    train_X.csv had X4EVRATNDCLG; ..."). On the round-2 Mac test that leak
+    stopped the study after the paid analysis; now the pipeline removes
+    the column and goes on, and the live view says so in one line.
+    """
+    words = _messages().get("outcome_removed")
+    line = words.get("line") if isinstance(words, dict) else None
+    return " ".join(str(line or (
+        "The data preparation step left the outcome among the predictors; "
+        "EDM-ARS removed it before the analysis")).split())
+
+
 def _pre_critic_verdict_words(state: RunState, data: Mapping[str, Any], plain: str | None) -> str | None:
     """The recent-list line for the automatic checks' verdict event.
 
@@ -783,6 +810,10 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
             msg = pre_critic_revise_words(data) or msg
             if msg:
                 state.notices.append(" ".join(str(msg).split()))
+        elif data.get("code") == OUTCOME_REMOVED_CODE:
+            msg = outcome_removed_words()
+            state.notices.append(msg)
+            state.outcome_removed = True
         if msg:
             state.warnings.append(str(msg))
             _add_recent(state, str(msg))
@@ -1000,6 +1031,8 @@ def parse_log_line(line: str) -> list[dict[str, Any]]:
                      checks=[c.strip() for c in mm.group(4).split(",") if c.strip()],
                      targets=[t.strip() for t in mm.group(3).split(",") if t.strip()],
                      revision=int(mm.group(1)), max_revisions=int(mm.group(2)))]
+    if _RE_OUTCOME_REMOVED.match(msg):
+        return [make("warning", stage=None, code=OUTCOME_REMOVED_CODE, message=msg)]
     mm = _RE_PRECRITIC.match(msg)
     if mm:
         verdict = mm.group(1).upper()

@@ -422,6 +422,22 @@ pre_critic_revise:
     Analyst: "the analysis step"
     default: "the step that made them"
 
+# The outcome among the predictors (the pipeline's
+# OUTCOME_REMOVED_FROM_PREDICTORS warning, src/outcome_guard.py): the data
+# preparation left the outcome as a predictor column, and after its one
+# retry EDM-ARS removed that column before the analysis and went on.
+# line: the live view's recent line. concern: the "Please check" line of
+# the result screen and summary.html; {outcome} is the outcome's variable
+# name. It says what removing a column cannot undo.
+outcome_removed:
+  line: "The data preparation step left the outcome among the predictors; EDM-ARS removed it before the analysis"
+  concern: >-
+    The data preparation step left the outcome ({outcome}) among the
+    predictors; EDM-ARS removed it before the analysis. If that step also
+    used the outcome to fill in other predictors' missing values, those
+    predictors can still carry it, so be wary of results that look too
+    good.
+
 # Leads for the "what to do" of a stop the automatic checks made.
 # unresolved_*: PRE_CRITIC_UNRESOLVED, when the rounds ran out and when
 # a revision came back saying another would not fix it (a record that the
