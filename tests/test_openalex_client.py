@@ -481,7 +481,7 @@ class TestFallback:
         assert status["arxiv"] == "ok" and status["openalex"] == "ok"
         assert status["n_openalex"] == 1
         # One set of search words for every source: no second model call.
-        assert agent._generate_search_queries.call_count == 2  # S2, then arXiv/OpenAlex
+        assert agent._generate_search_queries.call_count == 1
         log = (tmp_path / "pipeline.log").read_text(encoding="utf-8")
         assert "asking OpenAlex" not in log  # not standing in for anything
 

@@ -351,6 +351,9 @@ class ProblemFormulator(BaseAgent):
     _openalex_query_outcomes: list[str] | None = None
     _openalex_http_status: int | None = None
     _openalex_plan: str | None = None
+    #: The search words of the literature search in progress, by prompt;
+    #: None outside ``_search_literature``.
+    _lit_query_memo: dict[str | None, list[str]] | None = None
 
     def run(
         self,
@@ -651,6 +654,22 @@ class ProblemFormulator(BaseAgent):
                 "message": f"Query generation failed ({exc}); using defaults.",
             })
         return self._DEFAULT_S2_QUERIES
+
+    def _literature_queries(self, user_prompt: str | None) -> list[str]:
+        """The search words for every source of the current search.
+
+        Semantic Scholar and arXiv each asked the model for their own
+        words: two calls per run where one does, at the formulator's
+        temperature (0.7), so the two sources could search for different
+        things. Within ``_search_literature`` the words are asked for
+        once; a direct call outside it asks as before.
+        """
+        memo = self._lit_query_memo
+        if memo is None:
+            return self._generate_search_queries(user_prompt)
+        if user_prompt not in memo:
+            memo[user_prompt] = list(self._generate_search_queries(user_prompt))
+        return list(memo[user_prompt])
 
     # Arc P5 (F-P5-DEPTH-RECENCY-SKEW): the ranking signals are requested
     # here AND hand-mapped in the comprehension below. Adding a name to
@@ -972,7 +991,7 @@ class ProblemFormulator(BaseAgent):
             headers["X-API-KEY"] = s2_api_key
 
         # Generate short keyword queries from user_prompt via lightweight LLM call
-        queries = self._generate_search_queries(user_prompt)
+        queries = self._literature_queries(user_prompt)
         per_query_limit = max(max_results, 10)  # fetch at least 10 per query before dedup
 
         # Run all queries and merge by paperId (dedup)
@@ -1484,7 +1503,11 @@ class ProblemFormulator(BaseAgent):
         self._openalex_http_status = None
         self._openalex_plan = None
         arxiv_enabled = bool(self.config.get("arxiv", {}).get("enabled", True))
-        result = self._search_literature_sources(user_prompt, arxiv_enabled)
+        self._lit_query_memo = {}
+        try:
+            result = self._search_literature_sources(user_prompt, arxiv_enabled)
+        finally:
+            self._lit_query_memo = None
         status = self._retrieval_status(result, arxiv_enabled)
         result["retrieval_status"] = status
         if status["degraded"]:
@@ -1670,7 +1693,7 @@ class ProblemFormulator(BaseAgent):
         queries: list[str] | None = None
         arxiv_papers: list[dict] = []
         if arxiv_enabled:
-            queries = self._generate_search_queries(user_prompt)
+            queries = self._literature_queries(user_prompt)
             arxiv_per_query = int(arxiv_cfg.get("max_results_per_query", 10))
             arxiv_papers = self._search_arxiv(queries, max_results_per_query=arxiv_per_query)
 
@@ -1682,7 +1705,7 @@ class ProblemFormulator(BaseAgent):
         openalex_papers: list[dict] = []
         if plan == "ask":
             if queries is None:
-                queries = self._generate_search_queries(user_prompt)
+                queries = self._literature_queries(user_prompt)
             if oa_settings["when"] == "arxiv_unavailable":
                 how = "refused" if "refused" in (self._arxiv_query_outcomes or []) else "failed"
                 n_q = len(queries)
