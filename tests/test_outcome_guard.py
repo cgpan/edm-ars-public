@@ -126,6 +126,15 @@ def test_the_name_train_y_gives_the_outcome_counts(tmp_path: Path) -> None:
     ]
 
 
+def test_a_train_y_with_two_named_columns_names_neither(tmp_path: Path) -> None:
+    """A stray id written beside y cannot be told from y by name, and a
+    predictor of that name must not be dropped for it."""
+    _matrices(tmp_path, PREDICTORS + ["pseudo_school_id"])
+    with open(tmp_path / "train_y.csv", "w", newline="", encoding="utf-8") as fh:
+        csv.writer(fh).writerows([["pseudo_school_id", "enrolled"], ["1", "0"]])
+    assert find_outcome_columns(str(tmp_path), _spec()) == {}
+
+
 def test_a_clean_matrix_has_nothing(tmp_path: Path) -> None:
     _matrices(tmp_path, PREDICTORS)
     assert find_outcome_columns(str(tmp_path), _spec()) == {}

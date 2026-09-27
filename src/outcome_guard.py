@@ -138,7 +138,14 @@ def find_outcome_columns(
     extra: list[str] = []
     if isinstance(data_report, dict):
         extra.append(str(data_report.get("outcome_variable") or ""))
-    extra.extend(_header(os.path.join(output_dir, "train_y.csv")) or [])
+    y_named = [
+        h.strip() for h in _header(os.path.join(output_dir, "train_y.csv")) or []
+        if h.strip() and not _UNNAMED.match(h.strip())
+    ]
+    if len(y_named) == 1:
+        # Only a single named column says which name is the outcome; with
+        # two (a stray id beside y) neither can be told apart by name.
+        extra.extend(y_named)
     for name in extra:
         name = name.strip()
         if name and not _UNNAMED.match(name) and name.casefold() not in declared_folded:
