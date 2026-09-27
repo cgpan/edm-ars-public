@@ -302,15 +302,26 @@ def _one_line(text: Any, limit: int = 500) -> str:
     return flat if len(flat) <= limit else flat[: limit - 3] + "..."
 
 
-def _abort_record(stage: str, code: str, message: str) -> dict:
-    """The ``ctx.abort_info`` / ``run_status.abort`` record."""
-    return {
+def _abort_record(
+    stage: str, code: str, message: str, checks: Optional[list] = None
+) -> dict:
+    """The ``ctx.abort_info`` / ``run_status.abort`` record.
+
+    ``checks`` lists the pre-review findings behind a PRE_CRITIC_* stop
+    (check_id, severity, message, target_agent, revisable), so a reader
+    can show every finding in full rather than the first one cut to a
+    line.
+    """
+    record = {
         "stage": stage,
         "code": code,
         "message": _one_line(message),
         "resumable": is_resumable(code),
         "at": _utc_now_iso(),
     }
+    if checks:
+        record["checks"] = checks
+    return record
 
 
 def _data_missing(ctx: Any, text: str) -> bool:
@@ -1200,6 +1211,8 @@ class Orchestrator:
             "message": message,
             "resumable": bool(info.get("resumable", is_resumable(code))),
         }
+        if isinstance(info.get("checks"), list):
+            abort["checks"] = info["checks"]
         if state == "INTERRUPTED":
             reason = (
                 f"interrupted during {stage or 'the run'}; resume with --resume"
@@ -1727,55 +1740,9 @@ class Orchestrator:
                         f"[PreCritic][{f.severity}] {f.check_id}: {f.message}",
                     )
             if pre_result.has_critical:
-                # Short-circuit: synthesise REVISE/ABORT without an Opus call
-                self.ctx.review_report = self._synthesize_pre_critic_report(pre_result)
-                verdict = self.ctx.review_report["overall_verdict"]
-                self._log(
-                    "Orchestrator",
-                    f"Pre-Critic guard found critical failures → short-circuit verdict: {verdict}",
-                )
-                if verdict == "REVISE" and self.ctx.revision_cycle < self.ctx.max_revision_cycles:
-                    self.ctx.revision_cycle += 1
-                    self.ctx.current_state = PipelineState.REVISING
-                elif verdict == "ABORT":
-                    self.ctx.errors.append(
-                        f"Pre-Critic guard issued ABORT: {pre_result.failures}"
-                    )
-                    first = next(
-                        (f for f in pre_result.failures if f.severity == "critical"),
-                        None,
-                    )
-                    self.ctx.abort_info = _abort_record(
-                        "CRITIQUING",
-                        "PRE_CRITIC_ABORT",
-                        (
-                            f"{first.check_id}: {first.message}"
-                            if first is not None
-                            else "The deterministic pre-review check failed."
-                        ),
-                    )
-                    events.emit(
-                        self.ctx,
-                        "error",
-                        stage="CRITIQUING",
-                        code="PRE_CRITIC_ABORT",
-                        message=self.ctx.abort_info["message"],
-                    )
-                    self.ctx.current_state = PipelineState.ABORTED
-                else:
-                    self.ctx.review_report["unverified"] = True
-                    self.ctx.current_state = PipelineState.WRITING
-                events.emit(
-                    self.ctx,
-                    "verdict",
-                    stage="CRITIQUING",
-                    cycle=self.ctx.revision_cycle,
-                    plain=f"Automatic pre-review check: {verdict}",
-                    critic_score=self.ctx.review_report.get("overall_quality_score"),
-                    verdict=verdict,
-                    unverified=bool(self.ctx.review_report.get("unverified")),
-                    source="pre_critic",
-                )
+                # Short-circuit without a Critic call: revise what a
+                # revision can fix, stop on what it cannot.
+                self._pre_critic_short_circuit(pre_result)
                 self._save_checkpoint()
                 self._check_cost()
                 return
@@ -1933,6 +1900,21 @@ class Orchestrator:
             self._save_checkpoint()
             self._check_cost()
         except Exception as e:
+            review = self.ctx.review_report if isinstance(self.ctx.review_report, dict) else {}
+            if review.get("_source") == "pre_critic_short_circuit":
+                # This revision was ordered by the pre-review check, whose
+                # finding is that the existing analysis cannot carry the
+                # paper (its central test or its models are missing).
+                # Writing it UNVERIFIED is the outcome the check exists to
+                # prevent, so stop instead. The code comes from the error
+                # (a provider failure stays resumable) and the stage is
+                # REVISING, so --resume retries this same revision.
+                self._abort(
+                    f"REVISING failed ({e}); the revision the pre-review "
+                    f"check required did not run, so the paper is not written",
+                    code=_exception_code(self.ctx, e),
+                )
+                return
             # Revision failure is non-fatal: fall back to WRITING with UNVERIFIED flag
             # rather than aborting and discarding the existing analysis results.
             self._log("Orchestrator", f"REVISING failed ({e}); falling back to WRITING (UNVERIFIED)")
@@ -2716,9 +2698,127 @@ class Orchestrator:
     # Checkpoint helpers
     # ------------------------------------------------------------------
 
+    def _pre_critic_short_circuit(self, pre_result: PreCriticResult) -> None:
+        """Act on critical pre-review findings without calling the Critic.
+
+        Every critical finding used to end the run as PRE_CRITIC_ABORT,
+        although each names a target agent and revision instructions were
+        built for it; the synthesised verdict was ABORT whenever this code
+        ran, so its REVISE branch was unreachable. On a real study the
+        Analyst had not run the nested comparison an "above and beyond"
+        question promised (pcc_07), which one Analyst revision can add,
+        and the paid run stopped as not resumable.
+
+        Now a finding no revision can fix still stops the run
+        (PRE_CRITIC_ABORT). When every critical finding is revisable, the
+        targeted agents are re-run through the ordinary REVISING cascade
+        while cycles remain, and the check runs again at the next
+        CRITIQUING. A revisable finding still failing when the cycles run
+        out stops the run as PRE_CRITIC_UNRESOLVED. It does NOT fall
+        through to WRITING (UNVERIFIED) the way an unresolved Critic
+        REVISE does: the finding is that the paper's central result is
+        missing, and a paper built around that gap reads fluently and
+        must not be written at all.
+        """
+        report = self._synthesize_pre_critic_report(pre_result)
+        self.ctx.review_report = report
+        cycles_left = self.ctx.revision_cycle < self.ctx.max_revision_cycles
+        revise = report["overall_verdict"] == "REVISE" and cycles_left
+        verdict = "REVISE" if revise else "ABORT"
+        self._log(
+            "Orchestrator",
+            f"Pre-Critic guard found critical failures → short-circuit verdict: {verdict}",
+        )
+        checks = [f.to_dict() for f in pre_result.failures if f.severity == "critical"]
+
+        if revise:
+            self.ctx.revision_cycle += 1
+            self.ctx.current_state = PipelineState.REVISING
+            report["effective_verdict"] = "REVISE"
+            driving = pre_result.revisable_failures
+            targets = ", ".join(
+                a for a, text in report["revision_instructions"].items() if text
+            )
+            summary = "; ".join(f"{f.check_id}: {f.message}" for f in driving)
+            self._log(
+                "Orchestrator",
+                f"Pre-Critic guard: revision cycle {self.ctx.revision_cycle} of "
+                f"{self.ctx.max_revision_cycles} re-runs {targets} for "
+                f"{', '.join(f.check_id for f in driving)}",
+            )
+            events.emit(
+                self.ctx,
+                "warning",
+                stage="CRITIQUING",
+                code="PRE_CRITIC_REVISE",
+                message=_one_line(
+                    f"Sent back to {targets} (revision {self.ctx.revision_cycle} "
+                    f"of {self.ctx.max_revision_cycles}): {summary}"
+                ),
+            )
+        else:
+            fatal = pre_result.fatal_failures
+            if fatal or report["overall_verdict"] == "ABORT":
+                code = "PRE_CRITIC_ABORT"
+                lead = (fatal or pre_result.revisable_failures)[0]
+                message = f"{lead.check_id}: {lead.message}"
+                self.ctx.errors.append(
+                    f"Pre-Critic guard issued ABORT: {pre_result.failures}"
+                )
+            else:
+                code = "PRE_CRITIC_UNRESOLVED"
+                lead = pre_result.revisable_failures[0]
+                used = f"{self.ctx.revision_cycle} of {self.ctx.max_revision_cycles}"
+                message = (
+                    f"{lead.check_id} was still failing when the revision "
+                    f"cycles ran out ({used} used): {lead.message}"
+                )
+                self.ctx.errors.append(
+                    f"Pre-Critic guard: {code} with {used} revision cycles "
+                    f"used: {pre_result.failures}"
+                )
+            report["overall_verdict"] = "ABORT"
+            report["effective_verdict"] = "ABORT"
+            report["stop_code"] = code
+            self.ctx.abort_info = _abort_record(
+                "CRITIQUING", code, message, checks=checks
+            )
+            events.emit(
+                self.ctx,
+                "error",
+                stage="CRITIQUING",
+                code=code,
+                message=self.ctx.abort_info["message"],
+            )
+            self.ctx.current_state = PipelineState.ABORTED
+            self._log("Orchestrator", f"Pre-Critic guard stopped the run [{code}]: {message}")
+
+        events.emit(
+            self.ctx,
+            "verdict",
+            stage="CRITIQUING",
+            cycle=self.ctx.revision_cycle,
+            plain=f"Automatic pre-review check: {verdict}",
+            critic_score=report.get("overall_quality_score"),
+            verdict=verdict,
+            unverified=False,
+            source="pre_critic",
+        )
+
     def _synthesize_pre_critic_report(self, pre_result: PreCriticResult) -> dict:
-        """Build a minimal review_report from pre-critic failures without an LLM call."""
-        verdict = "ABORT" if pre_result.has_critical else "REVISE"
+        """Build a minimal review_report from pre-critic failures without an LLM call.
+
+        ``overall_verdict`` is ABORT when any critical finding cannot be
+        fixed by a revision (or no revisable one names an agent the
+        cascade can re-run), otherwise REVISE; the caller turns a REVISE
+        with no cycles left into a stop.
+        """
+        order = list(self.task_template.get_agent_order())
+        driving = [
+            f for f in pre_result.revisable_failures if f.target_agent in order
+        ]
+        fatal = bool(pre_result.fatal_failures) or not driving
+        verdict = "ABORT" if fatal else "REVISE"
 
         def _issues_for(agent: str) -> list[dict]:
             return [
@@ -2726,8 +2826,9 @@ class Orchestrator:
                     "severity": f.severity,
                     "category": f.check_id,
                     "description": f.message,
-                    "recommendation": f.message,
+                    "recommendation": f.instruction,
                     "target_agent": agent,
+                    "revisable": bool(f.revisable),
                 }
                 for f in pre_result.failures
                 if f.target_agent == agent
@@ -2738,9 +2839,22 @@ class Orchestrator:
             "DataEngineer": None,
             "Analyst": None,
         }
-        for f in pre_result.failures:
-            if f.target_agent in ri and ri[f.target_agent] is None:
-                ri[f.target_agent] = f.message
+        if driving:
+            # The cascade re-runs the earliest targeted agent and every
+            # agent after it. Major findings ride along for agents that
+            # are re-run anyway; a major aimed further upstream must not
+            # widen the cascade -- the Critic sees it next cycle.
+            start = min(order.index(f.target_agent) for f in driving)
+            rerun = set(order[start:])
+            for agent in order:
+                items = [f for f in driving if f.target_agent == agent]
+                items += [
+                    f for f in pre_result.failures
+                    if f.severity == "major" and f.target_agent == agent
+                    and agent in rerun
+                ]
+                if items:
+                    ri[agent] = self._pre_critic_instruction_text(items)
 
         return {
             "overall_verdict": verdict,
@@ -2754,8 +2868,28 @@ class Orchestrator:
                 "issues": [],
             },
             "revision_instructions": ri,
+            "pre_critic_findings": [f.to_dict() for f in pre_result.failures],
             "_source": "pre_critic_short_circuit",
         }
+
+    def _pre_critic_instruction_text(self, items: list) -> str:
+        """One agent's revision instructions from the pre-review check."""
+        remaining = self.ctx.max_revision_cycles - self.ctx.revision_cycle - 1
+        lines = [
+            "The automatic pre-review check stopped this study before the "
+            "methods review. Items marked REQUIRED must be fixed: the check "
+            "runs again when this revision finishes, and "
+            + (
+                f"{remaining} more revision cycle(s) remain after this one."
+                if remaining > 0
+                else "this is the last revision cycle, so a REQUIRED item "
+                "still failing then stops the study with no paper."
+            ),
+        ]
+        for i, f in enumerate(items, 1):
+            tag = "REQUIRED" if f.severity == "critical" else "also fix"
+            lines.append(f"\n{i}. [{f.check_id}, {tag}] {f.instruction}")
+        return "\n".join(lines)
 
     def _save_checkpoint(self) -> None:
         """Persist the context atomically (D1).

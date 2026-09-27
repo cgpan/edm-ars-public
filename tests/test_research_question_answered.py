@@ -144,3 +144,74 @@ def test_the_check_runs_for_every_task_type(tmp_path) -> None:
         assert any(f.check_id == "pcc_07" for f in result.failures), (
             f"pcc_07 did not fire for {task_type}"
         )
+
+
+# ---------------------------------------------------------------------------
+# A record that says the test did not run is not the test
+# ---------------------------------------------------------------------------
+
+_ABOVE_AND_BEYOND = (
+    "Do ninth-grade non-cognitive factors predict college enrollment above "
+    "and beyond academic achievement and socioeconomic status?"
+)
+
+
+@pytest.mark.parametrize(
+    "status", ["skipped", "failed", "error", "not_run", "Skipped "],
+)
+def test_a_not_run_incremental_record_does_not_satisfy_it(status: str) -> None:
+    """run_incremental_validity returns {"status": "skipped", ...} when its
+    column lists match nothing. The key name used to count as evidence, so
+    the question's central test could be skipped and the paper written."""
+    failures = _run(
+        _ABOVE_AND_BEYOND,
+        {"incremental_validity": {"status": status,
+                                  "reason": "no focal column present"}},
+    )
+    assert [f.check_id for f in failures] == ["pcc_07"]
+
+
+def test_a_sentence_about_the_comparison_is_not_the_comparison() -> None:
+    failures = _run(
+        _ABOVE_AND_BEYOND,
+        {
+            "all_models": {"LogisticRegression": {"auc": 0.81}},
+            "warnings": ["incremental_validity was not computed"],
+            "errors": ["nested_model comparison raised ValueError"],
+        },
+    )
+    assert [f.check_id for f in failures] == ["pcc_07"]
+
+
+def test_a_computed_incremental_record_still_satisfies_it() -> None:
+    assert _run(
+        _ABOVE_AND_BEYOND,
+        {
+            "incremental_validity": {
+                "status": "ok", "baseline_auc": 0.78, "full_auc": 0.81,
+                "delta_auc": 0.03, "ci_lower": 0.01, "ci_upper": 0.05,
+            },
+            "warnings": [],
+        },
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("question", "results"),
+    [
+        ("Does the effect vary by sex?",
+         {"moderation_analysis": {"status": "skipped",
+                                  "reason": "moderator not in matrix"}}),
+        ("Is the model well calibrated?",
+         {"calibration": {"status": "skipped",
+                          "reason": "not applicable to regression"}}),
+    ],
+    ids=["moderation-descoped", "calibration-regression"],
+)
+def test_descoped_records_the_contract_allows_still_count(
+    question: str, results: dict
+) -> None:
+    """prediction-rigor-extensions lets moderation be recorded as skipped
+    and descoped, and the Analyst prompt tells regression runs to record
+    calibration as skipped. Only the incremental promise is strict."""
+    assert _run(question, results) == []
