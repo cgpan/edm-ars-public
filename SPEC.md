@@ -855,6 +855,7 @@ Run directory naming: `run_{YYYYMMDD_HHMMSS}` (e.g., `run_20260310_142300`).
 |---|---|
 | `data_report.validation_passed == false` | ABORT; log reason; return context |
 | `analytic_n < 1000` | ABORT; log reason; return context |
+| Prediction: after ENGINEERING, the outcome is a column of `train_X.csv` or `test_X.csv` (its name, the name `train_y.csv` gives it, or its name plus an encoded level) | One targeted DataEngineer retry naming the columns, before the Analyst runs. Still there after the retry (or after a DataEngineer revision): drop exactly those columns, nothing else, say so in `data_report.warnings`, `pipeline.log` and an `OUTCOME_REMOVED_FROM_PREDICTORS` warning event, and continue. An outcome column that reaches CRITIQUING is still pcc_01 (`PRE_CRITIC_ABORT`) |
 | `JSONDecodeError` from `parse_llm_json()` | Log error; set state to ABORTED; return context |
 | Subprocess `returncode != 0` | Log stderr; skip failed model; continue with remaining models |
 | SHAP computation timeout (600s) | Log timeout; skip SHAP for that model; note in `results.warnings` |

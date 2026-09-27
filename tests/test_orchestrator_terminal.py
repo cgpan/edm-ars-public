@@ -333,7 +333,7 @@ def test_small_sample_is_sample_too_small(tmp_path: Path) -> None:
 def test_contract_violation_after_retry_is_data_contract_failed(tmp_path: Path) -> None:
     orch = _orch(tmp_path, _config(tmp_path))
     _wire(orch)
-    orch._run_post_de_preflight = lambda: "treatment is not binary"  # type: ignore[method-assign]
+    orch._run_post_de_preflight = lambda **_kw: "treatment is not binary"  # type: ignore[method-assign]
 
     orch.run()
 

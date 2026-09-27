@@ -80,3 +80,30 @@ def test_the_executor_decodes_as_utf8_with_replacement(
     assert seen["env"]["PYTHONUTF8"] == "1"
     # A None stream is normalised, never handed to the retry prompt.
     assert result["stdout"] == "" and result["stderr"] == ""
+
+
+# ---------------------------------------------------------------------------
+# No __pycache__ in the study folder
+# ---------------------------------------------------------------------------
+
+
+def test_child_env_writes_no_bytecode() -> None:
+    assert child_env()["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert child_env({"OUTPUT_DIR": "/workspace"})["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
+def test_importing_a_helper_leaves_no_pycache_in_the_study_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's Mac test (round 2) found __pycache__/ in the study
+    folder: generated code imports analysis_helpers.py from it."""
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    (tmp_path / "analysis_helpers.py").write_text(
+        "def answer():\n    return 42\n", encoding="utf-8"
+    )
+    code = "import analysis_helpers\nprint(analysis_helpers.answer())\n"
+    result = SubprocessExecutor().run(code, output_dir=str(tmp_path), timeout_s=60)
+    assert result["returncode"] == 0, result["stderr"]
+    assert "42" in result["stdout"]
+    assert not (tmp_path / "__pycache__").exists()
+

@@ -144,6 +144,53 @@ def llm_stages(config: dict) -> list[str]:
     return stages
 
 
+#: Set by the edmars app for every study it starts (edmars/runner.py).
+EDMARS_RUN_ID_ENV = "EDMARS_RUN_ID"
+
+
+def started_by_edmars() -> bool:
+    """True inside a study the edmars app started."""
+    return bool(os.environ.get(EDMARS_RUN_ID_ENV, "").strip())
+
+
+def _quoted(path: str) -> str:
+    return f'"{path}"' if any(c.isspace() for c in path) else path
+
+
+def pip_install_command(args: str) -> str:
+    """A command that installs ``args`` into the Python running EDM-ARS.
+
+    ``python -m pip`` alone fails in a virtual environment built by uv,
+    which has no pip unless asked for one: the edmars installer builds
+    such a venv, and on the owner's Mac its Python said "No module named
+    pip". The uv form names the interpreter, so it installs into the same
+    environment. The interpreter is written in full, and quoted when the
+    path has a space ("Application Support" on macOS), so the command can
+    be pasted as it is.
+    """
+    py = _quoted(sys.executable)
+    return (
+        f"{py} -m pip install {args} (or, if that Python has no pip: "
+        f"uv pip install --python {py} {args})"
+    )
+
+
+def lsar_install_fix(root: str) -> str:
+    """How to install LSAR's requirements for the Python running EDM-ARS.
+
+    A study the edmars app started runs in the app's own Python, which
+    ``edmars setup reviewer`` installs into; anything else gets a command
+    that works whether that Python has pip or was built by uv.
+    """
+    if started_by_edmars():
+        return "Run `edmars setup reviewer`."
+    requirements = _quoted(os.path.join(root, "requirements.txt"))
+    return (
+        "Install LSAR's requirements into the Python that runs EDM-ARS: "
+        + pip_install_command(f"-r {requirements}")
+    )
+
+
 def _set_key_fix(env_var: str) -> str:
     return (
         f"Put the line {env_var}=<your key> in a file named .env in the "
@@ -199,7 +246,7 @@ def _check_provider_keys(config: dict) -> list[Finding]:
                 "SDK_MISSING", FAIL,
                 f"The {provider} provider needs the Python package "
                 f"'{sdk}', which is not installed.",
-                f"Install it: {Path(sys.executable).name} -m pip install {sdk}",
+                f"Install it: {pip_install_command(sdk)}",
             ))
     return findings
 
@@ -460,9 +507,7 @@ def _check_lsar(config: dict) -> list[Finding]:
             "LSAR_IMPORT_FAILED", WARN,
             f"LSAR at {root} could not be imported ({error}); the review "
             "gate will not run.",
-            f"Install LSAR's requirements into this Python: "
-            f"{Path(sys.executable).name} -m pip install -r "
-            f"{os.path.join(root, 'requirements.txt')}",
+            lsar_install_fix(root),
         ))
     if not os.environ.get("DEEPSEEK_API_KEY"):
         findings.append(Finding(

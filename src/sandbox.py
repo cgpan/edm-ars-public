@@ -174,6 +174,10 @@ def child_env(
       wrappers run inside the child and never read config, so the setting
       only reaches ``r_bridge.find_rscript`` through the environment. An
       operator's own EDM_ARS_RSCRIPT wins over the config value.
+    * No bytecode files. The child runs in the study folder and imports
+      ``analysis_helpers.py`` from it, so every study folder a user opened
+      held a ``__pycache__/`` of compiled helpers (the owner's Mac test,
+      round 2) that belongs to no step and that nobody asked for.
 
     Rscript, started by the bridge from inside the child, inherits all of
     this -- including the missing credentials.
@@ -181,6 +185,7 @@ def child_env(
     env = blas_thread_env(dict(base) if base is not None else None)
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     if rscript_path and not env.get("EDM_ARS_RSCRIPT", "").strip():
         env["EDM_ARS_RSCRIPT"] = str(rscript_path)
     return env

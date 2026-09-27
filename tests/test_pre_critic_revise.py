@@ -108,7 +108,7 @@ def _stage_study(
     *,
     revised_incremental: Any = _INCREMENTAL_OK,
     first_incremental: Any = None,
-    leak: bool = False,
+    leak: str = "",
     question: str = _QUESTION,
 ) -> tuple[dict[str, int], list[str | None]]:
     """Wire the stub agents for the observed study.
@@ -116,7 +116,9 @@ def _stage_study(
     The first analysis records ``first_incremental`` (None: no record). A
     revision records ``revised_incremental`` (None: adds nothing).
     ``_NULL_WITH_WARNING`` for either writes a null record and a failure
-    warning. ``leak`` writes the outcome into train_X.csv.
+    warning. ``leak`` writes the outcome into train_X.csv: "de" in every
+    data preparation, "analysis" during the analysis, after the check that
+    follows data preparation has run.
     """
     calls = _wire(orch, review=_PASS_REVIEW)
     out = orch.ctx.output_dir
@@ -132,16 +134,14 @@ def _stage_study(
         Path(out, "data_report.json").write_text(
             json.dumps(_BINARY_REPORT), encoding="utf-8"
         )
-        headers = ["X1TXMTSCOR", "X1SES", "X1MTHID"]
-        if leak:
-            headers.append("X4EVRATNDCLG")
-        with open(Path(out, "train_X.csv"), "w", newline="", encoding="utf-8") as fh:
-            csv.writer(fh).writerows([headers, ["1"] * len(headers)])
+        _write_train_x(out, leak == "de")
         return copy.deepcopy(_BINARY_REPORT)
 
     def analyst(revision_instructions: str | None = None, **_kw: Any) -> dict:
         calls["analyst"] += 1
         instructions.append(revision_instructions)
+        if leak == "analysis":
+            _write_train_x(out, True)
         results = copy.deepcopy(_RESULTS)
         record = revised_incremental if revision_instructions else first_incremental
         if record is _NULL_WITH_WARNING:
@@ -158,6 +158,14 @@ def _stage_study(
     orch.data_engineer.run = de
     orch.analyst.run = analyst
     return calls, instructions
+
+
+def _write_train_x(out: str, leak: bool) -> None:
+    headers = ["X1TXMTSCOR", "X1SES", "X1MTHID"]
+    if leak:
+        headers.append("X4EVRATNDCLG")
+    with open(Path(out, "train_X.csv"), "w", newline="", encoding="utf-8") as fh:
+        csv.writer(fh).writerows([headers, ["1"] * len(headers)])
 
 
 def _cp(out: Path) -> dict:
@@ -290,8 +298,11 @@ def test_a_check_that_says_nothing_still_stops_the_run() -> None:
     ids=["next-to-a-revisable-finding", "alone"],
 )
 def test_confirmed_leakage_still_aborts(tmp_path: Path, question: str) -> None:
+    """An outcome column that reaches the review stops the study. Here it
+    was written after the outcome check that follows data preparation had
+    run and found none, and the message says so."""
     orch = _orch(tmp_path, _config(tmp_path))
-    calls, _ = _stage_study(orch, leak=True, question=question)
+    calls, _ = _stage_study(orch, leak="analysis", question=question)
 
     assert orch.run().current_state == PipelineState.ABORTED
     assert calls["analyst"] == 1 and calls["critic"] == 0 and calls["writer"] == 0
@@ -300,6 +311,10 @@ def test_confirmed_leakage_still_aborts(tmp_path: Path, question: str) -> None:
     assert abort["code"] == "PRE_CRITIC_ABORT"
     assert abort["resumable"] is False
     assert abort["message"].startswith("pcc_01: Outcome variable 'X4EVRATNDCLG'")
+    assert (
+        "ran after data preparation and found no outcome column"
+        in abort["message"]
+    )
     ids = {c["check_id"]: c["revisable"] for c in abort["checks"]}
     assert ids["pcc_01"] is False
     if question == _QUESTION:
