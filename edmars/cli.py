@@ -402,14 +402,14 @@ def _after_start(run_dir: Path, watch: bool) -> None:
     _watch_then_results(run_dir)
 
 
-def _pipeline_check(settings: dict[str, Any], plan: Any) -> None:
+def _pipeline_check(settings: dict[str, Any], plan: Any) -> list[Any]:
     """Run the pipeline's own start-up check; stop the command if it fails.
 
     The feasibility check asks "can this question be answered with this
     data?"; this one asks "would the pipeline start?" (keys, models, the
     data file, R, the reviewer), using the exact config and environment a
     launch uses, so a study that would stop in its first second never
-    gets a folder.
+    gets a folder. Returns its checks when the study may start.
     """
     runner = _module("runner")
     with ui.status("Checking that the pipeline can start this study"):
@@ -421,6 +421,27 @@ def _pipeline_check(settings: dict[str, Any], plan: Any) -> None:
     if failed:
         ui.fail("The study was not started: fix the problems above, then try again.")
         raise typer.Exit(1)
+    return list(checks)
+
+
+#: What the card says when the pipeline's pre-start check found that the
+#: review gate will not run; its warning, printed just above, has the details.
+_REVIEW_OFF_BY_PREFLIGHT = "The check before the start could not load LSAR (see the warning above)."
+
+
+def _review_blocked_by(checks: list[Any], plan: Any) -> str | None:
+    """Why the review the study asks for will not run, from the pre-start check.
+
+    On the Mac test the check warned "LSAR ... could not be imported ...;
+    the review gate will not run", and the card printed right after it
+    still said "Review: automated peer review (LSAR) on".
+    """
+    if not getattr(plan, "review", False):
+        return None
+    codes = getattr(_module("runner"), "REVIEW_OFF_CODES", frozenset())
+    if any(getattr(check, "code", None) in codes for check in checks):
+        return _REVIEW_OFF_BY_PREFLIGHT
+    return None
 
 
 def _launch(settings: dict[str, Any], plan: Any, *, watch: bool) -> None:
@@ -453,9 +474,9 @@ def _preflight_confirm_launch(settings: dict[str, Any], plan: Any, *, yes: bool,
     if study.blocking(checks):
         ui.fail("This study cannot start until the problems above are fixed.")
         raise typer.Exit(1)
-    _pipeline_check(settings, plan)
+    blocked = _review_blocked_by(_pipeline_check(settings, plan), plan)
 
-    ui.panel("Ready to start", study.confirmation_card(plan, settings))
+    ui.panel("Ready to start", study.confirmation_card(plan, settings, review_blocked=blocked))
     if not yes:
         # Starting a study spends money on the user's AI account, so it is
         # never started on a default answer: without a terminal, --yes is
@@ -741,7 +762,12 @@ def new_cmd(
     if plan is None:
         ui.info("No study was started.")
         raise typer.Exit(0)
-    _pipeline_check(settings, plan)
+    if _review_blocked_by(_pipeline_check(settings, plan), plan):
+        # `edmars new` shows its card before this check. The card already
+        # says so when LSAR's files or packages are missing; a problem only
+        # the import finds is said here, before the study starts.
+        ui.warn("The automated peer review will not run for this study (see the warning above); "
+                "the study goes ahead without it.")
     _launch(settings, plan, watch=not no_watch)
 
 

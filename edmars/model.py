@@ -75,13 +75,16 @@ class Check:
 
     ``detail`` is a plain-language sentence for a non-programmer; ``fix``
     is the exact thing to do next (often a command) when the status is
-    ``warn`` or ``fail``.
+    ``warn`` or ``fail``. ``code`` is the pipeline's own finding code
+    (``LSAR_IMPORT_FAILED``) when the check came from its pre-start check,
+    so a screen can act on the finding without parsing the sentence.
     """
 
     name: str
     status: CheckStatus
     detail: str
     fix: str | None = None
+    code: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in CHECK_STATUSES:

@@ -561,6 +561,12 @@ _FINDING_FIXES = {
 }
 
 
+#: Findings after which the pipeline skips the review gate ("the review
+#: gate will not run"): a study that asked for the review goes ahead
+#: without one, and the confirmation card has to say so.
+REVIEW_OFF_CODES = frozenset({"LSAR_NOT_FOUND", "LSAR_IMPORT_FAILED"})
+
+
 #: Provider ids as people know them.
 _PROVIDER_NAMES = {
     "deepseek": "DeepSeek",
@@ -684,6 +690,7 @@ def pipeline_check(settings: dict[str, Any], plan: "StudyPlan", *,
             severity,
             edsecrets.redact(_plain_finding(code, str(item.get("message") or code))),
             edsecrets.redact(fix) or None,
+            code=code or None,
         ))
     if not checks:
         checks.append(Check("Pipeline check", "ok", "The pipeline's own start-up check passed"))
@@ -1202,6 +1209,7 @@ def latest_run(settings: dict[str, Any]) -> Path | None:
 
 
 __all__ = [
+    "REVIEW_OFF_CODES",
     "RunnerError",
     "active_run",
     "build_argv",
