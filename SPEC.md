@@ -529,6 +529,27 @@ CRITIQUING
     └── ABORT ──────────────────────────────────────► ABORTED
 ```
 
+**Pre-Critic checks.** Each CRITIQUING cycle first runs the deterministic
+checks in `src/pre_critic_checks.py`, with no LLM call. When none is critical,
+the Critic runs as above. When one is critical, the Critic is skipped for that
+cycle:
+
+- A finding no revision can fix (the outcome in the predictor matrix, a data
+  report with `validation_passed: false`) → ABORTED with `PRE_CRITIC_ABORT`.
+- When every critical finding is revisable and names an agent the cascade can
+  re-run (for example a comparison the research question promises that the
+  analysis never ran), and cycles remain → REVISING that agent (§5.3), then
+  CRITIQUING again, where the checks run again. A `PRE_CRITIC_REVISE` warning
+  event names the agent.
+- A revisable finding still failing when the cycles run out → ABORTED with
+  `PRE_CRITIC_UNRESOLVED`. No paper is written: unlike an unresolved Critic
+  REVISE, this does not fall through to WRITING (UNVERIFIED). A revision
+  ordered by these checks that raises an error also stops the run rather than
+  writing UNVERIFIED.
+
+Both codes are not resumable. `run_status.json` carries the findings in
+`abort.checks`.
+
 ### 5.2 Checkpointing
 
 After each stage completes successfully, serialize the full `PipelineContext` to
@@ -833,6 +854,9 @@ Run directory naming: `run_{YYYYMMDD_HHMMSS}` (e.g., `run_20260310_142300`).
 | S2 API error or non-200 response | Log warning; set `literature_context = null`; Writer uses placeholders |
 | Max revision cycles reached without PASS | Set UNVERIFIED flag; proceed to WRITING |
 | Critic verdict = ABORT | Set state to ABORTED; return context with full Critic report |
+| Critical pre-Critic finding no revision can fix | Skip the Critic; ABORTED with `PRE_CRITIC_ABORT` (not resumable) |
+| Critical pre-Critic finding a revision can fix | Skip the Critic; REVISE the target agent while cycles remain (§5.1) |
+| Revisable pre-Critic finding unresolved after max revision cycles | ABORTED with `PRE_CRITIC_UNRESOLVED` (not resumable); no paper is written |
 | Checkpoint found on startup | Load checkpoint; resume from `current_state`; skip completed stages |
 | AUC > 0.95 | Critic automatically flags as suspicious (potential leakage) |
 | Docker daemon not reachable (`sandbox.enabled: true`) | Emit RuntimeWarning; fall back to SubprocessExecutor; log warning |

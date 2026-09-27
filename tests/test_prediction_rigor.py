@@ -139,6 +139,49 @@ class TestRigorSkillWiring:
         assert "run_moderation_analysis" in rendered
         assert "group_shap_by_parent" in rendered
 
+    def test_the_analyst_is_taught_the_incremental_validity_helper(self) -> None:
+        """pcc_07 stopped a real study whose question said "ABOVE AND
+        BEYOND academic achievement and socioeconomic status": the Analyst
+        ran no nested comparison. run_incremental_validity was named in no
+        skill or prompt, and the one Analyst-side mention of "above and
+        beyond" filed it under moderation, a different question."""
+        import inspect
+        import re
+
+        from src.analysis_helpers import run_incremental_validity
+        from src.orchestrator import _resolve_skill_caps
+        from src.skills import SkillRegistry
+        from src.skills.composer import format_skills_for_prompt
+
+        registry = SkillRegistry(str(PROJECT_ROOT / "skills"))
+        skills = registry.match_and_compose(
+            task_type="prediction",
+            dataset="hsls09_public",
+            stage="Analyst",
+            context=(
+                "non-cognitive factors predict college enrollment above and "
+                "beyond academic achievement and socioeconomic status"
+            ),
+            top_k_per_layer=_resolve_skill_caps("prediction"),
+        )
+        rendered = format_skills_for_prompt(skills)
+        assert "analysis_helpers.run_incremental_validity(" in rendered
+        assert 'results["incremental_validity"]' in rendered
+
+        body = next(s for s in skills if s.name == "prediction-rigor-extensions").body
+        documented = re.search(
+            r"#   run_incremental_validity\((.*?)\)\n", body, re.DOTALL
+        )
+        assert documented, "the skill must document the helper's signature"
+        params = [
+            part.replace("#", "").strip().split("=")[0]
+            for part in documented.group(1).split(",")
+        ]
+        assert params == list(inspect.signature(run_incremental_validity).parameters)
+
+        moderation = body.split("## 1. ", 1)[1].split("## 1b.", 1)[0]
+        assert '("above and beyond"' not in moderation
+
     def test_els_conventions_carries_cluster_recipe(self) -> None:
         from src.skills import SkillRegistry
 
