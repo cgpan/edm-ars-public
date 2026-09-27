@@ -656,7 +656,15 @@ def check_latex(settings: dict[str, Any], *, deep: bool = False) -> list["Check"
                                     "Run `edmars setup pdf` to turn it on."))
         return checks
     if deep:
-        checks.extend(toolchain.test_compile(timeout_s=120, settings=settings))
+        if any(str(getattr(chk, "status", "")) == "fail" for chk in checks):
+            # The test documents need what the failing line above says is
+            # missing, so they could only fail for the same reason and
+            # count one problem two or three times (no LaTeX made plain
+            # doctor say 1 problem and --deep say 3).
+            checks.append(make_check("PDF test", "info",
+                                     "Not run: the LaTeX problem above has to be fixed first"))
+        else:
+            checks.extend(toolchain.test_compile(timeout_s=120, settings=settings))
     return checks
 
 

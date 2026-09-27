@@ -260,6 +260,25 @@ def test_latex_turned_off_is_a_warning_not_a_failure(fx: Fakes) -> None:
     assert statuses(checks, "PDF typesetting") == ["warn"]
 
 
+def test_missing_latex_is_one_problem_with_and_without_deep(fx: Fakes) -> None:
+    # Without LaTeX, plain doctor counted 1 problem and --deep 3: the two
+    # test documents failed for the same reason the line above gave.
+    from edmars.doctor import run_checks, summarize
+
+    settings = healthy(fx)
+    fx.toolchain.latex = [Check("PDF maker (LaTeX)", "fail", "No LaTeX installation was found.")]
+    fx.toolchain.compile = [Check("PDF test: conference paper", "fail", "No LaTeX installation was found."),
+                            Check("PDF test: journal paper", "fail", "No LaTeX installation was found.")]
+    plain, deep = run_checks(settings), run_checks(settings, deep=True)
+    assert summarize(plain)["fail"] == summarize(deep)["fail"] == 1
+    assert fx.toolchain.compile_calls == 0
+    assert statuses(deep, "PDF test") == ["info"]
+
+    fx.toolchain.latex = [Check("PDF maker (LaTeX)", "ok", "pdflatex found")]
+    run_checks(settings, deep=True)
+    assert fx.toolchain.compile_calls == 1  # a working LaTeX is still test-compiled
+
+
 def test_r_is_optional(fx: Fakes) -> None:
     from edmars.doctor import run_checks
 

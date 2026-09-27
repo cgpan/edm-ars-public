@@ -308,6 +308,44 @@ def _read_install_record(home: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _missing_modules() -> dict[str, str]:
+    """LSAR's run-time imports this Python cannot find: module -> distribution."""
+    return {module: dist for module, dist in RUNTIME_MODULES.items()
+            if importlib.util.find_spec(module) is None}
+
+
+def _packages_missing_text(missing: Mapping[str, str]) -> str:
+    return ("LSAR's Python packages are missing (" + ", ".join(missing.values())
+            + "), so every review is skipped.")
+
+
+def unavailable_reason(settings: Mapping[str, Any]) -> str | None:
+    """Why LSAR cannot review on this computer, or None when nothing is found.
+
+    The quick part of :func:`checks`: LSAR's folder, the files the review
+    gate reads, and whether this Python has LSAR's run-time packages. It
+    starts nothing, so a screen can ask it before showing a study's card;
+    the pipeline's own pre-start check, which imports LSAR, has the last
+    word.
+    """
+    home_value = _get(settings, "lsar.home")
+    if not home_value:
+        return "LSAR is not installed."
+    problems = _file_problems(Path(str(home_value)))
+    if problems:
+        return " ".join(problems)
+    missing = _missing_modules()
+    if missing:
+        return _packages_missing_text(missing)
+    return None
+
+
+def _same_missing_package(problem: str, missing: Mapping[str, str]) -> bool:
+    """True when a :func:`verify` problem names a package already reported missing."""
+    match = re.match(r"LSAR needs the Python package '([^']+)'", problem)
+    return match is not None and match.group(1) in missing
+
+
 def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
     """Is LSAR ready to review? ``deep`` also imports it in a child Python.
 
@@ -316,6 +354,13 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
     reviewer is switched on: callers ask this before turning it on, and
     "no fail" must mean "ready". (The DeepSeek key is the caller's check:
     the doctor and the wizard both look it up in the key store.)
+
+    A reviewer that cannot run is ONE failing line under the reviewer's
+    own name, never "on" followed by separate failures: the Mac test's
+    doctor listed "Automated reviewer (LSAR): on" next to "LSAR's Python
+    packages: Missing ...", and ``--deep`` counted the same missing
+    package a second time as "LSAR loads in Python". A package the quick
+    check already names is not repeated from the deep import check.
     """
     title = "Automated reviewer (LSAR)"
     enabled = bool(_get(settings, "lsar.enabled"))
@@ -332,19 +377,27 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
 
     ref = str(_get(settings, "lsar.ref") or LSAR_REF)
     state = "on" if enabled else "installed but turned off"
-    out = [Check(title, "ok", f"{state}; version {ref[:12]} at {home}")]
+    missing = _missing_modules()
+    deep_problems = verify(home) if deep else []
+    retired = retired_model_stages(home)
+    retired_check = Check(
+        "LSAR model settings", "warn",
+        "LSAR's config.yaml sends these steps to a model id the provider no "
+        f"longer serves ({'; '.join(retired)}). Those steps fail quietly and the "
+        "related-work part of each review is thinner than it should be.",
+        fix="Update LSAR when a fixed version is published: edmars setup reviewer",
+    )
 
-    missing = [dist for module, dist in RUNTIME_MODULES.items()
-               if importlib.util.find_spec(module) is None]
+    if missing or deep_problems:
+        reasons = [_packages_missing_text(missing)] if missing else []
+        reasons += [p for p in deep_problems if not _same_missing_package(p, missing)]
+        lead = "Turned on, but not ready" if enabled else "Installed (turned off), but not ready"
+        out = [Check(title, "fail", f"{lead}: " + " ".join(reasons), fix="edmars setup reviewer")]
+        return out + ([retired_check] if retired else [])
+
+    out = [Check(title, "ok", f"{state}; version {ref[:12]} at {home}")]
     unmet = _read_install_record(home).get("unmet_pins") or []
-    if missing:
-        out.append(Check(
-            "LSAR's Python packages", "fail",
-            "Missing: " + ", ".join(missing) + ". Without them every review is "
-            "skipped.",
-            fix="edmars setup reviewer",
-        ))
-    elif unmet:
+    if unmet:
         out.append(Check(
             "LSAR's Python packages", "warn",
             "Installed, but these were kept at versions outside LSAR's own pins so "
@@ -352,25 +405,11 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
         ))
     else:
         out.append(Check("LSAR's Python packages", "ok", "All present."))
-
-    retired = retired_model_stages(home)
     if retired:
-        out.append(Check(
-            "LSAR model settings", "warn",
-            "LSAR's config.yaml sends these steps to a model id the provider no "
-            f"longer serves ({'; '.join(retired)}). Those steps fail quietly and the "
-            "related-work part of each review is thinner than it should be.",
-            fix="Update LSAR when a fixed version is published: edmars setup reviewer",
-        ))
-
+        out.append(retired_check)
     if deep:
-        deep_problems = verify(home)
-        if deep_problems:
-            out.append(Check("LSAR loads in Python", "fail", " ".join(deep_problems),
-                             fix="edmars setup reviewer"))
-        else:
-            out.append(Check("LSAR loads in Python", "ok",
-                             "lsar.pipeline and the PDF layout model load in a fresh Python."))
+        out.append(Check("LSAR loads in Python", "ok",
+                         "lsar.pipeline and the PDF layout model load in a fresh Python."))
     return out
 
 

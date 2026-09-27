@@ -399,6 +399,7 @@ def test_checks_report_retired_models_and_deep_import(
     monkeypatch.setattr(proc, "run", FakePip(real_run))
     lsar.install(settings_dict, session=serve_bytes(_targz(_tree())))
     settings_dict["lsar"]["enabled"] = True
+    _all_packages_present(monkeypatch)
     by_name = {c.name: c for c in lsar.checks(settings_dict, deep=True)}
     assert by_name["Automated reviewer (LSAR)"].status == "ok"
     assert COMMIT[:12] in by_name["Automated reviewer (LSAR)"].detail
@@ -410,8 +411,73 @@ def test_checks_report_retired_models_and_deep_import(
 
     monkeypatch.setattr(lsar.importlib.util, "find_spec",
                         lambda name, *a: None if name == "tenacity" else object())
-    packages = {c.name: c for c in lsar.checks(settings_dict)}["LSAR's Python packages"]
-    assert packages.status == "fail" and "tenacity" in packages.detail
+    headline = {c.name: c for c in lsar.checks(settings_dict)}["Automated reviewer (LSAR)"]
+    assert headline.status == "fail" and "tenacity" in headline.detail
+
+
+MAC_MISSING = ("tenacity", "pymupdf4llm", "arxiv")
+MAC_IMPORT_ERROR = ("LSAR needs the Python package 'tenacity', which is not installed "
+                    "for the Python that runs EDM-ARS.")
+
+
+def _all_packages_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The quick check sees every LSAR package, whatever this Python has."""
+    real = lsar.importlib.util.find_spec
+    monkeypatch.setattr(lsar.importlib.util, "find_spec",
+                        lambda name, *a: object() if name in lsar.RUNTIME_MODULES else real(name, *a))
+
+
+def _installed_and_on(monkeypatch: pytest.MonkeyPatch, real_run: Any) -> dict[str, Any]:
+    settings_dict = _load_settings()
+    monkeypatch.setattr(proc, "run", FakePip(real_run))
+    lsar.install(settings_dict, session=serve_bytes(_targz(_tree())))
+    settings_dict["lsar"]["enabled"] = True
+    _all_packages_present(monkeypatch)
+    return settings_dict
+
+
+def test_a_reviewer_whose_packages_are_gone_is_one_problem_not_on_plus_failures(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any
+) -> None:
+    # The Mac test after an update: doctor said "Automated reviewer (LSAR):
+    # on" and "[x] LSAR's Python packages: Missing: tenacity, pymupdf4llm,
+    # arxiv"; --deep added "[x] LSAR loads in Python" for the same package,
+    # so plain doctor counted 1 problem and --deep 2.
+    settings_dict = _installed_and_on(monkeypatch, real_run)
+    monkeypatch.setattr(lsar.importlib.util, "find_spec",
+                        lambda name, *a: None if name in MAC_MISSING else object())
+    monkeypatch.setattr(lsar, "verify", lambda home: [MAC_IMPORT_ERROR])
+    for deep in (False, True):
+        found = lsar.checks(settings_dict, deep=deep)
+        failing = [c for c in found if c.status == "fail"]
+        assert len(failing) == 1, found
+        [line] = failing
+        assert line.name == "Automated reviewer (LSAR)"
+        assert line.detail.startswith("Turned on, but not ready: LSAR's Python packages are "
+                                      "missing (tenacity, pymupdf4llm, arxiv)")
+        assert "every review is skipped" in line.detail
+        assert line.detail.count("tenacity") == 1  # the import check does not repeat it
+        assert line.fix == "edmars setup reviewer"
+        assert not any(c.status == "ok" for c in found)  # never "on" beside the failure
+        assert {c.name for c in found} <= {"Automated reviewer (LSAR)", "LSAR model settings"}
+    assert lsar.unavailable_reason(settings_dict) == (
+        "LSAR's Python packages are missing (tenacity, pymupdf4llm, arxiv), so every "
+        "review is skipped.")
+
+
+def test_a_problem_only_the_deep_check_finds_becomes_the_reviewers_own_line(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any
+) -> None:
+    settings_dict = _installed_and_on(monkeypatch, real_run)
+    settings_dict["lsar"]["enabled"] = False
+    dll = "The PDF layout model LSAR's scores were calibrated with cannot load (DLL load failed)."
+    monkeypatch.setattr(lsar, "verify", lambda home: [dll])
+    assert lsar.checks(settings_dict)[0].status == "ok"
+    found = lsar.checks(settings_dict, deep=True)
+    assert [c.status for c in found if c.status != "warn"] == ["fail"]
+    assert found[0].name == "Automated reviewer (LSAR)"
+    assert found[0].detail == "Installed (turned off), but not ready: " + dll
+    assert lsar.unavailable_reason(settings_dict) is None  # only the import finds it
 
 
 # ---------------------------------------------------------------------------
