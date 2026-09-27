@@ -159,8 +159,9 @@ class TestRetrievalStatus:
             result = agent._search_literature(None)
         status = result["retrieval_status"]
         assert status == {
-            "semantic_scholar": "ok", "arxiv": "disabled", "n_papers": 1,
-            "degraded": False, "n_semantic_scholar": 1, "n_arxiv": 0,
+            "semantic_scholar": "ok", "arxiv": "disabled", "openalex": "not_needed",
+            "n_papers": 1, "degraded": False, "n_semantic_scholar": 1, "n_arxiv": 0,
+            "n_openalex": 0,
         }
         assert not (tmp_path / "events.jsonl").exists() or not _events(tmp_path, "warning")
 

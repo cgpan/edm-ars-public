@@ -47,15 +47,20 @@ def _resp(status: int, text: str = "") -> MagicMock:
 
 
 class FakeHTTP:
-    """Scripted responses for arXiv; Semantic Scholar always 429."""
+    """Scripted responses for arXiv; Semantic Scholar always 429, and
+    OpenAlex (asked when arXiv does not answer) always 503."""
 
     def __init__(self, arxiv: list[Any]) -> None:
         self.arxiv = list(arxiv)
         self.arxiv_calls: list[dict[str, Any]] = []
+        self.openalex_calls = 0
 
     def __call__(self, url: str, **kwargs: Any) -> MagicMock:
         if "semanticscholar" in url:
             return _resp(429)
+        if "openalex" in url:
+            self.openalex_calls += 1
+            return _resp(503)
         self.arxiv_calls.append({"url": url, **kwargs})
         step = self.arxiv.pop(0)
         if isinstance(step, BaseException):

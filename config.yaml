@@ -270,6 +270,27 @@ arxiv:
   enabled: true
   max_results_per_query: 10    # papers per arXiv query (3 queries = up to 30 arXiv papers)
 
+# OpenAlex (openalex.org), a free index of scholarly works, searched with
+# the same words as arXiv. Since mid-September 2026 arXiv's front end has
+# refused (HTTP 406) every Python HTTP client on some computers, while
+# curl on the same computer gets through; OpenAlex stands in for it.
+#   when: arxiv_unavailable   only when every arXiv query was refused or
+#                             failed (not when arxiv.enabled is false)
+#   when: always              in every run, as a third source
+# Without a key OpenAlex allows about US$0.10 of requests a day (about
+# 100 searches; a run sends at most 3). An OPENALEX_API_KEY in the
+# environment raises that tenfold. No contact email is sent: OpenAlex
+# retired its mailto "polite pool" in February 2026.
+openalex:
+  enabled: true
+  when: arxiv_unavailable
+  max_results_per_query: 10    # works per OpenAlex query (at most 100)
+  request_delay_s: 1.0         # pause between OpenAlex queries
+  # title_and_abstract: match the words in titles and abstracts only.
+  # all: OpenAlex's search= parameter, which also matches full texts and
+  # returned far more off-topic works in a test. Same price.
+  search_in: title_and_abstract
+
 # Memory of earlier runs. After each run, its question, variables,
 # headline result and open questions are appended to `path` (a local
 # file). At the start of the next run that summary is included in the

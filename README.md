@@ -2,7 +2,8 @@
 
 A multi-agent pipeline that takes a curated dataset and a research question and
 produces a complete draft LaTeX manuscript: literature retrieved from Semantic
-Scholar and arXiv, an analytic sample built by generated code, a certified
+Scholar and arXiv (OpenAlex when arXiv does not answer), an analytic sample
+built by generated code, a certified
 estimator battery, an internal critique, and a written paper with real
 citations.
 
@@ -423,6 +424,7 @@ gitignored, and `.env.example` (which is tracked) holds only empty values.
 | `ANTHROPIC_API_KEY` | with `llm_provider: anthropic` | all agents |
 | `SEMANTIC_SCHOLAR_API_KEY` | optional, recommended | literature search; without it requests share an anonymous pool that is often rate-limited ([request a key](https://www.semanticscholar.org/product/api#api-key-form)) |
 | `CROSSREF_MAILTO` | optional | a contact email for Crossref citation checks |
+| `OPENALEX_API_KEY` | optional | OpenAlex, which is searched when arXiv does not answer; a free key raises its daily allowance from about 100 searches to about 1,000 ([get a key](https://openalex.org/settings/api)) |
 | `LSAR_HOME` | for the review gate | folder of your LSAR checkout |
 | `EDM_ARS_RSCRIPT` | if R is not found | full path to `Rscript` |
 

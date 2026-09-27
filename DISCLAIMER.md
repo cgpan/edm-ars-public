@@ -64,7 +64,7 @@ administrator account.
 
 - EDM-ARS sends requests to third-party services that **you** choose and pay
   for, such as DeepSeek, OpenAI, Anthropic or MiniMax, and to free services
-  such as Semantic Scholar, arXiv and Crossref. Their own terms, prices and
+  such as Semantic Scholar, arXiv, OpenAlex and Crossref. Their own terms, prices and
   privacy policies apply. Some providers process data outside your country;
   check whether your institution allows the provider you pick. See
   [PRIVACY.md](PRIVACY.md) for exactly what is sent.
@@ -77,7 +77,7 @@ administrator account.
   call cut off by a stop or a crash. The `cost_budget_usd` setting only logs
   a warning; it never stops a run. Set a spending limit with your provider.
 - EDM-ARS is not affiliated with, sponsored by or endorsed by DeepSeek,
-  OpenAI, Anthropic, MiniMax, Semantic Scholar, arXiv, Crossref or any other
+  OpenAI, Anthropic, MiniMax, Semantic Scholar, arXiv, OpenAlex, Crossref or any other
   service it connects to. Services and datasets can change or disappear at
   any time.
 

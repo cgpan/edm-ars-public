@@ -1324,3 +1324,61 @@ class TestSearchLiterature:
 
         log_msgs = [e["message"] for e in agent.ctx.log]
         assert any("Literature search merged" in m for m in log_msgs)
+
+
+class TestOneSetOfSearchWords:
+    """Semantic Scholar and arXiv each asked the model for search words:
+    the Mac study's run_cost.json counts five formulator calls, three for
+    candidate specs and two for words, and at temperature 0.7 the two
+    sources could search for different things."""
+
+    WORDS = ["college enrollment prediction", "noncognitive factors enrollment",
+             "fairness calibration subgroups"]
+
+    def _search(self, agent: ProblemFormulator, times: int = 1) -> dict[str, list[str]]:
+        sent: dict[str, list[str]] = {"s2": [], "arxiv": [], "openalex": []}
+
+        def fake_get(url: str, **kwargs: Any) -> MagicMock:
+            params = kwargs.get("params") or {}
+            if "semanticscholar" in url:
+                sent["s2"].append(params["query"])
+                return MagicMock(status_code=429)
+            if "arxiv" in url:
+                sent["arxiv"].append(params["search_query"].removeprefix("all:"))
+                return MagicMock(status_code=406)
+            if "openalex" in url:
+                sent["openalex"].append(params["filter"].split(":", 1)[1])
+                return MagicMock(status_code=503)
+            raise AssertionError(f"unexpected request to {url}")
+
+        with patch("requests.get", side_effect=fake_get), patch("time.sleep"):
+            for _ in range(times):
+                agent._search_literature("Which ninth-grade factors predict enrollment?")
+        return sent
+
+    def test_the_model_is_asked_once_and_every_source_gets_its_words(
+        self, tmp_path: Path
+    ) -> None:
+        agent = _make_agent(tmp_path)
+        agent.call_llm = MagicMock(return_value=json.dumps(self.WORDS))  # type: ignore[method-assign]
+        sent = self._search(agent)
+        assert agent.call_llm.call_count == 1
+        assert sorted(set(sent["s2"])) == sorted(self.WORDS)
+        assert sent["arxiv"] == self.WORDS[:1]  # refused, so the rest were not sent
+        assert sent["openalex"] == self.WORDS
+
+    def test_each_search_asks_afresh(self, tmp_path: Path) -> None:
+        # A revision that re-runs the formulator searches again; it must
+        # not reuse the words of the search before it.
+        agent = _make_agent(tmp_path)
+        agent.call_llm = MagicMock(return_value=json.dumps(self.WORDS))  # type: ignore[method-assign]
+        self._search(agent, times=2)
+        assert agent.call_llm.call_count == 2
+        assert agent._lit_query_memo is None
+
+    def test_a_direct_call_outside_a_search_asks_as_before(self, tmp_path: Path) -> None:
+        agent = _make_agent(tmp_path)
+        agent.call_llm = MagicMock(return_value=json.dumps(self.WORDS))  # type: ignore[method-assign]
+        assert agent._literature_queries("x") == self.WORDS
+        assert agent._literature_queries("x") == self.WORDS
+        assert agent.call_llm.call_count == 2
