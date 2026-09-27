@@ -369,3 +369,206 @@ def test_the_instruction_says_what_the_orchestrator_does_with_a_skip() -> None:
         types.SimpleNamespace(), "prediction",
     )
     assert "stops" not in descoped and "Limitations" in descoped
+
+
+# ---------------------------------------------------------------------------
+# Wordings of the incremental promise the fixed phrases missed
+# ---------------------------------------------------------------------------
+
+#: The owner's Mac, round 2 (2026-09-27), verbatim. None of the fixed
+#: phrases ("above and beyond", "over and above", "incremental valid",
+#: "incremental predictive", "beyond baseline") is in it.
+_ROUND_2_QUESTION = (
+    "Do ninth-grade non-cognitive factors (math/science identity, "
+    "self-efficacy, school belonging) improve prediction of college "
+    "enrollment by February 2016 beyond what baseline academic achievement "
+    "and socioeconomic status alone provide, and is the resulting model "
+    "equally calibrated across sex and SES subgroups in the full HSLS:09 "
+    "public sample?"
+)
+
+
+def test_the_round_2_question_commits_to_the_nested_comparison() -> None:
+    [failure] = [
+        f for f in _run(_ROUND_2_QUESTION, {"calibration": {"brier": 0.1}})
+        if "incremental" in f.message
+    ]
+    assert "'beyond what'" in failure.message
+    assert failure.revisable is True
+    assert (
+        '"baseline academic achievement and socioeconomic status"'
+        in failure.revision_instruction
+    )
+    assert _run(
+        _ROUND_2_QUESTION,
+        {"calibration": {"brier": 0.1},
+         "incremental_validity": {"status": "ok", "delta_auc": 0.02}},
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("question", "matched"),
+    [
+        ("Does X improve prediction of Y beyond prior achievement and SES?",
+         "beyond prior"),
+        ("Does the engagement block add predictive value beyond prior "
+         "achievement and SES?", "add predictive value"),
+        ("Does the engagement block add discriminative value beyond prior "
+         "achievement and SES?", "add discriminative value"),
+        ("Does the engagement block add held-out predictive value beyond the "
+         "prior-achievement + SES block?", "add held-out predictive value"),
+        ("Do protected attributes carry unique predictive signal beyond "
+         "academic and attitudinal factors alone?", "unique predictive signal"),
+        ("Do science identity and self-efficacy predict a STEM major beyond "
+         "what prior math achievement and SES explain?", "beyond what"),
+        ("Do non-cognitive factors predict Y over and beyond SES?",
+         "over and beyond"),
+        ("Do non-cognitive factors incrementally predict enrollment?",
+         "incrementally predict"),
+        ("What is the unique contribution of belonging to predicting GPA?",
+         "unique contribution"),
+        ("Does X predict Y net of prior achievement and SES?", "net of prior"),
+        ("Can self-efficacy predict STEM entry, controlling for prior "
+         "achievement and demographic factors?", "controlling for prior"),
+    ],
+    ids=["improve-prediction-beyond", "adds-predictive-value",
+         "adds-discriminative-value", "held-out-value", "unique-signal",
+         "beyond-what-explain", "over-and-beyond", "incrementally",
+         "unique-contribution", "net-of", "controlling-for"],
+)
+def test_other_wordings_of_the_promise_are_caught(
+    question: str, matched: str
+) -> None:
+    [failure] = _run(question, {"all_models": {"RF": {"auc": 0.8}}})
+    assert f"{matched!r}" in failure.message
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Which ninth-grade factors predict persistence beyond the first year "
+        "of college?",
+        "How accurately can early-warning indicators predict outcomes beyond "
+        "high school?",
+        "Does XGBoost improve prediction beyond a baseline logistic regression?",
+        "Does a stacking ensemble improve accuracy beyond traditional logistic "
+        "regression?",
+        "Which factors predict enrollment, and do the results extend beyond "
+        "prior research findings?",
+        "Do incremental gains in math achievement predict college enrollment?",
+        "Does the model predict enrollment accurately, adjusting for school "
+        "clustering?",
+        "Does the model's accuracy hold beyond the base year?",
+        "Which students are at risk of dropping out beyond ninth grade?",
+    ],
+    ids=["beyond-first-year", "beyond-high-school", "model-comparison",
+         "traditional-model", "prior-research", "incremental-gains",
+         "adjusting-for-clustering", "beyond-the-base-year",
+         "beyond-ninth-grade"],
+)
+def test_beyond_in_ordinary_prose_is_not_a_promise(question: str) -> None:
+    """A bare "beyond" names a time, a place or a model, not a baseline
+    block of predictors."""
+    assert _run(question, {"all_models": {"RF": {"auc": 0.8}}}) == []
+
+
+@pytest.mark.parametrize(
+    ("task_type", "question"),
+    [
+        ("causal_soo", "What is the effect of algebra in 8th grade on "
+         "11th-grade math, controlling for prior achievement and SES?"),
+        ("causal_soo", "Does X affect Y net of socioeconomic status?"),
+        ("psychometrics", "Do item parameters differ across groups beyond "
+         "what sampling error explains?"),
+        ("psychometrics", "Do added items provide incremental information "
+         "about math self-efficacy?"),
+    ],
+    ids=["causal-controlling-for", "causal-net-of", "psy-beyond-what",
+         "psy-incremental-information"],
+)
+def test_adjustment_language_outside_prediction_is_not_a_promise(
+    task_type: str, question: str
+) -> None:
+    """Only a prediction study reads these wordings as a nested comparison
+    of predictor blocks; the fixed phrases still apply to every type."""
+    ctx = types.SimpleNamespace(
+        research_spec={"research_question": question},
+        results_object={"estimates": {}},
+        data_report={},
+    )
+    result = PreCriticResult()
+    _check_research_question_is_answered(ctx, result, task_type=task_type)
+    assert result.failures == []
+
+
+def test_over_and_beyond_is_a_promise_for_every_task_type() -> None:
+    ctx = types.SimpleNamespace(
+        research_spec={"research_question": "Does X affect Y over and beyond SES?"},
+        results_object={"estimates": {}},
+        data_report={},
+    )
+    result = PreCriticResult()
+    _check_research_question_is_answered(ctx, result, task_type="causal_soo")
+    assert [f.check_id for f in result.failures] == ["pcc_07"]
+
+
+def test_no_fixture_question_is_misread() -> None:
+    """Every research question kept in runs/fixtures (causal, DiD, ITR and
+    psychometric studies) promises no nested comparison of predictor
+    blocks, and none may be read as one."""
+    import json
+    from pathlib import Path
+
+    fixtures = sorted(
+        (Path(__file__).resolve().parents[1] / "runs" / "fixtures").glob("*.json")
+    )
+    questions = []
+    for path in fixtures:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(spec, dict) and spec.get("research_question"):
+            questions.append(
+                (spec.get("task_type") or "prediction", spec["research_question"])
+            )
+    assert len(questions) >= 5
+    for task_type, question in questions:
+        ctx = types.SimpleNamespace(
+            research_spec={"research_question": question},
+            results_object={"all_models": {"RF": {"auc": 0.8}}},
+            data_report={},
+        )
+        result = PreCriticResult()
+        _check_research_question_is_answered(ctx, result, task_type=task_type)
+        assert not [f for f in result.failures if "incremental" in f.message], (
+            task_type, question
+        )
+
+
+@pytest.mark.parametrize(
+    ("question", "phrase", "baseline"),
+    [
+        (_ROUND_2_QUESTION, "beyond what",
+         "baseline academic achievement and socioeconomic status"),
+        ("Do the scales predict Y beyond what 9th-grade achievement and SES "
+         "already explain?", "beyond what", "9th-grade achievement and SES"),
+        ("Does X predict Y net of prior achievement and SES?", "net of prior",
+         "prior achievement and SES"),
+        ("Can X predict Y, after controlling for prior achievement and "
+         "demographic factors?", "controlling for prior",
+         "prior achievement and demographic factors"),
+        ("Does X add predictive value beyond prior achievement and SES for the "
+         "students who drop out?", "add predictive value",
+         "prior achievement and SES"),
+        ("Do the constructs predict Y above and beyond the contributions of "
+         "prior achievement and SES among U.S. high school students?",
+         "above and beyond", "prior achievement and SES"),
+        ("Does X predict Y over and beyond SES, and does it vary by sex?",
+         "over and beyond", "SES"),
+    ],
+    ids=["round-2", "already-explain", "net-of", "controlling-for",
+         "adds-value-then-beyond", "contributions-of-among", "over-and-beyond"],
+)
+def test_the_baseline_of_the_new_wordings_is_read(
+    question: str, phrase: str, baseline: str,
+) -> None:
+    """Round 2's baseline used to run on into "... alone provide"."""
+    assert _named_after(question, phrase) == baseline
