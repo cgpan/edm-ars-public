@@ -368,6 +368,52 @@ provide_openmp() {
     return 1
 }
 
+# installed_version DIR: the version an earlier run of this installer put
+# in DIR (the last line of versions.txt), or nothing.
+installed_version() {
+    iv_line=""
+    if [ -f "$1/versions.txt" ]; then
+        iv_line=$(tail -n 1 "$1/versions.txt" | tr -d '\r')
+    fi
+    case "$iv_line" in
+        '' | *[!0-9A-Za-z.+-]* | .*) ;;
+        *) printf '%s' "$iv_line" ;;
+    esac
+}
+
+# update_line OLD NEW: what installing NEW over OLD is, in one line; NEW
+# is empty while the latest release has not been looked up yet. Nothing
+# for a first install. (The Mac test's update replaced EDM-ARS 0.1.0
+# without a word about it.)
+update_line() {
+    if [ -z "$1" ]; then
+        return 0
+    elif [ -z "$2" ]; then
+        say "Updating EDM-ARS $1 to the latest release."
+    elif [ "$1" = "$2" ]; then
+        say "Reinstalling EDM-ARS $2 (it is already installed here)."
+    else
+        say "Updating EDM-ARS $1 -> $2."
+    fi
+}
+
+# after_install LAUNCHER FILE: the new command's own last step, `edmars
+# after-install`. venv-<version> was just built from scratch, so the
+# packages `edmars setup reviewer` put into the previous one are gone
+# (the Mac test's update left LSAR without tenacity, pymupdf4llm and
+# arxiv, and every review was skipped). The command reinstalls them when
+# the settings record an LSAR install, checks that LSAR loads, and says
+# whether setup was already done; being the new edmars, it finds the
+# settings where every other command does. Sets SETUP_STATE (none,
+# partial or done) and REVIEWER_STATE (none, ok, repaired or failed);
+# both are empty when the command could not answer.
+after_install() {
+    rm -f "$2"
+    "$1" after-install --plain --state-file "$2" || true
+    SETUP_STATE=$(sed -n 's/^setup=//p' "$2" 2>/dev/null | head -n 1) || SETUP_STATE=""
+    REVIEWER_STATE=$(sed -n 's/^reviewer=//p' "$2" 2>/dev/null | head -n 1) || REVIEWER_STATE=""
+}
+
 # --------------------------------------------------------------------------
 main() {
     YES=0
@@ -613,6 +659,10 @@ main() {
     esac
     if [ -z "$UV" ]; then PKG_SIZE="$PKG_SIZE, plus uv's download cache"; fi
     PATH_TARGETS_TEXT=$(printf '%s' "$PATH_TARGETS" | sed -e 's|^|~/|' -e 's| |, ~/|g')
+    # The version this folder already has, and the one the plan can name
+    # (empty until the latest release is looked up in step 4).
+    PREVIOUS=$(installed_version "$APP_BASE")
+    PLAN_VERSION=$VERSION
     say ""
     say "EDM-ARS installer"
     say "================="
@@ -625,6 +675,7 @@ main() {
     else
         say "EDM-ARS from:  $SOURCE_TEXT (${VERSION:-latest release})"
     fi
+    update_line "$PREVIOUS" "$PLAN_VERSION"
     say ""
     say "This will:"
     say "  1. Check this computer (system, free disk space, memory)."
@@ -655,7 +706,16 @@ main() {
         say "  7. Add $BIN_DIR to your PATH (your account only), in a marked block at"
         say "     the end of $PATH_TARGETS_TEXT."
     fi
-    if [ "$NO_ONBOARD" = 1 ]; then
+    if [ -n "$PREVIOUS" ]; then
+        say "  8. Check the edmars command, and put the automated reviewer's (LSAR's) Python"
+        say "     packages into the new environment if it is set up. Your settings, keys,"
+        if [ "$NO_ONBOARD" = 1 ]; then
+            say "     datasets and studies are kept."
+        else
+            say "     datasets and studies are kept; the setup wizard starts only if setup"
+            say "     was not finished."
+        fi
+    elif [ "$NO_ONBOARD" = 1 ]; then
         say "  8. Stop there (--no-onboard); run 'edmars setup' when you are ready."
     else
         say "  8. Start the setup wizard ('edmars setup')."
@@ -799,6 +859,7 @@ main() {
                 TAR_URL="$RELEASE_BASE/$TAR_NAME"
             fi
             say "Release found: EDM-ARS $VERSION"
+            if [ -z "$PLAN_VERSION" ]; then update_line "$PREVIOUS" "$VERSION"; fi
             TARBALL="$TMP_DIR/$TAR_NAME"
             fetch "$TAR_URL" "$TARBALL" || die "could not download $TAR_URL."
         fi
@@ -828,10 +889,6 @@ main() {
     APP_DIR="$APP_BASE/app/$VERSION"
     VENV="$APP_BASE/venv-$VERSION"
     VENV_PY="$VENV/bin/python"
-    PREVIOUS=""
-    if [ -f "$APP_BASE/versions.txt" ]; then
-        PREVIOUS=$(tail -n 1 "$APP_BASE/versions.txt")
-    fi
     if [ -e "$APP_DIR" ]; then
         rm -rf "$APP_DIR" || die "cannot replace $APP_DIR; close any running 'edmars' and try again."
     fi
@@ -907,8 +964,11 @@ main() {
     step "6/8" "Creating the edmars command"
     mkdir -p "$BIN_DIR" || die "cannot create $BIN_DIR."
     LAUNCHER="$BIN_DIR/edmars"
-    if [ -e "$LAUNCHER" ] && ! grep -qF "$LAUNCHER_MARK" "$LAUNCHER" 2>/dev/null; then
-        die "$LAUNCHER already exists and was not made by this installer; move it away or choose another folder with --bin-dir."
+    LAUNCHER_DONE="Created"
+    if [ -e "$LAUNCHER" ]; then
+        grep -qF "$LAUNCHER_MARK" "$LAUNCHER" 2>/dev/null \
+            || die "$LAUNCHER already exists and was not made by this installer; move it away or choose another folder with --bin-dir."
+        LAUNCHER_DONE="Updated"
     fi
     LAUNCHER_TMP="$BIN_DIR/.edmars.$$"
     # The "$@" and backquotes belong to the launcher, not to this script.
@@ -938,7 +998,7 @@ main() {
     } >"$LAUNCHER_TMP"
     chmod 755 "$LAUNCHER_TMP"
     mv -f "$LAUNCHER_TMP" "$LAUNCHER"
-    say "Created $LAUNCHER"
+    say "$LAUNCHER_DONE $LAUNCHER"
 
     # ---- 7. PATH ---------------------------------------------------------------
     PATH_JSON=""
@@ -1018,10 +1078,16 @@ main() {
         tail -n "$KEEP" "$APP_BASE/versions.txt" >"$TMP_DIR/versions.txt"
         mv -f "$TMP_DIR/versions.txt" "$APP_BASE/versions.txt"
     fi
-    if [ -n "$PREVIOUS" ] && [ "$PREVIOUS" != "$VERSION" ]; then
-        PREVIOUS_JSON=$(json_str "$PREVIOUS")
-    else
+    # previous_version is the version this install replaced, the same one
+    # when it was reinstalled (install_kind says which), and null for a
+    # first install. It was null for a reinstall, as if nothing had been
+    # there.
+    if [ -z "$PREVIOUS" ]; then
         PREVIOUS_JSON=null
+        INSTALL_KIND=new
+    else
+        PREVIOUS_JSON=$(json_str "$PREVIOUS")
+        if [ "$PREVIOUS" = "$VERSION" ]; then INSTALL_KIND=reinstall; else INSTALL_KIND=update; fi
     fi
     if [ "$UV_PRIVATE" = 1 ]; then UV_PRIVATE_JSON=true; else UV_PRIVATE_JSON=false; fi
     if [ -n "$OMP_LINK" ]; then OMP_LINK_JSON=$(json_str "$OMP_LINK"); else OMP_LINK_JSON=null; fi
@@ -1031,6 +1097,7 @@ main() {
   "installer": "install.sh",
   "version": $(json_str "$VERSION"),
   "previous_version": $PREVIOUS_JSON,
+  "install_kind": "$INSTALL_KIND",
   "installed_at": $(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)"),
   "source": $(json_str "$SOURCE_KIND"),
   "install_dir": $(json_str "$APP_BASE"),
@@ -1052,9 +1119,19 @@ EOF
     step "8/8" "Checking the edmars command"
     "$LAUNCHER" version \
         || die "the edmars command was created but did not run. Run '$LAUNCHER version' yourself to see the error."
+    after_install "$LAUNCHER" "$TMP_DIR/after-install.txt"
+    if [ -z "$SETUP_STATE" ]; then
+        warn "Could not check your settings and the automated reviewer (see above); 'edmars doctor' does."
+    fi
 
     say ""
-    say "EDM-ARS $VERSION is installed."
+    if [ -z "$PREVIOUS" ]; then
+        say "EDM-ARS $VERSION is installed."
+    elif [ "$PREVIOUS" = "$VERSION" ]; then
+        say "EDM-ARS $VERSION is installed again."
+    else
+        say "EDM-ARS $VERSION is installed (updated from $PREVIOUS)."
+    fi
     RUN_NOTE=""
     if [ -n "$PATH_LIST" ] || { [ "$PATH_READY" = 0 ] && [ "$PATH_MODIFIED" = true ]; }; then
         RUN_CMD="edmars"
@@ -1064,8 +1141,15 @@ EOF
     else
         RUN_CMD=$(shell_quote "$LAUNCHER")
     fi
-    if [ "$NO_ONBOARD" = 1 ]; then
-        say "Next, set it up:  $RUN_CMD setup$RUN_NOTE"
+    if [ "$SETUP_STATE" = "done" ]; then
+        say "Setup is already done; your settings, key, datasets and studies were kept."
+        say "To change a setting:  $RUN_CMD setup$RUN_NOTE"
+    elif [ "$NO_ONBOARD" = 1 ]; then
+        if [ "$SETUP_STATE" = "partial" ]; then
+            say "Your settings were kept, but setup is not finished. Next, finish it:  $RUN_CMD setup$RUN_NOTE"
+        else
+            say "Next, set it up:  $RUN_CMD setup$RUN_NOTE"
+        fi
     elif [ "$HAVE_TTY" = 1 ]; then
         say "Starting the setup wizard. You can leave it at any time and run 'edmars setup' later."
         "$LAUNCHER" setup </dev/tty || warn "Setup did not finish. Run 'edmars setup' any time to continue."
@@ -1074,6 +1158,12 @@ EOF
     fi
     say ""
     say "To use EDM-ARS, type:  $RUN_CMD$RUN_NOTE"
+    if [ "$REVIEWER_STATE" = "failed" ]; then
+        # Last, so it is not scrolled away: every review is skipped until then.
+        say ""
+        warn "The automated reviewer (LSAR) needs repair: run '$RUN_CMD setup reviewer'."
+        say "    Until then every automated review is skipped. The reason is given above."
+    fi
 }
 
 main "$@"

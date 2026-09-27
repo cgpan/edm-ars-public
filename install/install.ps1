@@ -309,6 +309,63 @@
         return ($lines -join "`n") + "`n"
     }
 
+    # The version an earlier run of this installer put in BASE (the last
+    # line of versions.txt), or ''.
+    function Get-InstalledVersion([string]$Base) {
+        $file = Join-Path $Base 'versions.txt'
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return '' }
+        $last = [string](Get-Content -LiteralPath $file | Where-Object { $_ } | Select-Object -Last 1)
+        $last = $last.Trim()
+        if ($last -match '^[0-9A-Za-z][0-9A-Za-z.+-]*$') { return $last }
+        return ''
+    }
+
+    # What installing NEW over OLD is, in one line; NEW is '' while the
+    # latest release has not been looked up yet. $null for a first
+    # install. (The Mac test's update replaced EDM-ARS 0.1.0 without a
+    # word about it.)
+    function Get-UpdateLine([string]$Old, [string]$New) {
+        if (-not $Old) { return $null }
+        if (-not $New) { return "Updating EDM-ARS $Old to the latest release." }
+        if ($Old -eq $New) { return "Reinstalling EDM-ARS $New (it is already installed here)." }
+        return "Updating EDM-ARS $Old -> $New."
+    }
+
+    # The new command's own last step, `edmars after-install`. venv-<version>
+    # was just built from scratch, so the packages `edmars setup reviewer`
+    # put into the previous one are gone (the Mac test's update left LSAR
+    # without tenacity, pymupdf4llm and arxiv, and every review was
+    # skipped). The command reinstalls them when the settings record an
+    # LSAR install, checks that LSAR loads, and says whether setup was
+    # already done; being the new edmars, it finds the settings where every
+    # other command does. Returns setup (none, partial or done) and reviewer
+    # (none, ok, repaired or failed); both are '' when it could not answer.
+    function Invoke-AfterInstall([string]$Launcher, [string]$StateFile) {
+        $state = @{ setup = ''; reviewer = '' }
+        if (Test-Path -LiteralPath $StateFile) { Remove-Item -LiteralPath $StateFile -Force }
+        $saved = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $Launcher 'after-install' '--plain' '--state-file' $StateFile 2>&1 | ForEach-Object {
+                if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                    Write-Host $_.Exception.Message
+                } else {
+                    Write-Host $_
+                }
+            }
+        } catch {
+            Write-Host $_.Exception.Message
+        } finally {
+            $ErrorActionPreference = $saved
+        }
+        if (Test-Path -LiteralPath $StateFile -PathType Leaf) {
+            foreach ($line in (Get-Content -LiteralPath $StateFile)) {
+                if ($line -match '^(setup|reviewer)=(\S*)\s*$') { $state[$Matches[1]] = $Matches[2] }
+            }
+        }
+        return $state
+    }
+
     # Copy a checkout without git history, caches, raw data, run outputs or
     # local secrets.
     $ExcludeAnywhere = @('.git', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', 'node_modules', '.env')
@@ -546,6 +603,10 @@
         }
 
         # ---- the plan -------------------------------------------------------------
+        # The version this folder already has, and the one the plan can name
+        # ('' until the latest release is looked up in step 4).
+        $previous = Get-InstalledVersion $base
+        $planVer = $ver
         $facts = $platform
         if ($ramGB) { $facts += ", $ramGB GB memory" }
         if ($null -ne $freeGB) { $facts += ", $freeGB GB free" }
@@ -563,6 +624,8 @@
             if (-not $shown) { $shown = 'latest release' }
             Say "EDM-ARS from:  $sourceText ($shown)"
         }
+        $updateLine = Get-UpdateLine $previous $planVer
+        if ($updateLine) { Say $updateLine }
         Say ''
         Say 'This will:'
         Say '  1. Check this computer (system, free disk space, memory).'
@@ -586,7 +649,16 @@
         }
         Say "  6. Create the command $(Join-Path $bin 'edmars.cmd') (and $(Join-Path $bin 'edmars') for Git Bash)."
         Say (Get-PathPlanLine (Get-RawUserPath) $bin ([bool]$NoModifyPath))
-        if ($NoOnboard) {
+        if ($previous) {
+            Say "  8. Check the edmars command, and put the automated reviewer's (LSAR's) Python"
+            Say '     packages into the new environment if it is set up. Your settings, keys,'
+            if ($NoOnboard) {
+                Say '     datasets and studies are kept.'
+            } else {
+                Say '     datasets and studies are kept; the setup wizard starts only if setup'
+                Say '     was not finished.'
+            }
+        } elseif ($NoOnboard) {
             Say "  8. Stop there (-NoOnboard); run 'edmars setup' when you are ready."
         } else {
             Say "  8. Start the setup wizard ('edmars setup')."
@@ -721,6 +793,10 @@
                     $tarUrl = Join-Url $releaseBase $tarName
                 }
                 Say "Release found: EDM-ARS $ver"
+                if (-not $planVer) {
+                    $updateLine = Get-UpdateLine $previous $ver
+                    if ($updateLine) { Say $updateLine }
+                }
                 $tarball = Join-Path $tmp $tarName
                 try {
                     Get-Download $tarUrl $tarball
@@ -760,10 +836,6 @@
         $venv = Join-Path $base "venv-$ver"
         $venvPy = Join-Path $venv 'Scripts\python.exe'
         $versionsFile = Join-Path $base 'versions.txt'
-        $previous = $null
-        if (Test-Path -LiteralPath $versionsFile) {
-            $previous = [string](Get-Content -LiteralPath $versionsFile | Where-Object { $_ } | Select-Object -Last 1)
-        }
         if (Test-Path -LiteralPath $appDir) {
             try { Remove-Item -LiteralPath $appDir -Recurse -Force } catch {
                 Stop-Install "cannot replace $appDir ($($_.Exception.Message)). Close any running 'edmars' window and try again."
@@ -818,8 +890,12 @@
         Step '6/8' 'Creating the edmars command'
         $null = New-Item -ItemType Directory -Force -Path $bin
         $launcher = Join-Path $bin 'edmars.cmd'
-        if ((Test-Path -LiteralPath $launcher) -and -not (Select-String -LiteralPath $launcher -SimpleMatch $LauncherMark -Quiet)) {
-            Stop-Install "$launcher already exists and was not made by this installer; move it away or choose another folder with -BinDir."
+        $launcherDone = 'Created'
+        if (Test-Path -LiteralPath $launcher) {
+            if (-not (Select-String -LiteralPath $launcher -SimpleMatch $LauncherMark -Quiet)) {
+                Stop-Install "$launcher already exists and was not made by this installer; move it away or choose another folder with -BinDir."
+            }
+            $launcherDone = 'Updated'
         }
         $cmdLines = @(
             '@echo off',
@@ -851,16 +927,18 @@
         $launcherTmp = Join-Path $bin ('.edmars-' + $PID + '.tmp')
         [System.IO.File]::WriteAllText($launcherTmp, $cmdText, $oem)
         Move-Item -LiteralPath $launcherTmp -Destination $launcher -Force
-        Say "Created $launcher"
+        Say "$launcherDone $launcher"
         $shLauncher = Join-Path $bin 'edmars'
         if ((Test-Path -LiteralPath $shLauncher) -and -not (Select-String -LiteralPath $shLauncher -SimpleMatch $LauncherMark -Quiet)) {
             Warn "$shLauncher already exists and was not made by this installer, so it was left alone. In Git Bash, type edmars.cmd instead of edmars."
             $shLauncher = $null
         } else {
+            $shDone = 'Created'
+            if (Test-Path -LiteralPath $shLauncher) { $shDone = 'Updated' }
             $shTmp = Join-Path $bin ('.edmars-sh-' + $PID + '.tmp')
             [System.IO.File]::WriteAllText($shTmp, (Get-ShLauncherText $LauncherMark $ver $appDir $uv $venvPy), (New-Object System.Text.UTF8Encoding $false))
             Move-Item -LiteralPath $shTmp -Destination $shLauncher -Force
-            Say "Created $shLauncher (the same command, for Git Bash)"
+            Say "$shDone $shLauncher (the same command, for Git Bash)"
         }
 
         # ---- 7. PATH --------------------------------------------------------------------
@@ -929,13 +1007,22 @@
         }
         $utf8 = New-Object System.Text.UTF8Encoding $false
         [System.IO.File]::WriteAllText($versionsFile, (($versions -join "`n") + "`n"), $utf8)
+        # previous_version is the version this install replaced, the same one
+        # when it was reinstalled (install_kind says which), and null for a
+        # first install. It was null for a reinstall, as if nothing had
+        # been there.
         $prevOut = $null
-        if ($previous -and ($previous -ne $ver)) { $prevOut = $previous }
+        $installKind = 'new'
+        if ($previous) {
+            $prevOut = $previous
+            if ($previous -eq $ver) { $installKind = 'reinstall' } else { $installKind = 'update' }
+        }
         $manifest = [ordered]@{
             schema           = 1
             installer        = 'install.ps1'
             version          = $ver
             previous_version = $prevOut
+            install_kind     = $installKind
             installed_at     = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
             source           = $sourceKind
             install_dir      = $base
@@ -956,12 +1043,29 @@
         # ---- 8. smoke test and setup ----------------------------------------------------------
         Step '8/8' 'Checking the edmars command'
         Invoke-Checked "'edmars version'" $launcher @('version')
+        $after = Invoke-AfterInstall $launcher (Join-Path $tmp 'after-install.txt')
+        if (-not $after.setup) {
+            Warn "Could not check your settings and the automated reviewer (see above); 'edmars doctor' does."
+        }
 
         Say ''
-        Say "EDM-ARS $ver is installed."
+        if (-not $previous) {
+            Say "EDM-ARS $ver is installed."
+        } elseif ($previous -eq $ver) {
+            Say "EDM-ARS $ver is installed again."
+        } else {
+            Say "EDM-ARS $ver is installed (updated from $previous)."
+        }
         if ($onSessionPath) { $runCmd = 'edmars' } else { $runCmd = '"' + $launcher + '"' }
-        if ($NoOnboard) {
-            Say "Next, set it up:  $runCmd setup"
+        if ($after.setup -eq 'done') {
+            Say 'Setup is already done; your settings, key, datasets and studies were kept.'
+            Say "To change a setting:  $runCmd setup"
+        } elseif ($NoOnboard) {
+            if ($after.setup -eq 'partial') {
+                Say "Your settings were kept, but setup is not finished. Next, finish it:  $runCmd setup"
+            } else {
+                Say "Next, set it up:  $runCmd setup"
+            }
         } elseif ($interactive) {
             Say "Starting the setup wizard. You can leave it at any time and run 'edmars setup' later."
             $saved = $ErrorActionPreference
@@ -974,6 +1078,12 @@
         Say ''
         Say "To use EDM-ARS, type:  $runCmd"
         if ($pathModified) { Say '(Other terminal windows that were already open need to be reopened first.)' }
+        if ($after.reviewer -eq 'failed') {
+            # Last, so it is not scrolled away: every review is skipped until then.
+            Say ''
+            Warn "The automated reviewer (LSAR) needs repair: run '$runCmd setup reviewer'."
+            Say '    Until then every automated review is skipped. The reason is given above.'
+        }
     } finally {
         if ($pushed) { Pop-Location }
         foreach ($name in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], 'Process') }

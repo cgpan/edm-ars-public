@@ -770,6 +770,53 @@ def install(
     return home
 
 
+def reinstall_requirements(settings: Mapping[str, Any]) -> RequirementPlan:
+    """Install LSAR's Python packages into THIS Python again; prove LSAR loads.
+
+    For an environment built from scratch next to an LSAR folder that is
+    still in place: the installer replaces ``venv-<version>`` on every
+    update, and the packages ``edmars setup reviewer`` had added to the
+    old one are gone (the Mac test: tenacity, pymupdf4llm and arxiv,
+    after which every review was skipped). Nothing is downloaded from
+    GitHub; the same conservative rules as :func:`install` apply (a
+    package EDM-ARS already uses is never changed), and the uv that built
+    the environment is used when it has no pip (``EDMARS_UV``).
+
+    Returns the plan that was carried out (``to_install`` is empty when
+    nothing was missing). Raises :class:`LsarInstallError` with a plain
+    message when LSAR's folder is gone or incomplete, when the packages
+    cannot be installed without changing others, or when LSAR still does
+    not load; ``edmars setup reviewer`` repairs each of these.
+    """
+    home_value = _get(settings, "lsar.home")
+    if not home_value:
+        raise LsarInstallError("LSAR is not installed.")
+    home = Path(str(home_value))
+    problems = _file_problems(home)
+    if problems:
+        raise LsarInstallError("LSAR's folder is not complete: " + " ".join(problems))
+    plan = plan_requirements(home)
+    if plan.changes:
+        raise LsarInstallError(
+            "Installing LSAR's Python packages would change packages EDM-ARS "
+            "already uses: " + "; ".join(plan.changes) + ". Nothing was changed.",
+            plan,
+        )
+    _install_requirements(plan)
+    problems = verify(home)
+    if problems:
+        raise LsarInstallError("LSAR still does not load: " + " ".join(problems), plan)
+    record = _read_install_record(home)
+    if record:
+        record["unmet_pins"] = plan.unmet_pins
+        record["requirements_reinstalled_at"] = _now()
+        try:
+            (home / INSTALL_RECORD).write_text(json.dumps(record, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+    return plan
+
+
 # ---------------------------------------------------------------------------
 # Using LSAR: the run config block, and `edmars review RUN`
 # ---------------------------------------------------------------------------

@@ -1259,6 +1259,22 @@ def update_cmd(
     raise _exit(maintenance.update(check_only=check))
 
 
+@app.command("after-install", hidden=True)
+@_friendly
+def after_install_cmd(
+    state_file: Annotated[
+        Optional[Path],
+        typer.Option("--state-file", help="Write setup=... and reviewer=... lines here for the installer."),
+    ] = None,
+    plain: PlainOpt = False,
+    yes: YesOpt = False,
+) -> None:
+    """The installer's last step: keep the reviewer working in the new environment."""
+    _modes(plain, yes)
+    maintenance = _module("maintenance")
+    raise _exit(maintenance.after_install(state_file))
+
+
 @app.command("uninstall")
 @_friendly
 def uninstall_cmd(

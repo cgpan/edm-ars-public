@@ -481,6 +481,166 @@ def test_a_problem_only_the_deep_check_finds_becomes_the_reviewers_own_line(
 
 
 # ---------------------------------------------------------------------------
+# after an update: `edmars after-install` (the installer's last step)
+# ---------------------------------------------------------------------------
+
+FAKE_MODULE = "edmars_fake_lsar_dep"
+
+
+class FakeUv:
+    """The installed environment: no pip, only the uv that built it.
+
+    ``uv pip install`` "installs" by writing FAKE_MODULE into the LSAR
+    folder, which the import check puts on sys.path, so the real import
+    check in a child Python sees the package appear. Every other call
+    (the import check) runs for real.
+    """
+
+    def __init__(self, real_run: Any, home: Path, *, install_rc: int = 0,
+                 dry_run_output: str = "Would install 1 package\n + fake==1.2\n") -> None:
+        self.real_run, self.home, self.install_rc = real_run, home, install_rc
+        self.dry_run_output = dry_run_output
+        self.calls: list[list[str]] = []
+        self.requirements: list[list[str]] = []
+
+    def __call__(self, args: list[str], **kwargs: Any) -> Any:
+        args = [str(a) for a in args]
+        if args[1:4] == ["-m", "pip", "--version"]:
+            return completed(args, 1, "", "No module named pip")
+        if args[0] != "/fake/uv":
+            return self.real_run(args, **kwargs)
+        self.calls.append(args)
+        self.requirements.append(Path(args[args.index("-r") + 1]).read_text(encoding="utf-8").split())
+        if "--dry-run" in args:
+            return completed(args, 0, self.dry_run_output)
+        if self.install_rc == 0:
+            (self.home / f"{FAKE_MODULE}.py").write_text("OK = True\n", encoding="utf-8")
+        return completed(args, self.install_rc, "", "error: network unreachable")
+
+
+def _set_up_reviewer(*, enabled: bool = True, finished: bool = True) -> Path:
+    """Settings as `edmars setup` leaves them, with an LSAR folder in place
+    whose lsar.pipeline needs a package the new environment lacks."""
+    from edmars import settings as settings_mod
+
+    home = lsar.home_for_ref()
+    for name, data in _tree(f"import {FAKE_MODULE}\n").items():
+        path = home / name.split("/", 1)[1]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    (home / lsar.INSTALL_RECORD).write_text(json.dumps({"ref": COMMIT, "unmet_pins": ["old"]}),
+                                           encoding="utf-8")
+    current = settings_mod.load()
+    current["lsar"].update(enabled=enabled, auto_review=enabled, home=str(home), ref=COMMIT)
+    current["setup_progress"]["last_completed_screen"] = "S11" if finished else "S5"
+    settings_mod.save(current)
+    return home
+
+
+def _state(path: Path) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines())
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_after_install_puts_lsars_packages_back_into_the_rebuilt_environment(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any, tmp_path: Path, enabled: bool,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The Mac test's update: the installer rebuilt venv-0.1.0 from scratch,
+    # LSAR's packages were gone, and every review was skipped without a
+    # word from the installer. A reviewer that is only turned off is kept
+    # working too: `edmars review` uses it.
+    from edmars import maintenance
+
+    home = _set_up_reviewer(enabled=enabled)
+    uv = FakeUv(real_run, home)
+    monkeypatch.setattr(proc, "run", uv)
+    monkeypatch.setenv("EDMARS_UV", "/fake/uv")
+    assert lsar.verify(home)  # the new environment cannot load LSAR yet
+
+    state = tmp_path / "state.txt"
+    assert maintenance.after_install(state) == 0
+    assert _state(state) == {"setup": "done", "reviewer": "repaired"}
+    # uv installs into this Python, dry run first; dev tools and packages
+    # EDM-ARS already has are left out, and the import check now passes.
+    assert [c[:5] for c in uv.calls] == [["/fake/uv", "pip", "install", "--python", lsar.sys.executable]] * 2
+    assert "--dry-run" in uv.calls[0] and "--dry-run" not in uv.calls[1]
+    assert uv.requirements == [[f"{FAKE_DIST}>=1.0"]] * 2
+    assert lsar.verify(home) == []
+    record = json.loads((home / lsar.INSTALL_RECORD).read_text(encoding="utf-8"))
+    assert record["requirements_reinstalled_at"] and record["unmet_pins"] != ["old"]
+    assert "The automated reviewer is ready (1 of its packages installed again)." in capsys.readouterr().out
+
+
+def test_after_install_reports_a_reviewer_it_could_not_repair(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from edmars import maintenance
+
+    home = _set_up_reviewer(finished=False)
+    monkeypatch.setattr(proc, "run", FakeUv(real_run, home, install_rc=2))
+    monkeypatch.setenv("EDMARS_UV", "/fake/uv")
+    state = tmp_path / "state.txt"
+    assert maintenance.after_install(state) == 1
+    assert _state(state) == {"setup": "partial", "reviewer": "failed"}
+    said = capsys.readouterr()
+    out = " ".join((said.out + said.err).split())
+    assert "could not be made ready: Installing LSAR's Python packages failed" in out
+    assert "network unreachable" in out and "`edmars setup reviewer`" in out
+
+    # A package EDM-ARS uses would change: nothing is installed.
+    import importlib.metadata
+
+    installed = importlib.metadata.version("PyYAML")
+    uv = FakeUv(real_run, home, dry_run_output=f" - pyyaml=={installed}\n + pyyaml==1.0\n")
+    monkeypatch.setattr(proc, "run", uv)
+    assert maintenance.after_install(state) == 1
+    assert _state(state)["reviewer"] == "failed"
+    assert len(uv.calls) == 1 and "--dry-run" in uv.calls[0]
+    said = capsys.readouterr()
+    assert "would change packages EDM-ARS already uses" in " ".join((said.out + said.err).split())
+
+    # The LSAR folder itself is gone.
+    import shutil
+
+    shutil.rmtree(home)
+    assert maintenance.after_install(state) == 1
+    assert _state(state)["reviewer"] == "failed"
+
+
+def test_after_install_without_a_reviewer_only_reports_setup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from edmars import maintenance
+    from edmars import settings as settings_mod
+
+    def no_process(args: list[str], **kwargs: Any) -> Any:
+        raise AssertionError(f"nothing should run: {args}")
+
+    monkeypatch.setattr(proc, "run", no_process)
+    state = tmp_path / "state.txt"
+    assert maintenance.after_install(state) == 0
+    assert _state(state) == {"setup": "none", "reviewer": "none"}
+    settings_mod.save(settings_mod.load())  # setup started, never finished
+    assert maintenance.after_install(state) == 0
+    assert _state(state) == {"setup": "partial", "reviewer": "none"}
+
+
+def test_after_install_is_a_hidden_command(tmp_path: Path) -> None:
+    from typer.testing import CliRunner
+
+    from edmars.cli import app
+
+    cli = CliRunner()
+    assert "after-install" not in cli.invoke(app, ["--help"]).output
+    state = tmp_path / "state.txt"
+    result = cli.invoke(app, ["after-install", "--plain", "--state-file", str(state)])
+    assert result.exit_code == 0, result.output
+    assert _state(state) == {"setup": "none", "reviewer": "none"}
+
+
+# ---------------------------------------------------------------------------
 # gate config and `edmars review RUN`
 # ---------------------------------------------------------------------------
 

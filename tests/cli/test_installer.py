@@ -205,7 +205,8 @@ def _function_probe(calls: str) -> str:
         f"'{name}'"
         for name in ("Test-UnderPath", "Merge-UserPath", "ConvertTo-CmdPath",
                      "Get-SyncProvider", "Test-Excluded", "Get-Download",
-                     "Get-ShLauncherText", "Get-PathPlanLine")
+                     "Get-ShLauncherText", "Get-PathPlanLine", "Get-InstalledVersion",
+                     "Get-UpdateLine", "Invoke-AfterInstall")
     )
     return f"""
 $tokens = $null; $errors = $null
@@ -1067,6 +1068,9 @@ case "$1" in
         printf '%s\n' '#!/bin/sh' \
             'case "$*" in' \
             '    *sysconfig*) d="$(cd "$(dirname "$0")/.." && pwd)/lib/site"; mkdir -p "$d"; echo "$d" ;;' \
+            '    *after-install*) for a in "$@"; do [ "$p" = --state-file ] && f=$a; p=$a; done' \
+            '        printf "setup=%s\nreviewer=%s\n" "${FAKE_SETUP_STATE:-none}" "${FAKE_REVIEWER_STATE:-none}" >"$f"' \
+            '        echo "after-install (fake): $*" ;;' \
             '    *edmars*) echo "edmars (fake)" ;;' \
             'esac' >"$last/bin/python"
         chmod 755 "$last/bin/python"
@@ -1153,3 +1157,230 @@ def test_install_ps1_keeps_its_own_uvs_cache_in_the_install_folder() -> None:
     assert block is not None
     assert "Set-TempEnv 'UV_CACHE_DIR' (Join-Path $base 'uv\\cache')" in block.group("body")
     assert ps1.index("Set-TempEnv 'UV_CACHE_DIR'") < ps1.index("Installing Python $PythonSeries")
+
+
+# --- after an update: the reviewer's packages and the setup you already did ------------
+#
+# The Mac test's second round: the installer rebuilt venv-0.1.0 from
+# scratch, which dropped the packages `edmars setup reviewer` had put into
+# it (tenacity, pymupdf4llm, arxiv), and said nothing; every automated
+# review was then skipped. It also ended with "Next, set it up" although
+# setup was done, and recorded previous_version null for the version it
+# replaced. Both installers now end with the new command's own
+# `edmars after-install`, which finds the settings where edmars does.
+
+
+def _fake_profile(tmp_path: Path, *, pipeline: str = "import yaml\n", finished: bool = True) -> Path:
+    """An EDMARS_HOME with a settings file that records an LSAR install,
+    and that LSAR folder. Its requirements are ones this Python already
+    has, so nothing is downloaded; lsar.pipeline imports what ``pipeline``
+    says, and the import check runs for real."""
+    import yaml
+
+    home = tmp_path / "edmars-home"
+    lsar_home = home / "data" / "lsar" / "LSAR-public-test"
+    files = {
+        "config.yaml": "llm:\n  model: deepseek-v4-pro\n",
+        "requirements.txt": "PyYAML>=5.0\npytest>=7\n",
+        "calibration/anchors_edm.yaml": "overall_p25_full: 6.3\n",
+        "lsar/__init__.py": "",
+        "lsar/pipeline.py": pipeline,
+    }
+    for rel, text in files.items():
+        (lsar_home / rel).parent.mkdir(parents=True, exist_ok=True)
+        (lsar_home / rel).write_text(text, encoding="utf-8")
+    settings = {"schema": 1, "provider": "deepseek",
+                "lsar": {"enabled": True, "auto_review": True, "home": str(lsar_home)},
+                "setup_progress": {"last_completed_screen": "S11" if finished else "S4"}}
+    (home / "settings.yaml").write_text(yaml.safe_dump(settings), encoding="utf-8")
+    return home
+
+
+def _real_edmars_sh_launcher(tmp_path: Path) -> Path:
+    """A stand-in for the installed command that runs this checkout's edmars."""
+    launcher = tmp_path / "bin" / "edmars"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_bytes((
+        "#!/bin/sh\n"
+        f"PYTHONPATH='{REPO_ROOT}'\nexport PYTHONPATH\n"
+        f"exec '{_sh_path(Path(sys.executable))}' -P -m edmars \"$@\"\n"
+    ).encode("utf-8"))
+    launcher.chmod(0o755)
+    return launcher
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+@pytest.mark.parametrize("pipeline, finished, expected", [
+    ("import yaml\n", True, ("done", "ok")),
+    ("import edmars_no_such_package_xyz\n", False, ("partial", "failed")),
+])
+def test_install_sh_after_install_step_runs_the_new_edmars_on_your_settings(
+    tmp_path: Path, pipeline: str, finished: bool, expected: tuple[str, str]
+) -> None:
+    home = _fake_profile(tmp_path, pipeline=pipeline, finished=finished)
+    launcher = _real_edmars_sh_launcher(tmp_path)
+    body = ("set -eu\n" + "say() { printf '%s\\n' \"$*\"; }\n" + _sh_function("after_install")
+            + 'after_install "$1" "$2"\nprintf "SETUP=%s REVIEWER=%s\\n" "$SETUP_STATE" "$REVIEWER_STATE"\n')
+    script = tmp_path / "harness.sh"
+    script.write_bytes(body.encode("utf-8"))
+    result = subprocess.run([str(SH), _sh_path(script), _sh_path(launcher), _sh_path(tmp_path / "state.txt")],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+                            env=_clean_env(tmp_path, EDMARS_HOME=str(home)))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"SETUP={expected[0]} REVIEWER={expected[1]}" in result.stdout.splitlines(), result.stdout
+    said = " ".join((result.stdout + result.stderr).split())
+    assert "The automated reviewer (LSAR) is set up" in said
+    if expected[1] == "failed":
+        assert "edmars_no_such_package_xyz" in said and "`edmars setup reviewer`" in said
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_install_sh_after_install_step_without_an_answer(tmp_path: Path) -> None:
+    # A command that crashes leaves both states empty, never a stale file.
+    launcher = tmp_path / "edmars"
+    launcher.write_bytes(b"#!/bin/sh\necho boom >&2\nexit 3\n")
+    launcher.chmod(0o755)
+    state = tmp_path / "state.txt"
+    state.write_text("setup=done\nreviewer=ok\n", encoding="utf-8")
+    body = ("set -eu\n" + _sh_function("after_install")
+            + 'after_install "$1" "$2"\nprintf "SETUP=[%s] REVIEWER=[%s]\\n" "$SETUP_STATE" "$REVIEWER_STATE"\n')
+    script = tmp_path / "harness.sh"
+    script.write_bytes(body.encode("utf-8"))
+    result = subprocess.run([str(SH), _sh_path(script), _sh_path(launcher), _sh_path(state)],
+                            capture_output=True, text=True, timeout=60, env=_clean_env(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert "SETUP=[] REVIEWER=[]" in result.stdout
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_install_sh_names_an_update_or_a_reinstall(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    body = ("set -eu\n" + "say() { printf '%s\\n' \"$*\"; }\n" + _sh_function("installed_version")
+            + _sh_function("update_line")
+            + 'update_line "$(installed_version "$1")" "$2"\necho end\n')
+    script = tmp_path / "harness.sh"
+    script.write_bytes(body.encode("utf-8"))
+
+    def run(new: str) -> str:
+        result = subprocess.run([str(SH), _sh_path(script), _sh_path(base), new],
+                                capture_output=True, text=True, timeout=60, env=_clean_env(tmp_path))
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    assert run("0.1.0") == "end\n"  # first install: nothing to say
+    base.mkdir()
+    (base / "versions.txt").write_bytes(b"0.0.9\n0.1.0\n")
+    assert run("0.1.0") == "Reinstalling EDM-ARS 0.1.0 (it is already installed here).\nend\n"
+    assert run("0.2.0") == "Updating EDM-ARS 0.1.0 -> 0.2.0.\nend\n"
+    assert run("") == "Updating EDM-ARS 0.1.0 to the latest release.\nend\n"
+    (base / "versions.txt").write_bytes(b"0.1.0\n$(boom)\n")
+    assert run("0.1.0") == "end\n"  # never prints what it cannot trust
+
+
+@pytest.mark.skipif(not (ON_WINDOWS and POWERSHELL), reason="Windows PowerShell only")
+@pytest.mark.parametrize("pipeline, finished, expected", [
+    ("import yaml\n", True, ("done", "ok")),
+    ("import edmars_no_such_package_xyz\n", False, ("partial", "failed")),
+])
+def test_ps1_after_install_step_runs_the_new_edmars_on_your_settings(
+    tmp_path: Path, pipeline: str, finished: bool, expected: tuple[str, str]
+) -> None:
+    home = _fake_profile(tmp_path, pipeline=pipeline, finished=finished)
+    assert home == tmp_path / "edmars-home"  # where _powershell's EDMARS_HOME points
+    launcher = tmp_path / "bin dir" / "edmars.cmd"
+    launcher.parent.mkdir()
+    launcher.write_bytes((
+        "@echo off\r\n"
+        f'set "PYTHONPATH={REPO_ROOT}"\r\n'
+        f'"{sys.executable}" -P -m edmars %*\r\n'
+        "exit /b %ERRORLEVEL%\r\n"
+    ).encode("utf-8"))
+    state = str(tmp_path / "state dir" / "after.txt").replace("'", "''")
+    (tmp_path / "state dir").mkdir()
+    calls = f"""
+$r = Invoke-AfterInstall '{str(launcher).replace("'", "''")}' '{state}'
+$out.setup = $r.setup
+$out.reviewer = $r.reviewer
+$out.none = Get-UpdateLine '' '0.1.0'
+$out.same = Get-UpdateLine '0.1.0' '0.1.0'
+$out.newer = Get-UpdateLine '0.1.0' '0.2.0'
+$out.latest = Get-UpdateLine '0.1.0' ''
+$out.missing = Get-InstalledVersion '{str(tmp_path / "nowhere")}'
+"""
+    result = _powershell(_function_probe(calls), tmp_path)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert (out["setup"], out["reviewer"]) == expected, result.stdout
+    assert "The automated reviewer (LSAR) is set up" in " ".join(result.stdout.split())
+    assert out["none"] is None and out["missing"] == ""
+    assert out["same"] == "Reinstalling EDM-ARS 0.1.0 (it is already installed here)."
+    assert out["newer"] == "Updating EDM-ARS 0.1.0 -> 0.2.0."
+    assert out["latest"] == "Updating EDM-ARS 0.1.0 to the latest release."
+
+
+def test_both_installers_end_the_same_way_after_an_update() -> None:
+    # The same words in both scripts, checked by text (the real Windows run
+    # needs the network).
+    sh, ps1 = _text(INSTALL_SH), _text(INSTALL_PS1)
+    for text in ("Setup is already done; your settings, key, datasets and studies were kept.",
+                 "The automated reviewer (LSAR) needs repair: run '",
+                 "Until then every automated review is skipped. The reason is given above.",
+                 "Reinstalling EDM-ARS", "(it is already installed here).", "is installed again.",
+                 "Could not check your settings and the automated reviewer (see above); 'edmars doctor' does."):
+        assert text in sh and text in ps1, text
+    assert '"install_kind": "$INSTALL_KIND"' in sh and "install_kind     = $installKind" in ps1
+    for text in (sh, ps1):
+        # The reviewer's warning comes after the last "To use EDM-ARS" line.
+        assert text.rindex("needs repair") > text.rindex("To use EDM-ARS, type:")
+        assert text.index("after-install") < text.rindex("Setup is already done")
+
+
+@pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")
+def test_install_sh_update_keeps_what_was_set_up_and_says_so(tmp_path: Path) -> None:
+    base, home = tmp_path / "base", tmp_path / "home"
+    home.mkdir()
+    uv = tmp_path / "own" / "uv"
+    uv.parent.mkdir(parents=True)
+    uv.write_text(_FAKE_UV, encoding="utf-8")
+    uv.chmod(0o755)
+    env = {"FAKE_UV_LOG": str(tmp_path / "uv.log"), "FAKE_BASE_PY": str(tmp_path / "python3"),
+           "HOME": str(home), "PATH": f"{uv.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+    args = ("--yes", "--no-onboard", "--no-modify-path", "--from-local", str(REPO_ROOT),
+            "--dir", str(base), "--bin-dir", str(tmp_path / "bin"))
+
+    first = _run_sh(tmp_path, *args, **env)
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "Reinstalling" not in first.stdout and "Updating EDM-ARS" not in first.stdout
+    assert f"Created {tmp_path / 'bin' / 'edmars'}" in first.stdout
+    assert "EDM-ARS 0.1.0 is installed.\n" in first.stdout
+    assert "Next, set it up:" in first.stdout
+    record = json.loads((base / "install.json").read_text(encoding="utf-8"))
+    assert record["previous_version"] is None and record["install_kind"] == "new"
+
+    # The Mac test's second round: the same version again, over a setup
+    # that was finished, with a reviewer whose packages could not be put back.
+    again = _run_sh(tmp_path, *args, **env, FAKE_SETUP_STATE="done", FAKE_REVIEWER_STATE="failed")
+    assert again.returncode == 0, again.stdout + again.stderr
+    out = again.stdout
+    assert "Reinstalling EDM-ARS 0.1.0 (it is already installed here)." in out
+    assert "put the automated reviewer's (LSAR's) Python" in out
+    assert f"Updated {tmp_path / 'bin' / 'edmars'}" in out
+    assert "after-install (fake): -P -m edmars after-install --plain --state-file" in out
+    assert "EDM-ARS 0.1.0 is installed again." in out
+    assert "Setup is already done; your settings, key, datasets and studies were kept." in out
+    assert "Next, set it up" not in out
+    tail = out.rstrip().splitlines()[-2:]
+    assert tail[0].startswith("  ! The automated reviewer (LSAR) needs repair: run ")
+    assert tail[0].endswith(" setup reviewer'.")
+    record = json.loads((base / "install.json").read_text(encoding="utf-8"))
+    assert record["previous_version"] == "0.1.0" and record["install_kind"] == "reinstall"
+
+    # From an older version, with the reviewer repaired: no warning.
+    (base / "versions.txt").write_text("0.0.9\n", encoding="utf-8")
+    update = _run_sh(tmp_path, *args, **env, FAKE_SETUP_STATE="done", FAKE_REVIEWER_STATE="repaired")
+    assert update.returncode == 0, update.stdout + update.stderr
+    assert "Updating EDM-ARS 0.0.9 -> 0.1.0." in update.stdout
+    assert "EDM-ARS 0.1.0 is installed (updated from 0.0.9)." in update.stdout
+    assert "needs repair" not in update.stdout
+    record = json.loads((base / "install.json").read_text(encoding="utf-8"))
+    assert record["previous_version"] == "0.0.9" and record["install_kind"] == "update"

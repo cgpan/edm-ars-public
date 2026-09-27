@@ -141,6 +141,18 @@ folder, next to (not inside) `app`, `venv-*`, `python` and `uv` (see `edmars
 privacy`). So to remove the program by hand, delete those entries rather than
 the whole folder, or run `edmars uninstall` first.
 
+**Updating.** Run the installer again. Its plan says what it replaces
+("Updating EDM-ARS 0.1.0 -> 0.2.0", or "Reinstalling EDM-ARS 0.1.0" for the
+same version). `venv-<version>` is built from scratch each time, so as its
+last step the new `edmars` command reinstalls the automated reviewer's
+(LSAR's) Python packages into it when your settings record an LSAR install,
+and checks that LSAR loads; if that fails, the installer ends with "The
+automated reviewer (LSAR) needs repair: run 'edmars setup reviewer'". When
+setup was already finished, it says so instead of starting the setup wizard
+again. `install.json` records the version it replaced as `previous_version`
+(null for a first install) and `install_kind`: `new`, `update` or
+`reinstall`.
+
 **PATH.** Unless you pass `-NoModifyPath` / `--no-modify-path`, the command's
 folder is added to your PATH for your account only: on Windows in your user
 environment variables, on macOS and Linux in a clearly marked block at the
