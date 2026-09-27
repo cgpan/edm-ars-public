@@ -72,6 +72,41 @@ def test_gate_with_lsar_unimportable_reports_the_import_failure(
     assert summary["skip_reason"].startswith("lsar_import_failed")
 
 
+@pytest.mark.parametrize("edmars", [True, False], ids=["edmars", "plain"])
+def test_the_import_failure_says_how_to_install_lsar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edmars: bool
+) -> None:
+    """The Mac test (round 2) was told to run "python -m pip install",
+    which fails in the edmars Python: a uv venv without pip."""
+    if edmars:
+        monkeypatch.setenv("EDMARS_RUN_ID", "2026-09-27_1419_x")
+    else:
+        monkeypatch.delenv("EDMARS_RUN_ID", raising=False)
+    lsar_dir = tmp_path / "LSAR"
+    lsar_dir.mkdir()
+    monkeypatch.setitem(sys.modules, "lsar", None)
+    monkeypatch.setitem(sys.modules, "lsar.pipeline", None)
+    lines: list[str] = []
+    gate = ReviewGate(
+        {"review_gate": {"pass_threshold": 5.5, "dimension_floor": 3,
+                         "max_cycles": 2, "lsar_project_path": str(lsar_dir)}},
+        str(tmp_path),
+        log_fn=lambda _agent, message: lines.append(message),
+    )
+    gate.lsar_project_path = lsar_dir
+    pdf = tmp_path / "paper_for_review.pdf"
+    pdf.write_bytes(b"%PDF-1.5 stub")
+    gate.prepare_pdf = lambda *_a, **_k: pdf
+
+    gate.run_gate()
+
+    [hint] = [line for line in lines if line.startswith("LSAR could not be imported")]
+    if edmars:
+        assert hint.endswith("Run `edmars setup reviewer`.")
+    else:
+        assert "-m pip install -r" in hint and "uv pip install --python" in hint
+
+
 def test_gate_with_no_pdf_reports_no_pdf(tmp_path: Path) -> None:
     gate = _gate(tmp_path, tmp_path)
     gate.prepare_pdf = lambda *_a, **_k: None
