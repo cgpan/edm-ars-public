@@ -532,13 +532,28 @@ def _latest_review(run_dir: Path) -> dict[str, Any] | None:
     return review if isinstance(review, dict) else None
 
 
-def review_findings(run_dir: Path | str, code: str, message: str) -> tuple[list[str], list[str]]:
+def abort_checks(status: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """run_status.json's ``abort.checks``: every critical pre-review
+    finding behind a PRE_CRITIC_* stop (check_id, severity, message,
+    target_agent, revisable), each message in full. Empty for other stops
+    and for runs written before the record had them."""
+    abort = as_dict(status.get("abort")) if isinstance(status, dict) else {}
+    checks = abort.get("checks")
+    if not isinstance(checks, list):
+        return []
+    return [c for c in checks if isinstance(c, dict) and c.get("message")]
+
+
+def review_findings(run_dir: Path | str, code: str, message: str,
+                    checks: list[dict[str, Any]] | None = None) -> tuple[list[str], list[str]]:
     """(check ids, plain lines) saying what stopped a study at the review.
 
-    The abort record keeps only the first critical finding; the review the
-    run ended with has all of them. Lines are the checks' and the
-    reviewer's own sentences, without their "pcc_07:" or "Critic ABORT:"
-    prefix, at most five.
+    ``checks`` is :func:`abort_checks`: when the pipeline recorded them,
+    they are the findings, in full, the one the abort message names first.
+    Otherwise the abort message gives the first finding (cut to a line)
+    and the review the run ended with the rest. Lines are the checks' and
+    the reviewer's own sentences, without their "pcc_07:" or "Critic
+    ABORT:" prefix, at most five.
     """
     ids: list[str] = []
     lines: list[str] = []
@@ -553,6 +568,11 @@ def review_findings(run_dir: Path | str, code: str, message: str) -> tuple[list[
             ids.append(check_id)
 
     found = _CHECK_MESSAGE.match((message or "").strip())
+    if checks and code in _PRE_CRITIC_CODES:
+        lead = found.group(1) if found else None
+        for check in sorted(checks, key=lambda c: c.get("check_id") != lead):
+            add(check.get("check_id"), redact(str(check.get("message") or "")))
+        return ids, lines[:5]
     if found:
         add(found.group(1), found.group(2))
     elif message:
@@ -598,6 +618,7 @@ def checks_in_words(ids: list[str]) -> str:
 
 def _review_abort_advice(run_dir: Path, state: RunState, code: str, message: str,
                          entry: dict[str, str], ctx: dict[str, Any], resumable: bool,
+                         status: dict[str, Any] | None = None,
                          ) -> tuple[list[str], str, str, str, str | None]:
     """(details, heading, note, fix, command) for a study the automatic
     checks or the reviewer stopped: what they found, and advice that fits
@@ -605,13 +626,20 @@ def _review_abort_advice(run_dir: Path, state: RunState, code: str, message: str
 
     For the automatic checks it also sets ``ctx["checks"]``, which the
     "why" names."""
-    ids, details = review_findings(run_dir, code, message)
+    checks = abort_checks(status)
+    ids, details = review_findings(run_dir, code, message, checks)
     heading = ("What the automatic checks found:" if code in _PRE_CRITIC_CODES
                else "What the reviewer found:")
     if code in _PRE_CRITIC_CODES:
         ctx["checks"] = checks_in_words(ids)
     advice = messages().get("pre_critic_checks") or {}
-    fixes = [str(advice[i]["fix"]) for i in ids
+    # A PRE_CRITIC_ABORT is caused by the findings no revision can fix;
+    # a revisable one beside it (it would have been sent back) is listed
+    # but its advice ("ask for the comparison in your question") is not
+    # what to do about this stop.
+    stopping = [str(c.get("check_id")) for c in checks if c.get("revisable") is False]
+    fix_ids = [i for i in ids if i in stopping] if code == "PRE_CRITIC_ABORT" and stopping else ids
+    fixes = [str(advice[i]["fix"]) for i in fix_ids
              if isinstance(advice, dict) and isinstance(advice.get(i), dict) and advice[i].get("fix")]
     fix = " ".join(" ".join(f.split()) for f in fixes) or fill(entry.get("fix"), **ctx)
     if fixes and code == "PRE_CRITIC_UNRESOLVED":
@@ -648,7 +676,7 @@ def _stopped(run_dir: Path, state: RunState, code: str, message: str,
     heading = note = ""
     if code in _REVIEW_ABORTS:
         details, heading, note, fix, command = _review_abort_advice(
-            run_dir, state, code, message, entry, ctx, resumable)
+            run_dir, state, code, message, entry, ctx, resumable, status)
     return Outcome(
         label=str(labels.get("stopped", "Stopped")),
         headline=headline,
@@ -979,6 +1007,7 @@ __all__ = [
     "quote_path",
     "step_words",
     "redact",
+    "abort_checks",
     "review_findings",
     "checks_in_words",
 ]

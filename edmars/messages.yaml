@@ -439,9 +439,10 @@ pre_critic_checks:
     what: "no trained model in the results"
     revise: "the analysis produced no trained model"
     fix: >-
-      The analysis produced no trained models at all. This is usually a
-      one-off failure of the AI-written analysis code, so starting the
-      same study again is reasonable.
+      The analysis produced no trained models at all: the AI-written
+      analysis code failed each time it ran. Starting the same study again
+      can work; if it stops the same way, run `edmars doctor --bundle` and
+      report it.
   pcc_06:
     what: "prepared data that failed its own checks"
     fix: >-

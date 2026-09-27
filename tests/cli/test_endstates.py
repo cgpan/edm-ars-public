@@ -591,6 +591,59 @@ def test_a_finding_still_failing_after_the_revisions_is_not_resumable(run_home: 
     assert out.note == f'The study worded your question as: "{WORKED_Q}"'
 
 
+PCC_01_TEXT = "Outcome variable 'X4EVRATNDCLG' found as a column in train_X.csv - confirmed target leakage."
+PCC_07_FULL = (PCC_07.split(": ", 1)[1] + " A paper whose central question is never tested reads "
+               "fluently and is rejected on rigor.")
+
+
+def _abort_checks_run(run_home: Path) -> Path:
+    """A PRE_CRITIC_ABORT as fix/pcc-revise writes it: run_status.json's
+    abort.checks holds every critical finding in full, and the checkpoint
+    holds no short-circuit review (a resumed or cleaned-up run)."""
+    checks = [
+        {"check_id": "pcc_07", "severity": "critical", "message": PCC_07_FULL,
+         "target_agent": "Analyst", "revisable": True},
+        {"check_id": "pcc_01", "severity": "critical", "message": PCC_01_TEXT,
+         "target_agent": "DataEngineer", "revisable": False},
+    ]
+    run_status = v2_status("ABORTED", released=False, reason_code="ABORTED",
+                           abort={"stage": "CRITIQUING", "code": "PRE_CRITIC_ABORT",
+                                  "message": f"pcc_01: {PCC_01_TEXT}", "resumable": False,
+                                  "checks": checks})
+    return make_run(run_home, pdf=False, question=USER_Q, log=None, status=run_status,
+                    checkpoint={"current_state": "ABORTED"},
+                    extra={"research_spec.json": json.dumps({"research_question": WORKED_Q})})
+
+
+def test_the_result_screen_lists_every_finding_in_abort_checks(run_home: Path) -> None:
+    # The screen took the first finding from abort.message and the rest
+    # from the checkpoint's short-circuit review; without that review it
+    # showed one finding of two. run_status.json has had them all since
+    # fix/pcc-revise.
+    run = _abort_checks_run(run_home)
+    out = classify(run)
+    assert out.code == "PRE_CRITIC_ABORT" and out.resumable is False
+    assert out.details == [PCC_01_TEXT, PCC_07_FULL]  # the stop's own finding first, each in full
+    assert "the outcome among the predictors (data leakage)" in out.why
+    assert "a test the question promises missing from the analysis" in out.why
+    # The leakage stopped the study; pcc_07 would have been sent back for
+    # revision, so its advice is not what to do about this stop.
+    assert out.fix.startswith("The outcome itself ended up among the predictors")
+    assert "ask in plain words" not in out.fix
+
+    from edmars.results import render_summary_html
+    from edmars.runstate import load_state
+
+    html = render_summary_html(out, load_state(run), run)
+    assert "rejected on rigor." in html and "confirmed target leakage." in html
+
+
+def test_abort_checks_is_read_only_for_the_automatic_checks_stops(run_home: Path) -> None:
+    assert endstates.abort_checks(None) == []
+    assert endstates.abort_checks({"abort": {"code": "PRE_CRITIC_ABORT", "checks": "not a list"}}) == []
+    assert endstates.abort_checks({"abort": {"checks": [{"check_id": "pcc_07"}, 3]}}) == []
+
+
 def test_an_unresolved_stop_read_from_the_log_alone_is_not_resumable(run_home: Path) -> None:
     # No run_status.json: the code comes from checkpoint errors and
     # pipeline.log, and resumability from _NOT_RESUMABLE.
