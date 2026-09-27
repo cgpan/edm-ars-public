@@ -260,6 +260,25 @@ def test_latex_turned_off_is_a_warning_not_a_failure(fx: Fakes) -> None:
     assert statuses(checks, "PDF typesetting") == ["warn"]
 
 
+def test_missing_latex_is_one_problem_with_and_without_deep(fx: Fakes) -> None:
+    # Without LaTeX, plain doctor counted 1 problem and --deep 3: the two
+    # test documents failed for the same reason the line above gave.
+    from edmars.doctor import run_checks, summarize
+
+    settings = healthy(fx)
+    fx.toolchain.latex = [Check("PDF maker (LaTeX)", "fail", "No LaTeX installation was found.")]
+    fx.toolchain.compile = [Check("PDF test: conference paper", "fail", "No LaTeX installation was found."),
+                            Check("PDF test: journal paper", "fail", "No LaTeX installation was found.")]
+    plain, deep = run_checks(settings), run_checks(settings, deep=True)
+    assert summarize(plain)["fail"] == summarize(deep)["fail"] == 1
+    assert fx.toolchain.compile_calls == 0
+    assert statuses(deep, "PDF test") == ["info"]
+
+    fx.toolchain.latex = [Check("PDF maker (LaTeX)", "ok", "pdflatex found")]
+    run_checks(settings, deep=True)
+    assert fx.toolchain.compile_calls == 1  # a working LaTeX is still test-compiled
+
+
 def test_r_is_optional(fx: Fakes) -> None:
     from edmars.doctor import run_checks
 
@@ -416,6 +435,28 @@ def test_json_with_bundle_reports_the_path(fx: Fakes, capsys: pytest.CaptureFixt
     assert main(json_out=True, bundle=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert Path(payload["bundle"]).is_file()
+
+
+def test_a_written_bundle_exits_0_whatever_the_checks_found(
+    fx: Fakes, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The Mac test: `doctor --bundle` wrote its bundle and exited 1 because
+    # doctor had found a problem (LSAR's packages), so a script would take
+    # the bundle for failed. Finding problems is what the bundle is for.
+    from edmars.doctor import main
+
+    healthy(fx)
+    make_study(fx, "x")
+    fx.datasets.ready.clear()  # "No dataset is ready": a failing check
+    assert main() == 1
+    fx.ui.script = [True]
+    assert main(bundle=True) == 0
+    assert "problem(s) to fix" in fx.ui.output  # the findings are still shown
+    assert len(list((fx.home / "EDM-ARS").glob("edmars-support-*.zip"))) == 1
+    capsys.readouterr()
+    assert main(json_out=True, bundle=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False and Path(payload["bundle"]).is_file()
 
 
 def test_bundle_write_failure_is_reported(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:

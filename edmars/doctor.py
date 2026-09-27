@@ -656,7 +656,15 @@ def check_latex(settings: dict[str, Any], *, deep: bool = False) -> list["Check"
                                     "Run `edmars setup pdf` to turn it on."))
         return checks
     if deep:
-        checks.extend(toolchain.test_compile(timeout_s=120, settings=settings))
+        if any(str(getattr(chk, "status", "")) == "fail" for chk in checks):
+            # The test documents need what the failing line above says is
+            # missing, so they could only fail for the same reason and
+            # count one problem two or three times (no LaTeX made plain
+            # doctor say 1 problem and --deep say 3).
+            checks.append(make_check("PDF test", "info",
+                                     "Not run: the LaTeX problem above has to be fixed first"))
+        else:
+            checks.extend(toolchain.test_compile(timeout_s=120, settings=settings))
     return checks
 
 
@@ -1021,6 +1029,11 @@ def _collect(*, deep: bool, quick: bool) -> tuple[dict[str, Any], list[Any]]:
 def main(*, deep: bool = False, json_out: bool = False, bundle: bool = False, quick: bool = False) -> int:
     """`edmars doctor`. Returns 0 when nothing failed, 1 when anything did.
 
+    With ``bundle`` the command's job is the support file, so it returns 0
+    once the file is written and 1 only when it could not be: the Mac
+    test's `doctor --bundle` wrote its bundle and exited 1 because doctor
+    had found a problem, which a script reads as "the bundle failed".
+
     ``quick`` (an extra beyond the CLI_SPEC section-18 signature) runs only
     the installation checks, for the installer's smoke test.
     """
@@ -1042,6 +1055,8 @@ def main(*, deep: bool = False, json_out: bool = False, bundle: bool = False, qu
         text = redact(json.dumps(payload, indent=2, ensure_ascii=False))
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
+        if bundle:
+            return 0 if bundle_path is not None else 1
         return 0 if payload["ok"] else 1
 
     if deep and not quick:
@@ -1073,6 +1088,7 @@ def main(*, deep: bool = False, json_out: bool = False, bundle: bool = False, qu
         except OSError as exc:
             ui.fail(f"Couldn't write the support bundle: {redact(_one_line(exc))}")
             return 1
+        return 0
     return 1 if counts.get("fail", 0) else 0
 
 

@@ -144,6 +144,25 @@ def test_pipeline_check_names_the_service_not_the_agent_ids(
     assert "LSAR" not in reviewer.detail and "automated reviewer" in reviewer.detail
 
 
+def test_pipeline_check_keeps_the_finding_code_the_card_acts_on(
+        settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    # The Mac test's pre-start check: LSAR could not be imported, so the
+    # gate will not run. The card needs to know that without parsing words.
+    summary = {"checks": [
+        {"code": "LSAR_IMPORT_FAILED", "severity": "warn",
+         "message": "LSAR at /x could not be imported (ModuleNotFoundError: No module named "
+                    "'tenacity'); the review gate will not run.",
+         "fix": "Install LSAR's requirements into this Python: python -m pip install -r /x/requirements.txt"},
+        {"code": "LATEX_MISSING", "severity": "warn", "message": "pdflatex was not found"},
+    ]}
+    monkeypatch.setattr(proc, "run", DryRun(json.dumps(summary) + "\n"))
+    reviewer, latex = runner.pipeline_check(settings, _plan())
+    assert reviewer.code == "LSAR_IMPORT_FAILED" and reviewer.code in runner.REVIEW_OFF_CODES
+    assert reviewer.fix == "Run `edmars setup reviewer`."  # never the pip line
+    assert latex.code == "LATEX_MISSING" and latex.code not in runner.REVIEW_OFF_CODES
+    assert runner.REVIEW_OFF_CODES == {"LSAR_NOT_FOUND", "LSAR_IMPORT_FAILED"}
+
+
 def test_pipeline_check_data_fix_imports_a_dataset_that_cannot_be_downloaded(
         settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     summary = {"checks": [{"code": "DATA_MISSING", "severity": "fail",

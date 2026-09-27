@@ -178,6 +178,12 @@ def test_doctor_passes_flags_and_exit_code(monkeypatch: pytest.MonkeyPatch) -> N
     assert calls[-1] == {"deep": False, "json_out": False, "bundle": True, "quick": True}
 
 
+def test_doctor_help_says_what_its_exit_codes_mean() -> None:
+    text = " ".join(invoke("doctor", "--help").output.split())
+    assert "Exit codes: 0 no check failed; 1 at least one check failed." in text
+    assert "With --bundle: 0 the support file was written" in text
+
+
 def test_setup_passes_section_and_options(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[Any, ...]] = []
 
@@ -199,9 +205,15 @@ def test_setup_passes_section_and_options(monkeypatch: pytest.MonkeyPatch) -> No
 
 def _study_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
                  checks: list[Check] | None = None,
-                 pipeline_checks: list[Check] | None = None) -> dict[str, list[Any]]:
-    record: dict[str, list[Any]] = {"launch": [], "plan": []}
-    plan = StudyPlan(task_type="prediction", dataset="hsls09_public", research_question="Q?", prompt="Q?")
+                 pipeline_checks: list[Check] | None = None,
+                 review: bool = False) -> dict[str, list[Any]]:
+    record: dict[str, list[Any]] = {"launch": [], "plan": [], "card": []}
+    plan = StudyPlan(task_type="prediction", dataset="hsls09_public", research_question="Q?", prompt="Q?",
+                     review=review)
+
+    def confirmation_card(plan: StudyPlan, settings: dict, **kwargs: Any) -> str:
+        record["card"].append(kwargs)
+        return "Question: Q?"
 
     def plan_from_flags(settings: dict, **kwargs: Any) -> StudyPlan:
         record["plan"].append(kwargs)
@@ -215,7 +227,7 @@ def _study_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
         plan_from_flags=plan_from_flags,
         preflight=lambda plan, settings: checks if checks is not None else [Check("Data", "ok", "found")],
         blocking=lambda found: any(c.status == "fail" for c in found),
-        confirmation_card=lambda plan, settings: "Question: Q?",
+        confirmation_card=confirmation_card,
     )
 
     def launch(settings: dict, plan: StudyPlan) -> Path:
@@ -226,7 +238,10 @@ def _study_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
         record.setdefault("pipeline_check", []).append(plan)
         return list(pipeline_checks or [Check("Pipeline check", "ok", "passed")])
 
-    fake_module(monkeypatch, "runner", launch=launch, pipeline_check=pipeline_check)
+    from edmars.runner import REVIEW_OFF_CODES
+
+    fake_module(monkeypatch, "runner", launch=launch, pipeline_check=pipeline_check,
+                REVIEW_OFF_CODES=REVIEW_OFF_CODES)
     return record
 
 
@@ -289,6 +304,35 @@ def test_run_stops_when_the_pipeline_would_refuse(monkeypatch: pytest.MonkeyPatc
     assert "DEEPSEEK_API_KEY is not set" in result.output
     assert "edmars setup ai" in result.output
     assert record["launch"] == []
+
+
+LSAR_NOT_IMPORTABLE = Check(
+    "Automated reviewer", "warn",
+    "LSAR at /x could not be imported (ModuleNotFoundError: No module named 'tenacity'); "
+    "the review gate will not run.", fix="Run `edmars setup reviewer`.", code="LSAR_IMPORT_FAILED")
+
+
+@pytest.mark.parametrize("review", [True, False])
+def test_run_card_is_told_when_the_pre_start_check_turned_the_review_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, review: bool
+) -> None:
+    # The Mac test: the pre-start check warned "the review gate will not
+    # run", and the card right after it said the review was on.
+    accept_disclosure()
+    record = _study_fakes(monkeypatch, tmp_path, pipeline_checks=[LSAR_NOT_IMPORTABLE], review=review)
+    result = invoke("run", "--type", "prediction", "--prompt", "Q?", "--yes", "--no-watch")
+    assert result.exit_code == 0, result.output
+    assert "the review gate will not run" in result.output  # the warning itself is shown
+    blocked = record["card"][0]["review_blocked"]
+    if review:
+        assert blocked == "The check before the start could not load LSAR (see the warning above)."
+    else:
+        assert blocked is None
+    assert len(record["launch"]) == 1  # a warning does not stop the study
+
+    record = _study_fakes(monkeypatch, tmp_path, review=review)
+    invoke("run", "--type", "prediction", "--prompt", "Q?", "--yes", "--no-watch")
+    assert record["card"][0]["review_blocked"] is None
 
 
 def test_run_passes_paper_format_and_review(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

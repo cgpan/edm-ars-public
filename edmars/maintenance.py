@@ -116,6 +116,63 @@ def update(*, check_only: bool = False) -> int:
     return 0
 
 
+# --- after an install -------------------------------------------------------------
+
+
+def setup_state() -> str:
+    """``none`` (no settings file), ``partial`` or ``done`` (setup finished)."""
+    from edmars import paths
+    from edmars import settings as settings_mod
+
+    if not paths.settings_path().is_file():
+        return "none"
+    last = settings_mod.get(settings_mod.load(), "setup_progress.last_completed_screen")
+    return "done" if last == "S11" else "partial"
+
+
+def after_install(state_file: str | os.PathLike[str] | None = None) -> int:
+    """``edmars after-install``: the installer's last step, run by the new command.
+
+    The installer builds ``venv-<version>`` from scratch on every install,
+    so an update loses the packages ``edmars setup reviewer`` added to the
+    previous one. On the owner's Mac that silently turned every automated
+    review off. When the settings record an LSAR folder (on or off: `edmars
+    review` uses it too), this reinstalls LSAR's packages into the new
+    environment and checks that LSAR loads. It also tells the installer
+    whether setup was already done, so an update does not end with "Next,
+    set it up". Being the new ``edmars`` itself, it finds the settings
+    exactly where every other command does.
+
+    Writes ``setup=<none|partial|done>`` and ``reviewer=<none|ok|repaired|
+    failed>`` lines to ``state_file``. Returns 0, or 1 when the reviewer
+    needs ``edmars setup reviewer``.
+    """
+    from edmars import lsar, ui
+    from edmars import settings as settings_mod
+
+    state = setup_state()
+    settings = settings_mod.load()
+    reviewer = "none"
+    if settings_mod.get(settings, "lsar.home"):
+        ui.info("The automated reviewer (LSAR) is set up: installing its Python packages "
+                "into the new environment and checking that it loads...")
+        try:
+            plan = lsar.reinstall_requirements(settings)
+        except Exception as exc:  # noqa: BLE001 - the installer must get its answer
+            reviewer = "failed"
+            why = str(exc) if isinstance(exc, lsar.LsarInstallError) else f"{type(exc).__name__}: {exc}"
+            ui.warn(f"The automated reviewer could not be made ready: {why} "
+                    "Repair it with `edmars setup reviewer`; until then its reviews are skipped.")
+        else:
+            reviewer = "repaired" if plan.to_install else "ok"
+            again = len(plan.to_install)
+            ui.ok("The automated reviewer is ready"
+                  + (f" ({again} of its packages installed again)." if again else "."))
+    if state_file is not None:
+        Path(state_file).write_text(f"setup={state}\nreviewer={reviewer}\n", encoding="utf-8")
+    return 1 if reviewer == "failed" else 0
+
+
 # --- uninstall ------------------------------------------------------------------
 
 

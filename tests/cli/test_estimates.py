@@ -38,6 +38,17 @@ def test_the_card_and_the_live_view_use_the_shared_times() -> None:
     assert _ranges(reviewing) == _ranges(estimates.REVIEW_TIME)
 
 
+def test_the_card_says_a_study_that_stops_early_ends_sooner() -> None:
+    # Both Mac test studies were stopped by the checks, after 14 min and
+    # 8 min 47 s; the card promised "usually 20-60 minutes" and nothing else.
+    plan = study.plan_from_flags({}, prompt="Which ninth-grade factors predict GPA?")
+    reviewed = study.StudyPlan(**{**plan.__dict__, "review": True})
+    settings = {"provider": "deepseek", "lsar": {"enabled": True}}
+    for which, expected in ((plan, estimates.TIME_WITHOUT_REVIEW), (reviewed, estimates.TIME_WITH_REVIEW)):
+        card = " ".join(study.confirmation_card(which, settings).split())
+        assert f"Time: {expected}. A study that stops early ends sooner." in card
+
+
 def test_no_screen_keeps_an_old_review_time() -> None:
     stale = re.compile(r"20(-| to )40 minutes|35-60 minutes|18.46 minutes")
     for path in [*EDMARS.glob("*.py"), EDMARS / "messages.yaml", REPO_ROOT / "README.md"]:

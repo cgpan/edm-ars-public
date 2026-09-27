@@ -386,6 +386,23 @@ def _review_available(settings: dict | None) -> bool:
 # --------------------------------------------------------------------------
 
 
+def _review_blocker(settings: dict | None) -> str | None:
+    """Why the reviewer that is turned on cannot review on this computer.
+
+    LSAR's own quick check (its folder, its files, its Python packages),
+    which starts nothing. None when the reviewer is off or nothing is
+    found; the pipeline's pre-start check, which imports LSAR, comes later.
+    """
+    if not _review_available(settings):
+        return None
+    try:
+        from edmars import lsar
+
+        return lsar.unavailable_reason(settings or {})
+    except Exception:  # noqa: BLE001 - a display hint must never block a study
+        return None
+
+
 def _raw_data_dir(settings: dict | None) -> Path:
     """Where the pipeline will look for raw data (``paths.raw_data``)."""
     from edmars import datasets
@@ -2352,10 +2369,21 @@ def _wrap(label: str, text: str, width: int = 78) -> list[str]:
 
 
 def confirmation_card(
-    plan: StudyPlan, settings: dict | None, *, balance: str | None = None
+    plan: StudyPlan,
+    settings: dict | None,
+    *,
+    balance: str | None = None,
+    review_blocked: str | None = None,
 ) -> str:
-    """The R6 card: what will run, how long, what it costs, what is sent where."""
+    """The R6 card: what will run, how long, what it costs, what is sent where.
+
+    ``review_blocked`` is why the review the plan asks for will not run
+    (LSAR cannot be loaded here); the card then says so, and quotes the
+    time and price of a study without the review.
+    """
     provider = str(_sget(settings, "provider", "deepseek"))
+    blocked = review_blocked if plan.review else None
+    reviewed = plan.review and not blocked
     provider_name = _PROVIDER_NAMES.get(provider, provider)
     lines: list[str] = []
     if plan.experimental:
@@ -2380,7 +2408,13 @@ def confirmation_card(
     lines += _wrap("Data:", f"{_dataset_label(plan.dataset)} ({plan.dataset})")
     venue_name = VENUES.get(plan.venue, plan.venue)
     lines += _wrap("Paper:", f"{venue_name}, {plan.paper_format} format")
-    if plan.review:
+    if blocked:
+        lines += _wrap(
+            "Review:",
+            f"automated peer review (LSAR) will NOT run. {blocked} Run `edmars setup "
+            "reviewer` to fix it; this study goes ahead without a review.",
+        )
+    elif plan.review:
         bench = (
             "benchmarked against papers published at this venue"
             if venue_benchmarked(plan.venue, settings)
@@ -2398,12 +2432,13 @@ def confirmation_card(
         base = _sget(settings, "provider_base_url")
         ai += f" at {base}" if base else ""
     lines += _wrap("AI:", ai)
-    lines += _wrap("Time:", TIME_WITH_REVIEW if plan.review else TIME_WITHOUT_REVIEW)
+    time_text = TIME_WITH_REVIEW if reviewed else TIME_WITHOUT_REVIEW
+    lines += _wrap("Time:", f"{time_text}. {estimates.ENDS_SOONER}")
     if provider == "deepseek":
-        cost = estimates.cost_deepseek(plan.review)
+        cost = estimates.cost_deepseek(reviewed)
     else:
         cost = COST_LOCAL if provider == "local" else COST_OTHER
-        if plan.review:
+        if reviewed:
             # The review always runs on DeepSeek, whatever writes the study.
             cost += f" The automated review uses DeepSeek: {estimates.REVIEW_COST_DEEPSEEK}."
     lines += _wrap("Cost:", cost)
@@ -2427,7 +2462,7 @@ def confirmation_card(
         "To Semantic Scholar and arXiv: search words from your question. To Crossref: the "
         "titles of the papers found, to check that they exist.",
     ]
-    if plan.review:
+    if reviewed:
         bullets.append(
             "To DeepSeek, for the automated review: the finished paper's text."
         )
@@ -2826,7 +2861,16 @@ def _ask_options(ui: Any, settings: dict | None, plan: StudyPlan) -> StudyPlan:
             default=default_format,
         )
     )
-    if review_ok:
+    blocker = _review_blocker(settings) if review_ok else None
+    if blocker:
+        # Asking would offer a review that cannot happen. The choice made
+        # in setup stays, so the card says the review will not run.
+        review = plan.review
+        ui.info(
+            f"The automated peer review (LSAR) cannot run on this computer: {blocker} "
+            "Fix it with `edmars setup reviewer`."
+        )
+    elif review_ok:
         review = bool(
             ui.confirm(
                 "Run the automated peer review (LSAR) after the paper is written? "
@@ -2956,7 +3000,8 @@ def _review_and_confirm(
         if not options_done:
             plan = _ask_options(ui, settings, plan)
             options_done = True
-        ui.panel("Check your study", confirmation_card(plan, settings))
+        ui.panel("Check your study", confirmation_card(
+            plan, settings, review_blocked=_review_blocker(settings) if plan.review else None))
         action = ui.select(
             "Ready?",
             [("start", "Start the study"), ("edit", "Edit"), ("cancel", "Cancel")],

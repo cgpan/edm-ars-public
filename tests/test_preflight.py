@@ -376,23 +376,6 @@ def _unimportable_lsar(root: Path) -> Path:
     return root
 
 
-def test_under_edmars_the_lsar_fix_is_the_setup_command(
-    config: dict, data_file: str, all_tools: None, tmp_path: Path,
-    _restore_lsar_modules: None, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The Mac test (round 2): the study's console.log said "python -m pip
-    install -r ...", which the edmars Python (a uv venv) cannot run: it
-    has no pip. edmars has a command for exactly this."""
-    monkeypatch.setenv("EDMARS_RUN_ID", "2026-09-27_1419_x")
-    root = _unimportable_lsar(tmp_path / "LSAR-fake")
-    config["review_gate"]["lsar_project_path"] = str(root)
-    findings = check_run_prerequisites(
-        config, "prediction", "hsls09_public", data_file, True
-    )
-    [lsar] = [f for f in findings if f.code == "LSAR_IMPORT_FAILED"]
-    assert lsar.fix == "Run `edmars setup reviewer`."
-
-
 def test_outside_edmars_the_lsar_fix_works_with_pip_or_uv(
     config: dict, data_file: str, all_tools: None, tmp_path: Path,
     _restore_lsar_modules: None, monkeypatch: pytest.MonkeyPatch,
@@ -411,6 +394,28 @@ def test_outside_edmars_the_lsar_fix_works_with_pip_or_uv(
     )
     assert f"{python} -m pip install -r {requirements}" in lsar.fix
     assert f"uv pip install --python {python} -r {requirements}" in lsar.fix
+
+
+def test_under_edmars_the_lsar_fixes_name_the_edmars_command(
+    config: dict, data_file: str, all_tools: None, tmp_path: Path,
+    _restore_lsar_modules: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The Mac test's console.log said "python -m pip install -r
+    # .../requirements.txt", which fails in the installed copy's
+    # environment (uv makes it without pip), while the edmars screen said
+    # `edmars setup reviewer`. Both LSAR findings name that command.
+    monkeypatch.setenv("EDMARS_RUN_ID", "preflight")
+    root = _unimportable_lsar(tmp_path / "LSAR-fake")
+    config["review_gate"]["lsar_project_path"] = str(root)
+    findings = check_run_prerequisites(config, "prediction", "hsls09_public", data_file, True)
+    [lsar] = [f for f in findings if f.code == "LSAR_IMPORT_FAILED"]
+    assert lsar.fix == "Run `edmars setup reviewer`."
+    assert "pip" not in lsar.fix
+
+    config["review_gate"]["lsar_project_path"] = str(tmp_path / "nowhere")
+    findings = check_run_prerequisites(config, "prediction", "hsls09_public", data_file, True)
+    [lsar] = [f for f in findings if f.code == "LSAR_NOT_FOUND"]
+    assert lsar.fix == "Run `edmars setup reviewer`."
 
 
 def test_gate_disabled_skips_lsar(

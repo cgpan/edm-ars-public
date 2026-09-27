@@ -1613,6 +1613,10 @@ def _progress_line(record: dict) -> str | None:
         )
         return f"  generated code attempt {attempt} of {total} failed ({why}){more}"
     if etype == "verdict":
+        if data.get("source") == "pre_critic":
+            # The automatic checks, not the Critic: no review ran, so
+            # there is no score (an older record carries a placeholder 1).
+            return f"  automatic pre-review check: {data.get('verdict')}"
         score = data.get("critic_score")
         return (
             f"  critic verdict: {data.get('verdict')}"

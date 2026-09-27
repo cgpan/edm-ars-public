@@ -845,6 +845,58 @@ def test_card_content(tmp_path: Path) -> None:
     assert "benchmark" in card
 
 
+def test_card_says_a_review_that_cannot_run_will_not_run() -> None:
+    # The Mac test: the pre-start check warned that LSAR could not be
+    # imported and "the review gate will not run"; the card printed right
+    # after it said "Review: automated peer review (LSAR) on".
+    plan = study.plan_from_flags({}, prompt="Which ninth-grade factors predict GPA?")
+    reviewed = StudyPlan(**{**plan.__dict__, "review": True})
+    settings = {"provider": "deepseek", "lsar": {"enabled": True, "auto_review": True}}
+    reason = "The check before the start could not load LSAR (see the warning above)."
+    card = study.confirmation_card(reviewed, settings, review_blocked=reason)
+    flat = " ".join(card.split())
+    assert "automated peer review (LSAR) will NOT run. " + reason in flat
+    assert "Run `edmars setup reviewer` to fix it; this study goes ahead without a review." in flat
+    assert "(LSAR) on" not in flat and "benchmark" not in flat
+    # Time and price are those of a study without the review, and the
+    # paper is not sent to DeepSeek for one.
+    assert study.TIME_WITHOUT_REVIEW in card
+    assert study.COST_DEEPSEEK_WITHOUT_REVIEW in flat
+    assert "for the automated review" not in flat
+    # A study that did not ask for the review is simply "off".
+    card = study.confirmation_card(plan, settings, review_blocked=reason)
+    assert "automated peer review off" in card and "NOT" not in card
+
+
+def test_new_study_says_the_reviewer_cannot_run_instead_of_offering_it(
+    monkeypatch: pytest.MonkeyPatch, raw_dir: Path, tmp_path: Path
+) -> None:
+    from edmars import lsar
+
+    install_data(raw_dir, "hsls09_public")
+    home = tmp_path / "lsar"
+    for rel in lsar.REQUIRED_FILES:
+        (home / rel).parent.mkdir(parents=True, exist_ok=True)
+        (home / rel).write_text("overall_p25_full: 6.3\n", encoding="utf-8")
+    monkeypatch.setattr(lsar, "_missing_modules",
+                        lambda: {"tenacity": "tenacity", "pymupdf4llm": "pymupdf4llm", "arxiv": "arxiv"})
+    settings = {"provider": "deepseek",
+                "lsar": {"enabled": True, "auto_review": True, "home": str(home)}}
+    plan, ui = run_flow(monkeypatch, [
+        "prediction",
+        "hsls09_public",
+        "Which ninth-grade factors best predict college attendance by 2016?",
+        DEFAULT, DEFAULT,           # venue, paper format; no review question
+        "start",
+    ], settings)
+    assert plan is not None and plan.review is True  # the setting stays; it just cannot run
+    assert not any(entry[0] == "confirm" for entry in ui.log)
+    assert ("cannot run on this computer: LSAR's Python packages are missing (tenacity, "
+            "pymupdf4llm, arxiv)") in ui.said("info")
+    [card] = [entry[2] for entry in ui.log if entry[:2] == ("panel", "Check your study")]
+    assert "will NOT run" in " ".join(card.split())
+
+
 def test_card_prices_a_deepseek_study_with_and_without_the_review() -> None:
     # The Mac study (DeepSeek, off-peak, stopped after its analysis) cost
     # about US$0.16 while the card promised US$0.05-0.20 for a whole

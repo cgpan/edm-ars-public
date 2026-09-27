@@ -232,6 +232,47 @@ def test_an_unresolved_study_from_the_real_pipeline(
     assert outcome.fix.startswith("Resuming would not help, because no revision rounds are left.")
 
 
+def test_the_placeholder_score_is_nowhere_in_a_stopped_studys_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_home: Path,
+) -> None:
+    # The Mac study: summary.html said "Internal methods review: not
+    # scored", while the verdict event carried critic_score 1 and
+    # console.log said "critic verdict: ABORT, score 1".
+    from typer.testing import CliRunner
+
+    from edmars import settings as settings_mod
+    from edmars.cli import app
+
+    run = _pipeline_run(tmp_path, monkeypatch, resolved=False)
+    verdicts = [json.loads(line)["data"] for line in
+                (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["type"] == "verdict"]
+    assert verdicts and all(v["source"] == "pre_critic" for v in verdicts)
+    assert all(v["critic_score"] is None for v in verdicts)
+
+    current = settings_mod.load()
+    current["studies_dir"] = str(tmp_path)
+    settings_mod.save(current)
+    listed = CliRunner().invoke(app, ["runs", "--json"])
+    assert listed.exit_code == 0, listed.output
+    [item] = json.loads(listed.output)
+    assert item["name"] == "run"
+    assert not [key for key in item if "score" in key or "critic" in key]
+    assert "1/10" not in listed.output
+
+
+def test_a_checks_report_alone_is_never_read_as_a_score(run_home: Path) -> None:
+    # A folder whose events and log say nothing about the checks (removed,
+    # or never written) still has their report: its 1 is a placeholder.
+    report = {"overall_verdict": "ABORT", "overall_quality_score": 1,
+              "_source": "pre_critic_short_circuit"}
+    run = make_run(run_home, events=None, log=None, pdf=False, review=report)
+    state = load_state(run)
+    assert "critic_score" not in state.metrics
+    assert "1/10" not in result_text(classify(run), state, run)
+    assert "1/10" not in render_summary_html(classify(run), state, run)
+
+
 def test_a_study_stopped_after_one_revision_from_the_real_pipeline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_home: Path,
 ) -> None:
