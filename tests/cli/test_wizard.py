@@ -19,7 +19,7 @@ from tests.cli.wizard_fakes import DEFAULT, Fakes, KeyCheck, NonInteractiveError
 GOOD_KEY = "sk-fake-deepseek-0123456789abcdef"
 BAD_KEY = "sk-fake-rejected-0123456789abcdef"
 OTHER_KEY = "sk-fake-other-0123456789abcdefgh"
-ACK = "2026-09-25"
+ACK = "2026-09-27"
 
 
 @pytest.fixture

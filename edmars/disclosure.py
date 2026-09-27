@@ -25,14 +25,14 @@ from typing import Any
 from edmars import settings as settings_mod
 
 #: Version of the acknowledgement text currently shown in setup.
-ACK_VERSION = "2026-09-25"
+ACK_VERSION = "2026-09-27"
 
 #: File in ``edmars/texts/`` holding that text.
 ACK_FILE = "acknowledgement_v1.md"
 
 #: SHA-256 of the acknowledgement text with LF line endings. Pinned so a
 #: wording change cannot ship without a version bump.
-ACK_SHA256 = "6f78b5a3c473f571b7412e882ad5303cc3daf8557e8fbaacc739794924269373"
+ACK_SHA256 = "3c6120dc02666c2f1fd02eea03ac93df7dc68ddd135d1e4b0ebb8e122a355448"
 
 #: The reminder every result screen ends with.
 AI_DRAFT_REMINDER = (

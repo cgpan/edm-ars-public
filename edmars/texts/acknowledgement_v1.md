@@ -6,7 +6,9 @@ WHAT LEAVES YOUR COMPUTER
   Error messages can sometimes include a few individual data values. So do
   the folder paths of your data and studies (they can include your user
   name) and a short summary of your earlier studies.
-- Search words from your question go to Semantic Scholar, arXiv and Crossref.
+- Search words from your question go to Semantic Scholar and arXiv (and to
+  OpenAlex when arXiv refuses); the titles of papers found go to Crossref to
+  check that the citations exist.
 - If you turn on the automated reviewer, the finished paper goes to DeepSeek.
 - The dataset file itself is never uploaded. EDM-ARS has no telemetry.
 

@@ -21,7 +21,7 @@ from tests.cli.wizard_fakes import Check, Fakes, KeyCheck, install_fakes
 
 GOOD_KEY = "sk-fake-deepseek-0123456789abcdef"
 S2_KEY = "s2-fake-key-0123456789"
-ACK = "2026-09-25"
+ACK = "2026-09-27"
 GB = 1024 ** 3
 
 _Usage = namedtuple("_Usage", "total used free")

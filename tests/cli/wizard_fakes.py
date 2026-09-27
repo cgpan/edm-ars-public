@@ -260,7 +260,7 @@ class FakeSettings:
 
 
 class FakeDisclosure:
-    ACK_VERSION = "2026-09-25"
+    ACK_VERSION = "2026-09-27"
 
     def ack_text(self) -> str:
         return "WHAT LEAVES YOUR COMPUTER\n- Your question goes to the AI service you choose."
