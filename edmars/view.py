@@ -224,18 +224,21 @@ def render_screen(
     if recent:
         add("Recent:", "dim")
         errors = {" ".join(e.split()) for e in state.errors}
+        notices = set(state.notices)
         for line in recent:
-            if line not in errors:
+            if line not in errors and line not in notices:
                 add(f"  {line}", "dim")
                 continue
             # An error is the one line a person needs whole (why the study
-            # stopped): wrap it instead of cutting it at the screen's edge.
+            # stopped), and a notice says why a step is being redone and
+            # which revision this is: wrap them instead of cutting them at
+            # the screen's edge.
             wrapped = _wrap(to_ascii(line) if plain else line, width - 2, indent="  ")
             if len(wrapped) > RECENT_ERROR_LINES:
                 wrapped = wrapped[:RECENT_ERROR_LINES]
                 wrapped[-1] = _truncate(wrapped[-1] + " ...", width - 2, plain)
             for text in wrapped:
-                add(f"  {text}", "red")
+                add(f"  {text}", "red" if line in errors else "yellow")
     if not state.finished:
         add("Ctrl+C: leave or stop", "dim")
     return out

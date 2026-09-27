@@ -62,6 +62,8 @@ stages:
   REVISING:
     title: "Revising (only if the reviewer asks for changes)"
     now: "The reviewer asked for changes; the affected steps are being redone."
+    # When the automatic pre-review checks, not the reviewer, sent it back.
+    now_checks: "The automatic checks sent the work back; the affected steps are being redone."
   WRITING:
     title: "Writing the paper and making the PDF"
     now: >-
@@ -403,11 +405,28 @@ failures:
       share the bundle when you ask for help (it contains no API keys).
     command: "edmars resume {run}"
 
+# The recent-list line for a PRE_CRITIC_REVISE warning: a critical
+# pre-review finding a revision can fix sends the work back instead of
+# stopping the study. {found}: each check's "revise" below, joined with
+# "and" ("unknown" for a check without one); {step}: the step the work
+# goes back to, the earliest of the agents re-run.
+pre_critic_revise:
+  line: "{label}: {found}; sending it back to {step} (revision {revision} of {max_revisions})"
+  label: "Automatic check"
+  label_many: "Automatic checks"
+  unknown: "the results have a problem a revision can fix"
+  steps:
+    ProblemFormulator: "the question step"
+    DataEngineer: "the data preparation step"
+    Analyst: "the analysis step"
+    default: "the step that made them"
+
 # Advice for the automatic pre-review checks (src/pre_critic_checks.py)
 # that stop a study: the result screen shows the check's own sentence,
 # then "fix". "what" is what the check found, as it fills {checks} in the
 # PRE_CRITIC_ABORT and PRE_CRITIC_UNRESOLVED "why" ("found ... , so").
-# Only critical checks stop a study.
+# "revise" is the same finding as a clause, for a check a revision can
+# fix (pre_critic_revise above). Only critical checks stop a study.
 pre_critic_checks:
   pcc_01:
     what: "the outcome among the predictors (data leakage)"
@@ -418,6 +437,7 @@ pre_critic_checks:
       report it.
   pcc_02:
     what: "no trained model in the results"
+    revise: "the analysis produced no trained model"
     fix: >-
       The analysis produced no trained models at all. This is usually a
       one-off failure of the AI-written analysis code, so starting the
@@ -429,6 +449,7 @@ pre_critic_checks:
       fewer variables, or an outcome that more students answered.
   pcc_07:
     what: "a test the question promises missing from the analysis"
+    revise: "the analysis did not run the comparison the question promises"
     fix: >-
       The question the study worked from promised a comparison (or another
       test) that the analysis did not run, and a paper would have claimed

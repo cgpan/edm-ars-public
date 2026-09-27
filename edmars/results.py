@@ -109,6 +109,12 @@ def _critic_line(state: RunState) -> str | None:
     if m.get("critic_verdict") is None and m.get("critic_score") is None:
         return None
     verdict = str(m.get("critic_verdict") or "").upper()
+    if m.get("critic_by_checks"):
+        # The automatic pre-review checks decided the last round; the
+        # reviewer did not score it (the "1/10" in their report is a
+        # placeholder).
+        did = "stopped the study" if verdict.startswith("ABORT") else "sent the work back"
+        return f"Internal methods review: not scored; the automatic checks {did} before the review"
     words = {"PASS": "passed", "REVISE": "asked for changes", "ABORT": "stopped the study"}
     text = words.get(verdict.split()[0], verdict.lower()) if verdict else ""
     if m.get("critic_unverified") and verdict.startswith(("PASS", "REVISE")):

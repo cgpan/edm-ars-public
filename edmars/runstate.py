@@ -176,6 +176,10 @@ class RunState:
     abort: dict[str, Any] | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: Recent lines the live view shows whole instead of cutting at the
+    #: screen's edge: warnings that change the course of the study (the
+    #: automatic checks sending the work back for revision).
+    notices: list[str] = field(default_factory=list)
     verdict: dict[str, Any] | None = None
     compile: dict[str, Any] | None = None
     gate: dict[str, Any] | None = None
@@ -543,6 +547,96 @@ def cost_line(state: RunState) -> str:
 CUT_OFF_NOTE = ("An AI call that was cut off when the study was stopped may still be "
                 "billed by the AI service, so the real cost can be a little higher.")
 
+#: The order in which the pipeline's REVISING cascade re-runs agents; a
+#: revision starts at the earliest one named.
+_CASCADE = ("ProblemFormulator", "DataEngineer", "Analyst")
+#: A PRE_CRITIC_REVISE message: "Sent back to Analyst (revision 1 of 2):
+#: pcc_07: <the check's sentence>". Read only when the event lacks the
+#: structured fields.
+_RE_REVISE_MESSAGE = re.compile(r"^Sent back to (.+?) \(revision (\d+) of (\d+)\):")
+_RE_CHECK_ID = re.compile(r"(?:^|;)\s*(pcc_[a-z0-9]+):")
+
+
+def pre_critic_revise_words(data: Mapping[str, Any]) -> str | None:
+    """A ``PRE_CRITIC_REVISE`` warning in plain words.
+
+    The pipeline's message is the check's own text ("Sent back to Analyst
+    (revision 1 of 2): pcc_07: The research question says 'above and
+    beyond', which commits the paper to ..."), which is what the recent
+    list showed. This says what the automatic check found and which step
+    the work goes back to, from ``pre_critic_revise`` and each check's
+    ``revise`` in messages.yaml. None when the event does not say which
+    revision this is; the caller then shows the message.
+    """
+    from edmars.endstates import fill
+
+    words = _messages().get("pre_critic_revise")
+    words = words if isinstance(words, dict) else {}
+    advice = _messages().get("pre_critic_checks")
+    advice = advice if isinstance(advice, dict) else {}
+    message = str(data.get("message") or "")
+    sent = _RE_REVISE_MESSAGE.match(message)
+    checks = data.get("checks")
+    if not isinstance(checks, list):
+        checks = _RE_CHECK_ID.findall(message[sent.end():]) if sent else []
+    targets = data.get("targets")
+    if not isinstance(targets, list):
+        targets = [t.strip() for t in sent.group(1).split(",")] if sent else []
+    revision = _int(data.get("revision"))
+    most = _int(data.get("max_revisions"))
+    if sent and revision is None:
+        revision = int(sent.group(2))
+    if sent and most is None:
+        most = int(sent.group(3))
+    if revision is None or most is None:
+        return None
+
+    found: list[str] = []
+    for check in checks:
+        entry = advice.get(str(check))
+        clause = " ".join(str(entry.get("revise") or "").split()) if isinstance(entry, dict) else ""
+        if clause and clause not in found:
+            found.append(clause)
+    if not found:
+        found = [str(words.get("unknown") or "the results have a problem a revision can fix")]
+    steps = words.get("steps")
+    steps = steps if isinstance(steps, dict) else {}
+    first = next((a for a in _CASCADE if a in targets), None)
+    step = (steps.get(first) if first else None) or steps.get("default") or "the step that made them"
+    template = words.get("line") or (
+        "{label}: {found}; sending it back to {step} (revision {revision} of {max_revisions})")
+    return fill(
+        template,
+        label=str(words.get("label_many" if len(found) > 1 else "label") or "Automatic check"),
+        found=" and ".join(found),
+        step=step,
+        revision=revision,
+        max_revisions=most,
+    )
+
+
+def _pre_critic_verdict_words(state: RunState, data: Mapping[str, Any], plain: str | None) -> str | None:
+    """The recent-list line for the automatic checks' verdict event.
+
+    The pipeline words it "Automatic pre-review check: REVISE". A REVISE
+    adds nothing: the PRE_CRITIC_REVISE warning just before it says what
+    was found and where the work went. A stop is named by its title
+    ("Automatic checks stopped the study after its revisions").
+    """
+    verdict = str(data.get("verdict") or "").upper()
+    if verdict == "REVISE":
+        return None
+    if verdict != "ABORT":
+        return plain
+    abort = state.abort if isinstance(state.abort, dict) else {}
+    code = str(abort.get("code") or "")
+    if not code.startswith("PRE_CRITIC_"):
+        code = "PRE_CRITIC_ABORT"
+    failures = _messages().get("failures")
+    entry = failures.get(code) if isinstance(failures, dict) else None
+    title = entry.get("title") if isinstance(entry, dict) else None
+    return str(title or "Automatic checks stopped the study")
+
 
 def _apply(state: RunState, ev: dict[str, Any]) -> None:
     etype = str(ev.get("type") or "")
@@ -564,6 +658,8 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
     stage = _plain_stage(ev.get("stage"))
     plain = ev.get("plain") if isinstance(ev.get("plain"), str) else None
     cycle = _int(ev.get("cycle"))
+    if etype == "verdict" and data.get("source") == "pre_critic":
+        plain = _pre_critic_verdict_words(state, data, plain)
 
     if plain and etype not in _QUIET_TYPES:
         _add_recent(state, plain)
@@ -678,6 +774,10 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
             state.reason_code = str(data.get("reason_code"))
     elif etype == "warning":
         msg = plain or data.get("message")
+        if data.get("code") == "PRE_CRITIC_REVISE":
+            msg = pre_critic_revise_words(data) or msg
+            if msg:
+                state.notices.append(" ".join(str(msg).split()))
         if msg:
             state.warnings.append(str(msg))
             _add_recent(state, str(msg))
@@ -819,6 +919,10 @@ _RE_PRECRITIC = re.compile(r"^Pre-Critic guard found critical failures\s*" + _AR
 #: [PRE_CRITIC_UNRESOLVED]: pcc_07 was still failing ...", after the
 #: short-circuit line (which alone reads as PRE_CRITIC_ABORT).
 _RE_PRECRITIC_STOP = re.compile(r"^Pre-Critic guard stopped the run \[([A-Z_]+)\]:\s*(.*)")
+#: "Pre-Critic guard: revision cycle 1 of 2 re-runs Analyst for pcc_07":
+#: the log's side of the PRE_CRITIC_REVISE warning event.
+_RE_PRECRITIC_REVISE = re.compile(
+    r"^Pre-Critic guard: revision cycle (\d+) of (\d+) re-runs (.+?) for (pcc_[a-z0-9_, ]+)$")
 _RE_COST = re.compile(r"^Run cost: (?:\$([\d.]+)|not priced) over (\d+) LLM calls")
 _RE_RESUMED = re.compile(r"^Resumed from checkpoint \(state=(?:PipelineState\.)?(\w+)\)")
 _RE_GATE = re.compile(r"^LSAR review gate: passed=(\w+), cycles=(\d+), score=([\d.]+)")
@@ -885,6 +989,12 @@ def parse_log_line(line: str) -> list[dict[str, Any]]:
             make("run.end", state="ABORTED",
                  abort={"code": mm.group(1), "stage": "CRITIQUING", "message": mm.group(2)}),
         ]
+    mm = _RE_PRECRITIC_REVISE.match(msg)
+    if mm:
+        return [make("warning", stage="CRITIQUING", code="PRE_CRITIC_REVISE", message=msg,
+                     checks=[c.strip() for c in mm.group(4).split(",") if c.strip()],
+                     targets=[t.strip() for t in mm.group(3).split(",") if t.strip()],
+                     revision=int(mm.group(1)), max_revisions=int(mm.group(2)))]
     mm = _RE_PRECRITIC.match(msg)
     if mm:
         verdict = mm.group(1).upper()
@@ -1587,6 +1697,14 @@ def _enrich(state: RunState, run_dir: Path, files: _FileCache, *, tail: bool) ->
             metrics["critic_verdict"] = str(state.verdict.get("verdict"))
         if state.verdict.get("unverified") is not None and "critic_unverified" not in metrics:
             metrics["critic_unverified"] = bool(state.verdict.get("unverified"))
+        if state.verdict.get("source") == "pre_critic" and state.verdict.get("verdict"):
+            # The automatic checks decided the latest round without the
+            # reviewer: their report's score of 1 is a placeholder, not a
+            # review, and review_report.json (if any) is an earlier round's.
+            metrics["critic_verdict"] = str(state.verdict.get("verdict"))
+            metrics["critic_by_checks"] = True
+            metrics.pop("critic_score", None)
+            metrics.pop("critic_unverified", None)
 
     gate = files.load(run_dir / "lsar_review" / "gate_summary.json")
     if isinstance(gate, dict):
@@ -1773,6 +1891,10 @@ def _stage_details(state: RunState) -> None:
                 detail += f" · smaller outcome group {share:.0%}"
         elif st.key == "ANALYZING" and st.status in ("done", "failed"):
             detail = key_result(m, state.task_type) or ""
+        elif st.key == "CRITIQUING" and m.get("critic_by_checks"):
+            verdict = str(m.get("critic_verdict")).upper()
+            detail = ("automatic checks stopped the study" if verdict.startswith("ABORT")
+                      else "automatic checks sent the work back")
         elif st.key == "CRITIQUING" and m.get("critic_verdict"):
             verdict = str(m.get("critic_verdict")).upper()
             words = {"PASS": "passed", "REVISE": "asked for changes", "ABORT": "stopped the study"}
@@ -1869,6 +1991,11 @@ def describe_now(state: RunState, now: datetime | None = None) -> str:
             return "Starting up…"
         return "Moving on to the next step…"
     base = _stage_now_text(state, st.key)
+    if st.key == "REVISING" and (state.verdict or {}).get("source") == "pre_critic":
+        entry = (_messages().get("stages") or {}).get("REVISING")
+        by_checks = entry.get("now_checks") if isinstance(entry, dict) else None
+        base = str(by_checks or "The automatic checks sent the work back; "
+                   "the affected steps are being redone.")
     if state.llm_wait and state.llm_wait.get("seconds"):
         secs = int(state.llm_wait["seconds"] or 0)
         return (f"The AI service asked us to slow down; waiting {secs} s before "

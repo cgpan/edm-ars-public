@@ -2737,9 +2737,8 @@ class Orchestrator:
             self.ctx.current_state = PipelineState.REVISING
             report["effective_verdict"] = "REVISE"
             driving = pre_result.revisable_failures
-            targets = ", ".join(
-                a for a, text in report["revision_instructions"].items() if text
-            )
+            rerun = [a for a, text in report["revision_instructions"].items() if text]
+            targets = ", ".join(rerun)
             summary = "; ".join(f"{f.check_id}: {f.message}" for f in driving)
             self._log(
                 "Orchestrator",
@@ -2756,6 +2755,12 @@ class Orchestrator:
                     f"Sent back to {targets} (revision {self.ctx.revision_cycle} "
                     f"of {self.ctx.max_revision_cycles}): {summary}"
                 ),
+                # The message is cut at 500 characters; an interface words
+                # the event from these fields instead of parsing it.
+                checks=[f.check_id for f in driving],
+                targets=rerun,
+                revision=self.ctx.revision_cycle,
+                max_revisions=self.ctx.max_revision_cycles,
             )
         else:
             fatal = pre_result.fatal_failures
