@@ -362,6 +362,60 @@ def test_semantic_scholar_key_is_checked_and_saved(fx: Fakes) -> None:
     assert "Semantic Scholar key is the reliable way" in out
 
 
+OPENALEX_KEY = "oa-fake-key-0123456789abcdef"
+
+
+def test_an_openalex_key_is_optional_hidden_and_kept_like_the_others(fx: Fakes) -> None:
+    # arXiv refuses Python clients on some machines (the Mac's HTTP 406);
+    # the pipeline then asks OpenAlex, which a key gives a larger allowance.
+    fx.ui.script = ["openalex", OPENALEX_KEY, "skip"]
+    assert run("literature") == 0
+    assert fx.secrets.store == {"OPENALEX_API_KEY": OPENALEX_KEY}
+    [paste] = [(kind, message) for kind, message, _ in fx.ui.prompts if "OpenAlex key" in message
+               and kind != "choose"]
+    assert paste[0] == "secret"
+    assert OPENALEX_KEY not in fx.ui.output
+    assert OPENALEX_KEY not in fx.paths.settings_path().read_text(encoding="utf-8")
+    # Not tested against OpenAlex: no request leaves for it here.
+    assert fx.providers.calls == []
+    out = " ".join(fx.ui.output.split())
+    assert "When arXiv refuses, EDM-ARS asks OpenAlex instead" in out
+    assert "https://openalex.org/settings/api" in out
+    # Adding it leaves the Semantic Scholar question where it was.
+    assert fx.saved()["literature"]["semantic_scholar_key_set"] is False
+    menus = [dict(choices or []) for kind, message, choices in fx.ui.prompts if message == "Semantic Scholar key"]
+    assert menus[0]["openalex"] == "Add an OpenAlex key (optional)"
+    assert menus[1]["openalex"] == "Replace the saved OpenAlex key (optional)"
+
+
+def test_an_empty_openalex_paste_goes_back_and_saves_nothing(fx: Fakes) -> None:
+    fx.ui.script = ["openalex", "", "skip"]
+    assert run("literature") == 0
+    assert fx.secrets.store == {}
+
+
+def test_noninteractive_openalex_key_variable_is_copied_to_secure_storage(
+        fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CI_OPENALEX", OPENALEX_KEY)
+    assert run("literature", non_interactive=True, options={"openalex_key_env": "CI_OPENALEX"}) == 0
+    assert fx.secrets.store == {"OPENALEX_API_KEY": OPENALEX_KEY}
+    assert OPENALEX_KEY not in fx.ui.output
+
+
+def test_noninteractive_openalex_key_stays_optional(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Not asked for: nothing about OpenAlex. In OPENALEX_API_KEY already:
+    # used from there, not copied.
+    assert run("literature", non_interactive=True, options={}) == 0
+    assert "OpenAlex" not in fx.ui.output and fx.secrets.store == {}
+    monkeypatch.setenv("OPENALEX_API_KEY", OPENALEX_KEY)
+    assert run("literature", non_interactive=True, options={}) == 0
+    assert fx.secrets.store == {}
+    # Named but empty: said, and not a failure.
+    monkeypatch.delenv("OPENALEX_API_KEY")
+    assert run("literature", non_interactive=True, options={"openalex_key_env": "CI_EMPTY"}) == 0
+    assert "CI_EMPTY is empty; OpenAlex runs without a key." in fx.ui.output
+
+
 def test_dataset_download_records_terms_and_shows_progress(fx: Fakes) -> None:
     fx.ui.script = ["download", "agree", "continue"]
     assert run("datasets") == 0

@@ -2459,8 +2459,9 @@ def confirmation_card(
         f"To {sent_to}: your question, variable names and summary statistics, "
         "the analysis code the AI writes, its error messages and printed output "
         "(which can include a few individual data values), and the draft paper.",
-        "To Semantic Scholar and arXiv: search words from your question. To Crossref: the "
-        "titles of the papers found, to check that they exist.",
+        "To Semantic Scholar and arXiv: search words from your question; to OpenAlex, the "
+        "same words, if arXiv refuses them. To Crossref: the titles of the papers found, to "
+        "check that they exist.",
     ]
     if reviewed:
         bullets.append(

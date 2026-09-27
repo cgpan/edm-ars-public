@@ -36,7 +36,7 @@ from edmars.ui import TransferProgress as _RealTransferProgress
 DEFAULT = object()
 
 SECRET_NAMES = ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "SEMANTIC_SCHOLAR_API_KEY",
-                "TAVILY_API_KEY", "MINIMAX_API_KEY")
+                "OPENALEX_API_KEY", "TAVILY_API_KEY", "MINIMAX_API_KEY")
 
 
 # ---------------------------------------------------------------------------

@@ -109,6 +109,8 @@ NONINTERACTIVE_OPTIONS: dict[str, tuple[str, str]] = {
                                   "(default: the provider's own, e.g. DEEPSEEK_API_KEY)"),
     "deepseek_key_env": ("EDMARS_DEEPSEEK_KEY_ENV", "NAME of the variable holding a DeepSeek key for the reviewer"),
     "semantic_scholar_key_env": ("EDMARS_S2_KEY_ENV", "NAME of the variable holding a Semantic Scholar key"),
+    "openalex_key_env": ("EDMARS_OPENALEX_KEY_ENV", "NAME of the variable holding an OpenAlex key (optional; "
+                                                    "OpenAlex is searched when arXiv refuses)"),
     "check_keys": ("EDMARS_CHECK_KEYS", "false to skip the live key checks (no network)"),
     "allow_key_file": ("EDMARS_ALLOW_KEY_FILE", "true to keep keys in a private file when the credential "
                                                 "store does not work"),
@@ -167,6 +169,8 @@ STAGE_LABELS: dict[str, str] = {
 
 SEMANTIC_SCHOLAR_ENV = "SEMANTIC_SCHOLAR_API_KEY"
 SEMANTIC_SCHOLAR_FORM = "https://www.semanticscholar.org/product/api#api-key-form"
+OPENALEX_ENV = "OPENALEX_API_KEY"
+OPENALEX_KEY_PAGE = "https://openalex.org/settings/api"
 DEEPSEEK_ENV = "DEEPSEEK_API_KEY"
 TAVILY_ENV = "TAVILY_API_KEY"
 LOCAL_PLACEHOLDER_KEY = "local"
@@ -557,7 +561,7 @@ class _Wizard:
     def change_menu(self) -> int:
         menu: list[tuple[str, str]] = [
             ("ai", "Change the AI service or its key"),
-            ("literature", "Add or change the Semantic Scholar key"),
+            ("literature", "Add or change the Semantic Scholar or OpenAlex key"),
             ("datasets", "Datasets"),
             ("pdf", "PDF typesetting (LaTeX)"),
             ("r", "R for measurement studies"),
@@ -1317,20 +1321,8 @@ class _Wizard:
         from edmars import secrets
 
         if self.ni:
-            key_env = str(self.opt("semantic_scholar_key_env", SEMANTIC_SCHOLAR_ENV))
-            key = os.environ.get(key_env, "").strip()
-            if not key:
-                have = secrets.secret_source(SEMANTIC_SCHOLAR_ENV) is not None
-                self.set("literature.semantic_scholar_key_set", have)
-                if not have:
-                    self.info("No Semantic Scholar key given; literature search runs without one.")
-                return
-            if _truthy(self.opt("check_keys", True)) and self._check_s2(key) == "REJECTED":
-                self.error(f"The Semantic Scholar key in {key_env} was rejected; it was not saved.")
-                return
-            if key_env != SEMANTIC_SCHOLAR_ENV and not self._store_key(SEMANTIC_SCHOLAR_ENV, key):
-                return
-            self.set("literature.semantic_scholar_key_set", True)
+            self._s5_semantic_scholar_noninteractive()
+            self._s5_openalex_noninteractive()
             return
 
         body = (
@@ -1340,17 +1332,23 @@ class _Wizard:
             f"A free key is available from {SEMANTIC_SCHOLAR_FORM} (approval can take a few days).\n\n"
             "arXiv needs no key, but it can refuse requests outright (Crossref, which needs none either, "
             "only checks that cited papers exist and does not search), so the "
-            "Semantic Scholar key is the reliable way to get real citations."
+            "Semantic Scholar key is the reliable way to get real citations.\n\n"
+            "When arXiv refuses, EDM-ARS asks OpenAlex instead, with the same search words. OpenAlex needs "
+            "no key either; an optional free key gives it a larger daily allowance (about 1,000 searches "
+            f"instead of about 100): {OPENALEX_KEY_PAGE}"
         )
         self.header("S5", body, title="Literature search (recommended)")
         while True:
             source = secrets.secret_source(SEMANTIC_SCHOLAR_ENV)
+            openalex = secrets.secret_source(OPENALEX_ENV)
             choices: list[tuple[str, str]] = []
             if source:
                 choices.append(("keep", f"Keep the key saved in {_doctor.store_label(source, SEMANTIC_SCHOLAR_ENV)}"))
             choices.append(("add", "Replace it with a new key" if source else "Add my Semantic Scholar key now"))
             if _can_open_browser():
                 choices.append(("open", "Open the request form in my browser"))
+            choices.append(("openalex", "Replace the saved OpenAlex key (optional)" if openalex
+                            else "Add an OpenAlex key (optional)"))
             choices.append(("skip", "Skip for now (add it later with `edmars setup literature`)"))
             answer = self.choose("Semantic Scholar key", choices, default="keep" if source else "skip")
             if answer == "keep":
@@ -1362,6 +1360,9 @@ class _Wizard:
             if answer == "open":
                 if not _open_url(SEMANTIC_SCHOLAR_FORM):
                     self.info(f"Open this address yourself: {SEMANTIC_SCHOLAR_FORM}")
+                continue
+            if answer == "openalex":
+                self._s5_openalex_key()
                 continue
             key = self.ask_secret("Paste your Semantic Scholar key (it stays hidden; empty goes back)")
             if not key:
@@ -1376,6 +1377,51 @@ class _Wizard:
             if self._store_key(SEMANTIC_SCHOLAR_ENV, key):
                 self.set("literature.semantic_scholar_key_set", True)
                 return
+
+    def _s5_semantic_scholar_noninteractive(self) -> None:
+        from edmars import secrets
+
+        key_env = str(self.opt("semantic_scholar_key_env", SEMANTIC_SCHOLAR_ENV))
+        key = os.environ.get(key_env, "").strip()
+        if not key:
+            have = secrets.secret_source(SEMANTIC_SCHOLAR_ENV) is not None
+            self.set("literature.semantic_scholar_key_set", have)
+            if not have:
+                self.info("No Semantic Scholar key given; literature search runs without one.")
+            return
+        if _truthy(self.opt("check_keys", True)) and self._check_s2(key) == "REJECTED":
+            self.error(f"The Semantic Scholar key in {key_env} was rejected; it was not saved.")
+            return
+        if key_env != SEMANTIC_SCHOLAR_ENV and not self._store_key(SEMANTIC_SCHOLAR_ENV, key):
+            return
+        self.set("literature.semantic_scholar_key_set", True)
+
+    def _s5_openalex_noninteractive(self) -> None:
+        """An OpenAlex key named with ``openalex_key_env`` goes to secure
+        storage; one already in OPENALEX_API_KEY is used from there. It is
+        optional, so nothing is said when none is given."""
+        named = self.opt("openalex_key_env", None)
+        key_env = str(named or OPENALEX_ENV)
+        key = os.environ.get(key_env, "").strip()
+        if not key:
+            if named:
+                self.warn(f"{key_env} is empty; OpenAlex runs without a key.")
+            return
+        if key_env != OPENALEX_ENV:
+            self._store_key(OPENALEX_ENV, key)
+
+    def _s5_openalex_key(self) -> None:
+        """Ask for an OpenAlex key, hidden, and keep it like the other keys.
+
+        EDM-ARS does not test it here: OpenAlex answers without a key, and
+        is asked only when arXiv refuses.
+        """
+        key = self.ask_secret("Paste your OpenAlex key (it stays hidden; empty goes back)")
+        if not key:
+            return
+        if self._store_key(OPENALEX_ENV, key):
+            self.info("EDM-ARS does not test the OpenAlex key now; studies send it only when they "
+                      "search OpenAlex.")
 
     def _check_s2(self, key: str) -> str:
         from edmars import providers

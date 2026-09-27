@@ -71,12 +71,13 @@ VERSION_PACKAGES: tuple[str, ...] = (
 )
 
 SEMANTIC_SCHOLAR_ENV = "SEMANTIC_SCHOLAR_API_KEY"
+OPENALEX_ENV = "OPENALEX_API_KEY"
 DEEPSEEK_ENV = "DEEPSEEK_API_KEY"
 
 #: Every secret EDM-ARS may hold. Their values are scrubbed from the bundle.
 KNOWN_SECRET_NAMES: tuple[str, ...] = (
     "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-    "SEMANTIC_SCHOLAR_API_KEY", "TAVILY_API_KEY", "MINIMAX_API_KEY",
+    "SEMANTIC_SCHOLAR_API_KEY", "OPENALEX_API_KEY", "TAVILY_API_KEY", "MINIMAX_API_KEY",
 )
 
 #: The only files taken from a study folder into a support bundle.
@@ -577,14 +578,21 @@ def check_semantic_scholar(settings: dict[str, Any], *, deep: bool = False) -> l
     from edmars import secrets
 
     source = secrets.secret_source(SEMANTIC_SCHOLAR_ENV)
+    openalex = secrets.secret_source(OPENALEX_ENV)
+    openalex_line = ([make_check("OpenAlex key", "ok", f"OpenAlex key found in {store_label(openalex, OPENALEX_ENV)}")]
+                     if openalex else [])
     if source is None:
         return [make_check("Literature search", "warn",
                            "No Semantic Scholar key. Semantic Scholar often turns away keyless searches; arXiv, "
-                           "the other search, needs no key but can refuse requests outright, so papers can end up "
-                           "with few real citations. A free Semantic Scholar key is the reliable fix",
+                           "the other search, needs no key but can refuse requests outright. When it does, "
+                           "OpenAlex steps in (no key needed; an optional OPENALEX_API_KEY gives it a larger "
+                           "daily allowance), but papers can still end up with few real citations. A free "
+                           "Semantic Scholar key is the reliable fix",
                            "Request a free key at https://www.semanticscholar.org/product/api#api-key-form, "
-                           "then run `edmars setup literature`.")]
+                           "then run `edmars setup literature`, where an OpenAlex key can be added too.")
+                ] + openalex_line
     out = [make_check("Literature search", "ok", f"Semantic Scholar key found in {store_label(source, SEMANTIC_SCHOLAR_ENV)}")]
+    out += openalex_line
     if deep:
         from edmars import providers
 
@@ -851,9 +859,10 @@ def check_keys_found() -> list["Check"]:
         source = secrets.secret_source(env_var)
         if source:
             found.append(f"{env_var} ({_where_short(source)})")
-    source = secrets.secret_source(SEMANTIC_SCHOLAR_ENV)
-    if source:
-        found.append(f"{SEMANTIC_SCHOLAR_ENV} ({_where_short(source)})")
+    for env_var in (SEMANTIC_SCHOLAR_ENV, OPENALEX_ENV):
+        source = secrets.secret_source(env_var)
+        if source:
+            found.append(f"{env_var} ({_where_short(source)})")
     if not found:
         return [make_check("Saved keys", "info", "No AI service keys found yet. You'll add one in a later step")]
     return [make_check("Saved keys", "ok", "Found " + "; ".join(found) + ". You can reuse them in the next steps")]

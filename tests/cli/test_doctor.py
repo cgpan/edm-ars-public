@@ -542,3 +542,25 @@ def test_the_literature_hint_does_not_promise_that_arxiv_always_works(monkeypatc
     assert "A free Semantic Scholar key is the reliable fix" in check.detail
     assert "edmars setup literature" in (check.fix or "")
 
+
+def test_the_literature_hint_says_openalex_steps_in_when_arxiv_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    from edmars import doctor, secrets
+
+    saved: dict[str, str] = {}
+    monkeypatch.setattr(secrets, "secret_source", lambda name: saved.get(name))
+    [check] = doctor.check_semantic_scholar({})
+    flat = " ".join(check.detail.split())
+    assert "When it does, OpenAlex steps in (no key needed; an optional OPENALEX_API_KEY" in flat
+    assert "OpenAlex key can be added too" in (check.fix or "")
+    # A saved OpenAlex key is shown, with or without a Semantic Scholar key.
+    saved["OPENALEX_API_KEY"] = "keyring"
+    names = [c.name for c in doctor.check_semantic_scholar({})]
+    assert names == ["Literature search", "OpenAlex key"]
+    saved["SEMANTIC_SCHOLAR_API_KEY"] = "keyring"
+    checks = doctor.check_semantic_scholar({})
+    assert [(c.name, c.status) for c in checks] == [("Literature search", "ok"), ("OpenAlex key", "ok")]
+    [keys] = doctor.check_keys_found()
+    assert "OPENALEX_API_KEY" in keys.detail and "SEMANTIC_SCHOLAR_API_KEY" in keys.detail
+    # Its value is scrubbed from a support bundle like every other key.
+    assert "OPENALEX_API_KEY" in doctor.KNOWN_SECRET_NAMES
+

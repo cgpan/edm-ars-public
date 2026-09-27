@@ -59,7 +59,7 @@ _PROVIDER_ENV = {
 }
 
 #: Keys passed to the pipeline when present, whatever the provider.
-_OPTIONAL_KEYS = ("SEMANTIC_SCHOLAR_API_KEY", "TAVILY_API_KEY")
+_OPTIONAL_KEYS = ("SEMANTIC_SCHOLAR_API_KEY", "OPENALEX_API_KEY", "TAVILY_API_KEY")
 
 _LOCK_NAME = "active_run.json"
 

@@ -264,6 +264,20 @@ def test_stale_lock_is_cleared(run_home: Path) -> None:
     assert not lock.exists()
 
 
+def test_an_openalex_key_reaches_the_study(settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    # The pipeline sends OPENALEX_API_KEY only in the Authorization header
+    # when it asks OpenAlex; a key saved in setup must reach it.
+    store = {"DEEPSEEK_API_KEY": FAKE_KEY, "OPENALEX_API_KEY": "oa-secret-value-1234567890"}
+    monkeypatch.setattr(edsecrets, "child_secrets", lambda names: {n: store[n] for n in names if n in store})
+    env = runner.child_env(settings, provider="deepseek", review=False, run_id="r1", base_env={"PATH": "p"})
+    assert env["OPENALEX_API_KEY"] == "oa-secret-value-1234567890"
+    store.pop("OPENALEX_API_KEY")
+    env = runner.child_env(settings, provider="deepseek", review=False, run_id="r1", base_env={"PATH": "p"})
+    assert "OPENALEX_API_KEY" not in env
+    # Uninstall and redaction know it.
+    assert "OPENALEX_API_KEY" in edsecrets.KNOWN_SECRET_NAMES
+
+
 def test_rscript_and_lsar_reach_the_child(settings: dict[str, Any], lsar_home: Path, fake_keys: dict[str, str]) -> None:
     settings["r"]["rscript"] = "C:/R/bin/Rscript.exe"
     settings["lsar"].update(enabled=True, home=str(lsar_home))
