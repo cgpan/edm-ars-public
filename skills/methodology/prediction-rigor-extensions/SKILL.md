@@ -73,29 +73,40 @@ inside one model does not answer it, and neither does moderation.
 # Signature (use EXACTLY these parameter names):
 #   run_incremental_validity(train_X, train_y, test_X, test_y,
 #                            focal_cols, baseline_cols=None,
-#                            school_ids=None, n_boot=1000, random_state=42)
+#                            school_ids=None, n_boot=1000, random_state=42,
+#                            outcome_type=None)
 baseline_cols = [c for c in train_X.columns
                  if c.startswith(("X1TXMTSCOR", "X1SES"))]   # the named A and B
-focal_cols = [c for c in train_X.columns if c not in baseline_cols]
+focal_cols = [c for c in train_X.columns
+              if c.startswith(("X1MTHID", "X1SCHOOLBEL"))]  # ONLY what the question credits
 results["incremental_validity"] = analysis_helpers.run_incremental_validity(
     train_X, train_y_arr, test_X, test_y_arr,
     focal_cols=focal_cols, baseline_cols=baseline_cols,
-    school_ids=test_school_ids)            # None when test_school_ids.csv is absent
-results["incremental_validity"]["baseline_cols"] = baseline_cols
+    school_ids=test_school_ids,            # None when test_school_ids.csv is absent
+    outcome_type="binary")                 # data_report.json outcome_type: "binary" or "continuous"
 ```
 
-The baseline is what the question names after "above and beyond"; map
-it to predictor_set variables and take their ENCODED columns. The helper
-returns baseline_auc, full_auc, delta_auc and a bootstrap CI on the
-difference. It needs a binary outcome; for a continuous outcome fit the
-same nested pair with LinearRegression and record baseline_r2, full_r2,
-delta_r2 and a bootstrap CI under the same key with `"status": "ok"`.
+The baseline is everything the question names after "above and beyond",
+controls included ("academic achievement, SES, and demographic controls"
+is three things); map it to predictor_set variables and take their
+ENCODED columns. focal_cols holds only the constructs the question
+credits. Never default focal_cols to "every other column": a column in
+focal_cols is credited to the focal constructs, while a column in neither
+list is left out of both models.
 
-There is no descope for this one: the claim is the paper's contribution.
-A `{"status": "skipped"}` record does not satisfy the pre-review check
-(pcc_07), and the study stops rather than publish the untested claim.
-Writer: report delta_auc with its CI; when the CI includes 0, say the
-focal block adds no detectable predictive power over the baseline.
+The helper handles binary outcomes (baseline_auc, full_auc, delta_auc)
+and continuous ones (baseline_r2, full_r2, delta_r2 and both RMSEs), each
+with a bootstrap CI on the difference, and records the column lists it
+used. It returns `{"status": "skipped" | "error", "reason": ...}` instead
+of raising, so never wrap it in a try/except that writes null or a note.
+
+There is no descope for this one, and it is never "not applicable to
+regression": the claim is the paper's contribution. Only `"status":
+"ok"` satisfies the pre-review check (pcc_07); null, an empty record or
+a skipped/error record does not, and the study stops rather than publish
+the untested claim. Writer: report delta_auc (or delta_r2) with its CI;
+when the CI includes 0, say the focal block adds no detectable predictive
+power over the baseline.
 
 ## 2. Dummy SHAP grouped by parent variable
 

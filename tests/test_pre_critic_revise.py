@@ -92,6 +92,11 @@ _INCREMENTAL_SKIPPED = {
     "reason": "no focal column present in the design matrix",
 }
 
+#: What an archived GPA run wrote when its helper call raised: a null
+#: record beside a warning. Not the test, and not the Analyst's word that
+#: the test cannot run either.
+_NULL_WITH_WARNING = object()
+
 
 @pytest.fixture(autouse=True)
 def _compile_ok(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,15 +106,17 @@ def _compile_ok(monkeypatch: pytest.MonkeyPatch) -> None:
 def _stage_study(
     orch: Any,
     *,
-    revised_incremental: dict | None = _INCREMENTAL_OK,
+    revised_incremental: Any = _INCREMENTAL_OK,
+    first_incremental: Any = None,
     leak: bool = False,
     question: str = _QUESTION,
 ) -> tuple[dict[str, int], list[str | None]]:
     """Wire the stub agents for the observed study.
 
-    The first analysis has no incremental-validity record. A revision
-    adds ``revised_incremental`` (None: adds nothing). ``leak`` writes the
-    outcome into train_X.csv.
+    The first analysis records ``first_incremental`` (None: no record). A
+    revision records ``revised_incremental`` (None: adds nothing).
+    ``_NULL_WITH_WARNING`` for either writes a null record and a failure
+    warning. ``leak`` writes the outcome into train_X.csv.
     """
     calls = _wire(orch, review=_PASS_REVIEW)
     out = orch.ctx.output_dir
@@ -136,8 +143,14 @@ def _stage_study(
         calls["analyst"] += 1
         instructions.append(revision_instructions)
         results = copy.deepcopy(_RESULTS)
-        if revision_instructions and revised_incremental is not None:
-            results["incremental_validity"] = copy.deepcopy(revised_incremental)
+        record = revised_incremental if revision_instructions else first_incremental
+        if record is _NULL_WITH_WARNING:
+            results["incremental_validity"] = None
+            results["warnings"] = [
+                "run_incremental_validity failed: Unknown label type: continuous."
+            ]
+        elif record is not None:
+            results["incremental_validity"] = copy.deepcopy(record)
         Path(out, "results.json").write_text(json.dumps(results), encoding="utf-8")
         return results
 
@@ -305,11 +318,13 @@ def test_confirmed_leakage_still_aborts(tmp_path: Path, question: str) -> None:
 def test_a_finding_still_failing_after_the_last_cycle_stops_the_run(
     tmp_path: Path,
 ) -> None:
-    """Both revisions come back with the helper's skipped record, which is
-    not the test. No paper may be written around the missing result."""
+    """Both revisions come back with a null record and a failure warning,
+    which is not the test and not the Analyst's word that it cannot run,
+    so each goes back until the cycles run out. No paper may be written
+    around the missing result."""
     cfg = _config(tmp_path)
     orch = _orch(tmp_path, cfg)
-    calls, instructions = _stage_study(orch, revised_incremental=_INCREMENTAL_SKIPPED)
+    calls, instructions = _stage_study(orch, revised_incremental=_NULL_WITH_WARNING)
 
     ctx = orch.run()
 
@@ -361,6 +376,223 @@ def test_with_no_revision_cycles_the_finding_stops_the_run_at_once(
     abort = _status(tmp_path)["abort"]
     assert abort["code"] == "PRE_CRITIC_UNRESOLVED"
     assert "(0 of 0 used)" in abort["message"]
+
+
+def test_a_first_analysis_with_a_null_record_is_revised(tmp_path: Path) -> None:
+    """The archived GPA shape: the helper call raised, the Analyst wrote
+    incremental_validity: null and a warning. The key name used to pass
+    for the test, so this went straight to the Critic and the Writer."""
+    orch = _orch(tmp_path, _config(tmp_path))
+    calls, instructions = _stage_study(orch, first_incremental=_NULL_WITH_WARNING)
+
+    assert orch.run().current_state == PipelineState.COMPLETED
+    assert calls["analyst"] == 2
+    assert "[pcc_07, REQUIRED]" in instructions[1]
+
+
+# ---------------------------------------------------------------------------
+# A revision that comes back saying another will not help stops the run
+# ---------------------------------------------------------------------------
+
+
+def test_a_revision_that_says_the_test_cannot_run_stops_the_run(
+    tmp_path: Path,
+) -> None:
+    """The instruction tells the Analyst to leave the helper's skipped
+    record with its reason when the test truly cannot run, and says the
+    study then stops. It used to be sent the identical instruction until
+    every cycle was spent: four Analyst runs with three cycles."""
+    orch = _orch(tmp_path, _config(tmp_path), max_revision_cycles=3)
+    calls, instructions = _stage_study(orch, revised_incremental=_INCREMENTAL_SKIPPED)
+
+    ctx = orch.run()
+
+    assert ctx.current_state == PipelineState.ABORTED
+    assert calls == {"pf": 1, "de": 1, "analyst": 2, "critic": 0, "writer": 0}
+    assert "leave the helper's record, with its reason" in instructions[1]
+    assert not (tmp_path / "paper.tex").exists()
+    abort = _status(tmp_path)["abort"]
+    assert abort["code"] == "PRE_CRITIC_UNRESOLVED"
+    assert abort["resumable"] is False
+    assert abort["message"].startswith(
+        "pcc_07 was still failing after revision 1 of 3, and another revision "
+        "would not change it: the Analyst recorded that the test cannot run: "
+        "no focal column present in the design matrix."
+    )
+    assert [c["check_id"] for c in abort["checks"]] == ["pcc_07"]
+
+
+def test_a_first_analysis_that_says_it_cannot_run_still_gets_a_revision(
+    tmp_path: Path,
+) -> None:
+    """The helper's own skipped record in the FIRST analysis is usually a
+    wrong column list, which the revision's instruction fixes. Only a
+    revision that returns it again stops the run."""
+    orch = _orch(tmp_path, _config(tmp_path))
+    calls, _ = _stage_study(orch, first_incremental=_INCREMENTAL_SKIPPED)
+
+    assert orch.run().current_state == PipelineState.COMPLETED
+    assert calls["analyst"] == 2 and calls["writer"] == 1
+
+
+def _empty_battery(calls: dict, instructions: list, errors_by_run: list[list[str]],
+                   staged: Any) -> Any:
+    """An Analyst whose first ``len(errors_by_run)`` runs train nothing."""
+
+    def analyst(revision_instructions: str | None = None, **kw: Any) -> dict:
+        run = calls["analyst"]
+        if run < len(errors_by_run):
+            calls["analyst"] += 1
+            instructions.append(revision_instructions)
+            return {"all_models": {}, "errors": list(errors_by_run[run]),
+                    "warnings": []}
+        return staged(revision_instructions=revision_instructions, **kw)
+
+    return analyst
+
+
+_TIMED_OUT = (
+    "Analysis code did not execute successfully and wrote no results.json. "
+    "returncode=-1, stdout=empty, stderr=Timeout after 600s"
+)
+
+
+def test_an_analysis_that_times_out_twice_stops_the_run(tmp_path: Path) -> None:
+    """A try/except cannot make code finish inside the time limit. The
+    instruction now says so, and a second timeout stops the run instead
+    of spending the last cycle on a third."""
+    orch = _orch(tmp_path, _config(tmp_path))
+    calls, instructions = _stage_study(orch, question="What predicts enrolment?")
+    orch.analyst.run = _empty_battery(
+        calls, instructions, [[_TIMED_OUT], [_TIMED_OUT], [_TIMED_OUT]],
+        orch.analyst.run,
+    )
+
+    assert orch.run().current_state == PipelineState.ABORTED
+    assert calls["analyst"] == 2 and calls["writer"] == 0
+    assert "The code ran out of time" in instructions[1]
+    abort = _status(tmp_path)["abort"]
+    assert abort["code"] == "PRE_CRITIC_UNRESOLVED"
+    assert abort["message"].startswith(
+        "pcc_02 was still failing after revision 1 of 2, and another revision "
+        "would not change it: the analysis code ran out of time"
+    )
+
+
+def test_one_timeout_still_gets_its_revision(tmp_path: Path) -> None:
+    orch = _orch(tmp_path, _config(tmp_path))
+    calls, instructions = _stage_study(orch, question="What predicts enrolment?")
+    orch.analyst.run = _empty_battery(
+        calls, instructions, [[_TIMED_OUT]], orch.analyst.run
+    )
+
+    assert orch.run().current_state == PipelineState.COMPLETED
+    assert calls["analyst"] == 2
+    assert "The code ran out of time" in instructions[1]
+
+
+def test_an_empty_battery_without_a_timeout_uses_every_cycle(
+    tmp_path: Path,
+) -> None:
+    """A code failure is not a declaration: a fresh run may fix it."""
+    orch = _orch(tmp_path, _config(tmp_path))
+    calls, instructions = _stage_study(orch, question="What predicts enrolment?")
+    failed = ["KeyError: 'X1SES'"]
+    orch.analyst.run = _empty_battery(
+        calls, instructions, [failed, failed, failed], orch.analyst.run
+    )
+
+    assert orch.run().current_state == PipelineState.ABORTED
+    assert calls["analyst"] == 3
+    assert "ran out of time" not in instructions[1]
+    abort = _status(tmp_path)["abort"]
+    assert abort["message"].startswith(
+        "pcc_02 was still failing when the revision cycles ran out (2 of 2 used)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A study stopped before pre-review findings were classified can be resumed
+# ---------------------------------------------------------------------------
+
+
+def _legacy_stop(tmp_path: Path, cfg: dict, lead: str) -> None:
+    """Rewrite a stopped run's checkpoint the way the release before this
+    change wrote a pcc_07 stop: PRE_CRITIC_ABORT, no ``checks``, the first
+    critical finding in the message, a review with no revision sent."""
+    orch = _orch(tmp_path, cfg, max_revision_cycles=0)
+    _stage_study(orch)
+    assert orch.run().current_state == PipelineState.ABORTED
+    cp = _cp(tmp_path)
+    cp["abort_info"] = {
+        "stage": "CRITIQUING",
+        "code": "PRE_CRITIC_ABORT",
+        "message": f"{lead}: The research question says 'above and beyond' ...",
+        "resumable": False,
+        "at": "2026-09-26T21:14:03Z",
+    }
+    report = cp["review_report"]
+    report["overall_verdict"] = "ABORT"
+    for key in ("effective_verdict", "stop_code", "pre_critic_findings"):
+        report.pop(key, None)
+    cp["revision_cycle"] = 0
+    (tmp_path / "checkpoint.json").write_text(json.dumps(cp), encoding="utf-8")
+
+
+def test_a_study_stopped_by_the_old_rule_resumes_into_a_revision(
+    tmp_path: Path,
+) -> None:
+    """The owner's Mac study stopped as PRE_CRITIC_ABORT, not resumable,
+    for a finding this version revises. Without this path the paid run
+    could only be started again from FORMULATING."""
+    from src.errors import abort_is_resumable, reopened_pre_critic_stop
+
+    cfg = _config(tmp_path)
+    _legacy_stop(tmp_path, cfg, "pcc_07")
+    info = _cp(tmp_path)["abort_info"]
+    assert reopened_pre_critic_stop(info) and abort_is_resumable(info)
+
+    second = _orch(tmp_path, cfg)
+    calls, instructions = _stage_study(second)
+    ctx = second.run()
+
+    assert ctx.current_state == PipelineState.COMPLETED
+    assert calls == {"pf": 0, "de": 0, "analyst": 1, "critic": 1, "writer": 1}
+    assert "[pcc_07, REQUIRED]" in instructions[0]
+    assert ctx.revision_cycle == 1
+
+
+@pytest.mark.parametrize("lead", ["pcc_01", "pcc_06"])
+def test_an_old_stop_for_leakage_or_failed_validation_stays_stopped(
+    tmp_path: Path, lead: str,
+) -> None:
+    from src.errors import abort_is_resumable
+
+    cfg = _config(tmp_path)
+    _legacy_stop(tmp_path, cfg, lead)
+    assert not abort_is_resumable(_cp(tmp_path)["abort_info"])
+
+    second = _orch(tmp_path, cfg)
+    calls, _ = _stage_study(second)
+    assert second.run().current_state == PipelineState.ABORTED
+    assert sum(calls.values()) == 0
+
+
+def test_a_classified_pre_critic_abort_is_never_reopened() -> None:
+    """Every record written since findings were classified lists them; a
+    PRE_CRITIC_ABORT among those holds a finding no revision can fix."""
+    from src.errors import abort_is_resumable
+
+    info = {
+        "stage": "CRITIQUING", "code": "PRE_CRITIC_ABORT",
+        "message": "pcc_07: ...", "resumable": False,
+        "checks": [{"check_id": "pcc_07", "revisable": True},
+                   {"check_id": "pcc_01", "revisable": False}],
+    }
+    assert not abort_is_resumable(info)
+    unclassified = {k: v for k, v in info.items() if k != "checks"}
+    assert abort_is_resumable(unclassified)
+    assert not abort_is_resumable({**unclassified, "stage": "ANALYZING"})
 
 
 # ---------------------------------------------------------------------------

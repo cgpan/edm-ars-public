@@ -546,9 +546,17 @@ cycle:
   REVISE, this does not fall through to WRITING (UNVERIFIED). A revision
   ordered by these checks that raises an error also stops the run rather than
   writing UNVERIFIED.
+- The same stop comes sooner, with cycles left, when the revision a finding
+  was sent back for returns the agent's own word that another would not help:
+  the not-run record with a reason that the instruction asks for when a
+  promised test cannot run, or a second timeout of an analysis that trained
+  no model.
 
-Both codes are not resumable. `run_status.json` carries the findings in
-`abort.checks`.
+Both codes are not resumable, with one exception: a `PRE_CRITIC_ABORT`
+recorded before findings were classified (its abort record has no `checks`)
+and led by a finding a revision can now fix (pcc_07, pcc_02) resumes at
+CRITIQUING, where the checks run again and the finding is revised.
+`run_status.json` carries the findings in `abort.checks`.
 
 ### 5.2 Checkpointing
 
@@ -857,6 +865,7 @@ Run directory naming: `run_{YYYYMMDD_HHMMSS}` (e.g., `run_20260310_142300`).
 | Critical pre-Critic finding no revision can fix | Skip the Critic; ABORTED with `PRE_CRITIC_ABORT` (not resumable) |
 | Critical pre-Critic finding a revision can fix | Skip the Critic; REVISE the target agent while cycles remain (§5.1) |
 | Revisable pre-Critic finding unresolved after max revision cycles | ABORTED with `PRE_CRITIC_UNRESOLVED` (not resumable); no paper is written |
+| Revision for a pre-Critic finding returns a not-run record with a reason, or a second timeout | ABORTED with `PRE_CRITIC_UNRESOLVED` at once, cycles left or not; no paper is written |
 | Checkpoint found on startup | Load checkpoint; resume from `current_state`; skip completed stages |
 | AUC > 0.95 | Critic automatically flags as suspicious (potential leakage) |
 | Docker daemon not reachable (`sandbox.enabled: true`) | Emit RuntimeWarning; fall back to SubprocessExecutor; log warning |

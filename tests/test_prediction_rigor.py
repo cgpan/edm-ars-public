@@ -95,6 +95,114 @@ class TestBootstrapAucDifference:
         assert out["ci_lower"] <= 0.0 <= out["ci_upper"]
 
 
+def _gpa(n: int = 3000, focal: float = 0.25, seed: int = 5):
+    """A continuous outcome built from achievement, SES and a focal scale."""
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame({
+        "ACH": rng.normal(size=n), "SES": rng.normal(size=n),
+        "BEL": rng.normal(size=n), "SEX_2": (rng.random(n) < 0.5).astype(float),
+    })
+    y = 2.8 + 0.4 * X.ACH + 0.2 * X.SES + focal * X.BEL + rng.normal(0, 0.6, n)
+    cut = int(n * 0.8)
+    return X.iloc[:cut], y[:cut], X.iloc[cut:], y[cut:]
+
+
+class TestIncrementalValidity:
+    """run_incremental_validity used to fit LogisticRegression whatever the
+    outcome, so on a GPA outcome it raised "Unknown label type:
+    continuous". Archived GPA runs recorded the test as an error, as
+    skipped "not applicable to regression", or as null."""
+
+    def test_continuous_outcome_gets_a_nested_ols_comparison(self) -> None:
+        from src.analysis_helpers import run_incremental_validity
+
+        tr_X, tr_y, te_X, te_y = _gpa()
+        out = run_incremental_validity(
+            tr_X, tr_y, te_X, te_y, focal_cols=["BEL"],
+            baseline_cols=["ACH", "SES"], n_boot=200)
+        assert out["status"] == "ok"
+        assert out["outcome_type"] == "continuous"
+        assert out["delta_r2"] == pytest.approx(out["full_r2"] - out["baseline_r2"])
+        assert out["delta_r2"] > 0.03 and out["ci_lower"] > 0
+        assert out["full_rmse"] < out["baseline_rmse"]
+        assert out["significant"] is True
+        assert out["baseline_cols"] == ["ACH", "SES"] and out["focal_cols"] == ["BEL"]
+
+    def test_a_focal_block_with_no_signal_is_not_credited(self) -> None:
+        from src.analysis_helpers import run_incremental_validity
+
+        tr_X, tr_y, te_X, te_y = _gpa(focal=0.0)
+        out = run_incremental_validity(
+            tr_X, tr_y, te_X, te_y, focal_cols=["BEL"],
+            baseline_cols=["ACH", "SES"], n_boot=200, outcome_type="continuous")
+        assert out["status"] == "ok"
+        assert out["ci_lower"] <= 0 <= out["ci_upper"]
+        assert "NOT add" in out["interpretation"]
+
+    def test_a_column_in_neither_list_is_left_out(self) -> None:
+        from src.analysis_helpers import run_incremental_validity
+
+        tr_X, tr_y, te_X, te_y = _gpa()
+        out = run_incremental_validity(
+            tr_X, tr_y, te_X, te_y, focal_cols=["BEL"],
+            baseline_cols=["ACH", "SES"], n_boot=50)
+        assert "SEX_2" not in out["baseline_cols"] + out["focal_cols"]
+
+    def test_cluster_bootstrap_for_a_continuous_outcome(self) -> None:
+        from src.analysis_helpers import run_incremental_validity
+
+        tr_X, tr_y, te_X, te_y = _gpa()
+        sid = np.random.default_rng(1).integers(0, 40, len(te_y))
+        out = run_incremental_validity(
+            tr_X, tr_y, te_X, te_y, focal_cols=["BEL"],
+            baseline_cols=["ACH", "SES"], school_ids=sid, n_boot=100)
+        assert out["se_method"] == "cluster_bootstrap"
+
+    def test_binary_outcome_keeps_the_auc_comparison(self) -> None:
+        from src.analysis_helpers import run_incremental_validity
+
+        tr_X, tr_y, te_X, te_y = _gpa()
+        out = run_incremental_validity(
+            tr_X, (tr_y > 2.8).astype(int), te_X, (te_y > 2.8).astype(int),
+            focal_cols=["BEL"], baseline_cols=["ACH", "SES"], n_boot=100)
+        assert out["status"] == "ok" and out["outcome_type"] == "binary"
+        assert out["delta_auc"] > 0
+
+    @pytest.mark.parametrize(
+        ("kwargs", "status"),
+        [
+            ({"outcome_type": "categorical"}, "skipped"),
+            ({"outcome_type": "binary"}, "error"),
+            ({"school_ids": np.arange(10)}, "error"),
+            ({"focal_cols": ["NOPE"]}, "skipped"),
+        ],
+        ids=["unsupported-type", "binary-with-many-values", "bad-school-ids",
+             "no-focal-column"],
+    )
+    def test_unusable_input_returns_a_record_instead_of_raising(
+        self, kwargs: dict, status: str,
+    ) -> None:
+        """A raise is what the Analyst wrapped in try/except and recorded
+        as null; a status record is what pcc_07 can read."""
+        from src.analysis_helpers import run_incremental_validity
+
+        tr_X, tr_y, te_X, te_y = _gpa(n=600)
+        call = {"focal_cols": ["BEL"], "baseline_cols": ["ACH", "SES"],
+                "n_boot": 20, **kwargs}
+        out = run_incremental_validity(tr_X, tr_y, te_X, te_y, **call)
+        assert out["status"] == status
+        assert out["reason"]
+
+    def test_text_labels_return_an_error_record(self) -> None:
+        from src.analysis_helpers import run_incremental_validity
+
+        tr_X, _, te_X, _ = _gpa(n=100)
+        out = run_incremental_validity(
+            tr_X, ["Yes"] * len(tr_X), te_X, ["No"] * len(te_X),
+            focal_cols=["BEL"])
+        assert out["status"] == "error"
+
+
 class TestCalibrationMetrics:
     def test_well_calibrated_probs(self) -> None:
         from src.analysis_helpers import compute_calibration_metrics

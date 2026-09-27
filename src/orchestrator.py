@@ -28,7 +28,7 @@ from src.causal_data_contract import (
 )
 from src.context import PipelineContext, PipelineState
 from src.dataset_adapter import create_dataset_adapter
-from src.errors import code_for_exception, is_resumable
+from src.errors import code_for_exception, is_resumable, reopened_pre_critic_stop
 from src.findings_memory import FindingsMemory, RunEntry
 from src.pre_critic_checks import PreCriticResult, run_pre_critic_checks
 from src.review_gate import ReviewGate
@@ -968,7 +968,8 @@ class Orchestrator:
                 "to resume. Start a new run.",
             )
             return
-        if not is_resumable(code):
+        reopened = reopened_pre_critic_stop(info)
+        if not (is_resumable(code) or reopened):
             self._log(
                 "Orchestrator",
                 f"Checkpoint is ABORTED in {stage} with {code}, which a resume "
@@ -976,6 +977,13 @@ class Orchestrator:
                 "Nothing to resume; start a new run.",
             )
             return
+        if reopened:
+            self._log(
+                "Orchestrator",
+                f"The run was stopped by a pre-review finding this version "
+                f"sends back for revision instead ({info.get('message', '')}). "
+                "Retrying CRITIQUING, where the checks run again.",
+            )
         self._log(
             "Orchestrator",
             f"Resuming an ABORTED run: retrying {stage} (previous failure "
@@ -2720,11 +2728,27 @@ class Orchestrator:
         REVISE does: the finding is that the paper's central result is
         missing, and a paper built around that gap reads fluently and
         must not be written at all.
+
+        It also stops as PRE_CRITIC_UNRESOLVED, with cycles left, when a
+        finding the previous cycle sent back comes back with the agent's
+        own word that another run will not clear it (``stop_on_repeat``:
+        the not-run record with a reason the instruction asks for when
+        the test cannot run, or a second timeout). Sending the identical
+        instruction again spent every remaining cycle, each up to four
+        executions at the full time limit, on an outcome the agent had
+        already reported.
         """
+        sent_back = self._pre_critic_checks_sent_back()
+        futile = [
+            f for f in pre_result.revisable_failures
+            if f.stop_on_repeat and f.check_id in sent_back
+        ]
         report = self._synthesize_pre_critic_report(pre_result)
         self.ctx.review_report = report
         cycles_left = self.ctx.revision_cycle < self.ctx.max_revision_cycles
-        revise = report["overall_verdict"] == "REVISE" and cycles_left
+        revise = (
+            report["overall_verdict"] == "REVISE" and cycles_left and not futile
+        )
         verdict = "REVISE" if revise else "ABORT"
         self._log(
             "Orchestrator",
@@ -2773,12 +2797,20 @@ class Orchestrator:
                 )
             else:
                 code = "PRE_CRITIC_UNRESOLVED"
-                lead = pre_result.revisable_failures[0]
                 used = f"{self.ctx.revision_cycle} of {self.ctx.max_revision_cycles}"
-                message = (
-                    f"{lead.check_id} was still failing when the revision "
-                    f"cycles ran out ({used} used): {lead.message}"
-                )
+                if futile:
+                    lead = futile[0]
+                    message = (
+                        f"{lead.check_id} was still failing after revision "
+                        f"{used}, and another revision would not change it: "
+                        f"{lead.stop_on_repeat}. {lead.message}"
+                    )
+                else:
+                    lead = pre_result.revisable_failures[0]
+                    message = (
+                        f"{lead.check_id} was still failing when the revision "
+                        f"cycles ran out ({used} used): {lead.message}"
+                    )
                 self.ctx.errors.append(
                     f"Pre-Critic guard: {code} with {used} revision cycles "
                     f"used: {pre_result.failures}"
@@ -2810,6 +2842,29 @@ class Orchestrator:
             unverified=False,
             source="pre_critic",
         )
+
+    def _pre_critic_checks_sent_back(self) -> set[str]:
+        """Check ids the previous cycle's pre-review revision was for.
+
+        Read from the review the run holds when CRITIQUING starts again:
+        REVISING leaves it in place, and the checkpoint keeps it across a
+        resume. Empty unless that review was a pre-review REVISE (a
+        pre-review ABORT written by an older version sent nothing back).
+        """
+        prior = self.ctx.review_report
+        if not isinstance(prior, dict):
+            return set()
+        if prior.get("_source") != "pre_critic_short_circuit":
+            return set()
+        if prior.get("effective_verdict") != "REVISE":
+            return set()
+        return {
+            str(f.get("check_id"))
+            for f in prior.get("pre_critic_findings") or []
+            if isinstance(f, dict)
+            and f.get("severity") == "critical"
+            and f.get("revisable")
+        }
 
     def _synthesize_pre_critic_report(self, pre_result: PreCriticResult) -> dict:
         """Build a minimal review_report from pre-critic failures without an LLM call.

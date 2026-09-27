@@ -12,7 +12,10 @@ Every critical finding says whether a revision can fix it (``revisable``).
 A revisable one sends its ``revision_instruction`` to ``target_agent``
 through the ordinary REVISING cascade (SPEC §5.3); if it is still failing
 when the revision cycles run out, the run stops with PRE_CRITIC_UNRESOLVED
-and no paper is written. Any finding that is not revisable stops the run at
+and no paper is written. It stops the same way sooner when the revision
+comes back with the agent's own word that another would not help
+(``stop_on_repeat``: its not-run record with a reason, or a second
+timeout). Any finding that is not revisable stops the run at
 once with PRE_CRITIC_ABORT. A check that sets nothing is not revisable, so
 a new critical check keeps the old stop-the-run behaviour until someone
 decides otherwise.
@@ -40,6 +43,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -64,6 +68,14 @@ class CheckFailure:
     #: says what is wrong; this says what to change. Empty means the
     #: message is the instruction.
     revision_instruction: str = ""
+    #: Revisable findings only: set when the target agent's own output
+    #: says that running it again will not clear the finding -- its
+    #: not-run record with a reason (what the instruction tells it to
+    #: leave when the test truly cannot run), or a time limit hit. The
+    #: orchestrator acts on it only when the previous cycle already sent
+    #: this check back, so the agent always gets one revision first; after
+    #: that it stops the run instead of repeating the same instruction.
+    stop_on_repeat: str = ""
 
     @property
     def instruction(self) -> str:
@@ -219,8 +231,8 @@ def run_pre_critic_checks(
 #: are NOT listed: a check that fires on "explore" or "examine" would be
 #: noise, and noise is how a check gets ignored.
 #:
-#: ``strict`` commitments do not accept a record that says the analysis
-#: did not run (see :func:`_evidence_text`). Only the incremental-validity
+#: ``strict`` commitments accept only a record of the analysis having run
+#: (see :func:`_strict_evidence`). Only the incremental-validity
 #: promise is strict: the skill contract lets a moderation or calibration
 #: analysis be recorded as skipped and descoped in the Limitations, and
 #: the Analyst prompt tells regression runs to do exactly that for
@@ -245,7 +257,7 @@ _RQ_COMMITMENTS: tuple[_Commitment, ...] = (
         "incremental",
         ("above and beyond", "over and above", "incremental valid",
          "incremental predictive", "beyond baseline"),
-        ("incremental_validity", "nested_model", "delta_auc"),
+        ("incremental_validity", "nested_model", "delta_auc", "delta_r2"),
         "an incremental-validity / nested-model comparison",
         strict=True,
     ),
@@ -270,56 +282,138 @@ _RQ_COMMITMENTS: tuple[_Commitment, ...] = (
     ),
 )
 
-#: ``status`` values with which a helper or the Analyst says an analysis
-#: did NOT run. run_incremental_validity returns ``{"status": "skipped",
-#: "reason": ...}`` when its column lists match nothing; that record is
-#: the absence of the test, and its key name must not pass for evidence.
-_NOT_RUN_STATUSES: frozenset[str] = frozenset(
-    {"skipped", "failed", "error", "not_run"}
-)
+#: ``status`` values with which a record says its analysis RAN
+#: (run_incremental_validity returns "ok", run_moderation_analysis
+#: "computed"). A strict commitment accepts only these. It used to reject
+#: a list of not-run statuses instead, and every shape off the list
+#: passed: ``null`` next to a "run_incremental_validity failed" warning
+#: (what an archived GPA run wrote), ``{}``, a bare string,
+#: "not_applicable", a record with a reason and no status. The ways to
+#: say "did not run" are open-ended; the ways to say "ran" are not.
+_COMPUTED_STATUSES: frozenset[str] = frozenset({"ok", "computed"})
 
-_DROPPED = object()
+#: Fields that hold the nested-model difference itself. A record without
+#: a status counts when one of them is a number, and an "ok" record whose
+#: difference is null does not count.
+_DELTA_FIELDS: tuple[str, ...] = ("delta_auc", "delta_r2")
+
+_LOG_KEYS: frozenset[str] = frozenset({"warnings", "errors"})
 
 
-def _drop_not_run(value: Any) -> Any:
-    """``value`` without any dict whose ``status`` says it did not run."""
-    if isinstance(value, dict):
-        status = value.get("status")
-        if isinstance(status, str) and status.strip().lower() in _NOT_RUN_STATUSES:
-            return _DROPPED
-        kept = {}
-        for key, item in value.items():
-            pruned = _drop_not_run(item)
-            if pruned is not _DROPPED:
-                kept[key] = pruned
-        return kept
+def _is_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _status_of(record: dict) -> str | None:
+    status = record.get("status")
+    if status is None:
+        return None
+    return str(status).strip().lower()
+
+
+def _is_computed_record(value: Any) -> bool:
+    """True when ``value`` records an analysis that ran."""
     if isinstance(value, list):
-        return [p for p in (_drop_not_run(v) for v in value) if p is not _DROPPED]
-    return value
+        return any(_is_computed_record(v) for v in value)
+    if not isinstance(value, dict):
+        return False
+    deltas = [value[k] for k in _DELTA_FIELDS if k in value]
+    status = _status_of(value)
+    if status is None:
+        return any(_is_number(d) for d in deltas)
+    return status in _COMPUTED_STATUSES and all(_is_number(d) for d in deltas)
 
 
-def _evidence_text(results: dict, strict: bool) -> str:
-    """The lower-cased text pcc_07 searches for evidence.
+def _strict_evidence(value: Any, keys: tuple[str, ...], top: bool = True) -> bool:
+    """Whether ``value`` holds, at any depth, a record of the analysis.
+
+    A key that names the analysis (``incremental_validity``,
+    ``nested_model_comparison``) counts only when it holds a record that
+    ran (:func:`_is_computed_record`); a difference field
+    (``delta_auc``, ``delta_r2``) counts only as a finite number. A key
+    that merely contains the name (``incremental_validity_reason``) holds
+    a string, so it does not count. Nothing inside a record whose status
+    says it did not run counts, and neither do ``warnings`` and
+    ``errors``: a sentence reporting that the comparison was skipped
+    names the key without being the comparison.
+    """
+    if isinstance(value, list):
+        return any(_strict_evidence(v, keys, top=False) for v in value)
+    if not isinstance(value, dict):
+        return False
+    for key, item in value.items():
+        name = str(key).strip().lower()
+        if top and name in _LOG_KEYS:
+            continue
+        if name in _DELTA_FIELDS:
+            if name in keys and _is_number(item):
+                return True
+            continue
+        if any(name.startswith(k) for k in keys if k not in _DELTA_FIELDS):
+            if _is_computed_record(item):
+                return True
+            continue
+        if isinstance(item, dict):
+            status = _status_of(item)
+            if status is not None and status not in _COMPUTED_STATUSES:
+                continue
+        if _strict_evidence(item, keys, top=False):
+            return True
+    return False
+
+
+def _declined_reason(results: dict, keys: tuple[str, ...]) -> str:
+    """The reason in a not-run record under one of ``keys``, or "".
+
+    This is the Analyst saying the analysis cannot run: the instruction
+    tells it to leave the helper's skipped record, with its reason, when
+    the test truly cannot run on its files.
+    """
+    names = [k for k in keys if k not in _DELTA_FIELDS]
+
+    def walk(value: Any, top: bool) -> str:
+        if isinstance(value, list):
+            for item in value:
+                found = walk(item, False)
+                if found:
+                    return found
+            return ""
+        if not isinstance(value, dict):
+            return ""
+        for key, item in value.items():
+            name = str(key).strip().lower()
+            if top and name in _LOG_KEYS:
+                continue
+            if isinstance(item, dict) and any(name.startswith(k) for k in names):
+                status = _status_of(item)
+                reason = item.get("reason")
+                if (status is not None and status not in _COMPUTED_STATUSES
+                        and isinstance(reason, str) and reason.strip()):
+                    return " ".join(reason.split())[:300]
+            found = walk(item, False)
+            if found:
+                return found
+        return ""
+
+    return walk(results, True)
+
+
+def _evidence_text(results: dict) -> str:
+    """The lower-cased text pcc_07 searches for a non-strict commitment.
 
     Evidence may sit at any depth (results.incremental_validity,
     results.all_models["OrdinalForest"], a key inside a sub-dict), so the
     serialised object is searched rather than a fixed set of top-level
-    keys. For a strict commitment, records that say the analysis did not
-    run are removed first, and so are ``warnings`` and ``errors``: a
-    sentence reporting that the comparison was skipped names the key
-    without being the comparison.
+    keys.
     """
-    subject: Any = results
-    if strict:
-        subject = _drop_not_run(
-            {k: v for k, v in results.items() if k not in ("warnings", "errors")}
-        )
-        if subject is _DROPPED:
-            return ""
     try:
-        return json.dumps(subject).lower()
+        return json.dumps(results).lower()
     except (TypeError, ValueError):
-        return str(subject).lower()
+        return str(results).lower()
 
 
 def _check_research_question_is_answered(
@@ -351,15 +445,22 @@ def _check_research_question_is_answered(
     if not isinstance(results, dict):
         return
 
+    haystack = _evidence_text(results)
     for commitment in _RQ_COMMITMENTS:
         phrases = commitment.phrases
         description = commitment.description
         if not any(p in question for p in phrases):
             continue
-        haystack = _evidence_text(results, commitment.strict)
-        if any(k.lower() in haystack for k in commitment.evidence_keys):
+        if commitment.strict:
+            if _strict_evidence(results, commitment.evidence_keys):
+                continue
+        elif any(k.lower() in haystack for k in commitment.evidence_keys):
             continue
         matched = next(p for p in phrases if p in question)
+        declined = (
+            _declined_reason(results, commitment.evidence_keys)
+            if commitment.strict else ""
+        )
         result.failures.append(
             CheckFailure(
                 check_id="pcc_07",
@@ -378,35 +479,110 @@ def _check_research_question_is_answered(
                 revision_instruction=_commitment_instruction(
                     commitment, matched, original, ctx, task_type
                 ),
+                stop_on_repeat=(
+                    f"the Analyst recorded that the test cannot run: {declined}"
+                    if declined else ""
+                ),
             )
         )
 
 
-#: Where a question's named baseline ends: the next clause, not the next
-#: word ("... above and beyond achievement and SES, and does ...").
+#: Where the clause holding a question's named baseline ends: the next
+#: clause ("... above and beyond achievement and SES, and does ..."), or
+#: the verb the baseline was inserted before ("..., over and above prior
+#: achievement, predict ..."). A comma is NOT an end. Until 2026-09-27
+#: every "," and "(" was, so "above and beyond academic achievement, SES,
+#: and demographic controls" reached the Analyst as the baseline
+#: "academic achievement", with SES and the controls left for the focal
+#: block, where the comparison would credit their predictive power to
+#: the constructs the question is about.
 _CLAUSE_END = re.compile(
-    r"[,;:?.()]|\s(?:and|or)\s+(?:does|do|is|are|how|whether|to what)\b"
-    r"|\s(?:explains?|predicts?|accounts? for)\b",
+    r"[;?]|\.(?=\s|$)"
+    r"|,?\s(?:and|or)\s+(?:does|do|did|is|are|was|were|can|could|will|would"
+    r"|how|whether|to what|which|what)\b"
+    r"|\s(?:(?:in|when|for)\s+)?(?:explains?|explaining|predicts?|predicting"
+    r"|accounts? for)\b",
+    re.IGNORECASE,
+)
+
+#: A comma-separated part that starts a new clause rather than naming one
+#: more baseline item.
+_NOT_A_LIST_ITEM = re.compile(
+    r"^(?:(?:and|or)\s+)?(?:which|who|whose|that|while|whereas|controlling"
+    r"|net of|after|among|within|across|when|where|because|since|although"
+    r"|using|does|do|did|is|are|was|were|can|could|will|would|how|whether"
+    r"|what|predicts?|predicting|explains?|explaining|accounts?|improves?"
+    r"|adds?|contributes?|remains?|holds?)\b",
+    re.IGNORECASE,
+)
+
+_CLOSES_A_LIST = re.compile(r"^(?:and|or)\s|\s(?:and|or)\s", re.IGNORECASE)
+
+#: The words right before a named baseline. "incremental valid" is a
+#: commitment phrase but names nothing after it ("the incremental
+#: validity of X" used to give the baseline "ity of X").
+_BASELINE_MARKER = re.compile(
+    r"\b(?:above and beyond|over and above|beyond|relative to"
+    r"|compared (?:with|to))\s+",
     re.IGNORECASE,
 )
 
 
+def _paren_depths(text: str) -> list[int]:
+    depth, out = 0, []
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        out.append(depth)
+        if ch == ")" and depth:
+            depth -= 1
+    return out
+
+
 def _named_after(question: str, phrase: str) -> str:
-    """The words a question puts after ``phrase``, up to the clause end.
+    """The baseline a question names after ``phrase``.
 
     "... ABOVE AND BEYOND academic achievement and socioeconomic status,
-    and does ..." -> "academic achievement and socioeconomic status".
-    Empty when the phrase names nothing after it ("incremental validity").
+    and does ..." -> "academic achievement and socioeconomic status";
+    "... above and beyond prior achievement (X1TXMTSCOR), SES (X1SES), and
+    sex?" -> the whole list, parentheses included, since they often carry
+    the variable names. A comma continues the baseline only inside a list
+    that closes with "and"/"or"; otherwise it ends it. Empty when the
+    question names no baseline ("the incremental validity of X").
     """
     at = question.lower().find(phrase)
     if at < 0:
         return ""
-    tail = question[at + len(phrase):]
+    marker = _BASELINE_MARKER.search(question, at)
+    if marker is None:
+        return ""
+    tail = question[marker.end():]
     tail = re.sub(r"^\s*(?:what|that which|those of|the effects? of)\s+", "",
                   tail, flags=re.IGNORECASE)
-    cut = _CLAUSE_END.search(tail)
-    named = (tail[: cut.start()] if cut else tail).strip()
-    return named[:160]
+    depths = _paren_depths(tail)
+    cut = next(
+        (m.start() for m in _CLAUSE_END.finditer(tail) if depths[m.start()] == 0),
+        len(tail),
+    )
+    head = tail[:cut]
+    depths = depths[:cut]
+    parts: list[str] = []
+    start = 0
+    for i, ch in enumerate(head):
+        if ch == "," and depths[i] == 0:
+            parts.append(head[start:i].strip())
+            start = i + 1
+    parts.append(head[start:].strip())
+
+    named = [parts[0]]
+    rest = parts[1:]
+    for j, part in enumerate(rest):
+        if not part or _NOT_A_LIST_ITEM.match(part):
+            break
+        if _CLOSES_A_LIST.search(part):
+            named.extend(rest[: j + 1])
+            break
+    return ", ".join(named).strip(" ,;:")[:240]
 
 
 def _outcome_type(ctx: object) -> str:
@@ -428,12 +604,30 @@ def _predictor_names(ctx: object, limit: int = 40) -> list[str]:
     return names[:limit]
 
 
-_NOT_RUN_ENDING = (
-    "A record whose status is 'skipped' does not answer the question: fix "
-    "its inputs and run it again. If it truly cannot run on these files, "
-    "keep the helper's skipped record with its reason; the study will then "
-    "stop instead of publishing a question it never tested. Keep every "
-    "other part of the analysis as it was."
+#: How an instruction for a commitment the skill contract lets be
+#: descoped ends: a skipped record with its reason passes pcc_07 and
+#: reaches the methods review.
+_DESCOPE_ENDING = (
+    "If it truly cannot run on these files, record {'status': 'skipped', "
+    "'reason': <why>} under that key and say so in the paper's "
+    "Limitations; the methods review then judges whether the question "
+    "still stands. Keep every other part of the analysis as it was."
+)
+
+#: How the incremental-validity instruction ends. It says what the
+#: orchestrator does: a not-run record with a reason, returned by the
+#: revision this instruction ordered, stops the study at once
+#: (stop_on_repeat); anything else not run is sent back while revision
+#: cycles remain.
+_STRICT_ENDING = (
+    "Only a record with 'status': 'ok' and its numbers answers the "
+    "question. null, an empty record, a string, a 'skipped' or 'error' "
+    "record, or a sentence in warnings does not. If the helper returned "
+    "'skipped' or 'error', fix what its reason names and call it again. If "
+    "the test truly cannot run on these files, leave the helper's record, "
+    "with its reason, under results['incremental_validity']: the study then "
+    "stops without a paper instead of publishing a question it never "
+    "tested. Keep every other part of the analysis as it was."
 )
 
 
@@ -456,7 +650,7 @@ def _commitment_instruction(
             "same train/test split and predictors as the other models, "
             "evaluate it on the held-out test set next to the nominal "
             "models, and record it as results['ordinal_model'] = {'status': "
-            "'ok', <the same metrics as all_models>}. " + _NOT_RUN_ENDING
+            "'ok', <the same metrics as all_models>}. " + _DESCOPE_ENDING
         )
     if commitment.kind == "moderation" and prediction:
         return (
@@ -466,7 +660,7 @@ def _commitment_instruction(
             "moderator_col=<the encoded moderator the question names>) as "
             "prediction-rigor-extensions section 1 shows, and record the "
             "return value as results['moderation_analysis']. "
-            + _NOT_RUN_ENDING
+            + _DESCOPE_ENDING
         )
     if commitment.kind == "calibration" and prediction:
         return (
@@ -474,7 +668,7 @@ def _commitment_instruction(
             f"({matched!r}). Record results['calibration'] = "
             "analysis_helpers.compute_calibration_metrics(y_true=test_y_arr, "
             "y_prob=<best model's held-out probabilities>); never compute "
-            "those fields by hand. " + _NOT_RUN_ENDING
+            "those fields by hand. " + _DESCOPE_ENDING
         )
     if commitment.kind == "mediation":
         return (
@@ -485,13 +679,13 @@ def _commitment_instruction(
             "resample schools when school IDs exist), and record "
             "results['mediation'] = {'status': 'ok', 'mediator': ..., "
             "'indirect_effect': ..., 'ci_lower': ..., 'ci_upper': ...}. "
-            + _NOT_RUN_ENDING
+            + _DESCOPE_ENDING
         )
     return (
         f"The research question promises {commitment.description} "
         f"({matched!r}). Run that analysis on the existing analysis files "
         "and record it in results.json under a key that names it. "
-        + _NOT_RUN_ENDING
+        + _DESCOPE_ENDING
     )
 
 
@@ -510,46 +704,64 @@ def _incremental_instruction(
     ]
     if baseline:
         lines.append(
-            f"The question names the baseline as: \"{baseline}\". "
-            "baseline_cols = the encoded train_X columns of the predictor_set "
-            "variables that measure it; focal_cols = the encoded columns of "
-            "the constructs the question credits (by default every other "
-            "predictor). A one-hot variable's columns start with its name "
-            "(X1RACE -> X1RACE_*)."
+            f"The words after {matched!r} in the question name the "
+            f"baseline: \"{baseline}\". Check that against the question "
+            "itself. baseline_cols = the encoded train_X columns of every "
+            "predictor_set variable that measures something in that "
+            "baseline, controls included. focal_cols = the encoded columns "
+            "of only the constructs the question credits. Put no baseline "
+            "or control variable in focal_cols: a column there is credited "
+            "to the focal constructs, while a column in neither list is "
+            "left out of both models. A one-hot variable's columns start "
+            "with its name (X1RACE -> X1RACE_*)."
         )
     else:
         lines.append(
-            "The question does not name the baseline block in words: use "
-            "the encoded columns of the focal constructs as focal_cols and "
-            "omit baseline_cols, which then defaults to every other column."
+            "The question does not name the baseline block in words: "
+            "focal_cols = the encoded columns of only the constructs the "
+            "question credits; omit baseline_cols, which then defaults to "
+            "every other column."
         )
     if names:
         lines.append("predictor_set: " + ", ".join(names) + ".")
-    if prediction and outcome_type in ("binary", ""):
+    if prediction and outcome_type in ("binary", "continuous", ""):
+        type_arg = (
+            f"outcome_type={outcome_type!r}" if outcome_type
+            else "outcome_type=<'binary' or 'continuous', from data_report.json>"
+        )
+        returns = {
+            "binary": "baseline_auc, full_auc and delta_auc",
+            "continuous": "baseline_r2, full_r2, delta_r2 and both RMSEs",
+        }.get(
+            outcome_type,
+            "delta_auc for a binary outcome or delta_r2 for a continuous one",
+        )
         lines.append(
-            "Call the certified helper; do not reimplement it:\n"
+            "Call the certified helper, which handles binary and continuous "
+            "outcomes; do not reimplement it:\n"
             "    results['incremental_validity'] = "
             "analysis_helpers.run_incremental_validity(\n"
             "        train_X, train_y_arr, test_X, test_y_arr,\n"
             "        focal_cols=focal_cols, baseline_cols=baseline_cols,\n"
-            "        school_ids=test_school_ids)  # pseudo_school_id from "
+            "        school_ids=test_school_ids,  # pseudo_school_id from "
             "test_school_ids.csv; None if that file is absent\n"
-            "    results['incremental_validity']['baseline_cols'] = "
-            "baseline_cols\n"
-            "It returns baseline_auc, full_auc, delta_auc and a bootstrap "
-            "CI on the difference."
+            f"        {type_arg})\n"
+            f"It returns {returns}, with a bootstrap CI on the difference. "
+            "It does not raise on data it cannot use; it returns a record "
+            "with a status and a reason, so do not wrap it in a try/except "
+            "that writes null or a note instead."
         )
     elif prediction:
         lines.append(
-            f"run_incremental_validity compares AUCs and needs a binary "
-            f"outcome; this outcome is {outcome_type}. Fit the same nested "
-            "pair with LinearRegression on the training set (baseline_cols, "
-            "then baseline_cols + focal_cols), compare held-out R^2 and "
-            "RMSE, bootstrap the R^2 difference over the test rows (1000 "
-            "resamples, random_state=42; resample schools when "
+            f"run_incremental_validity handles binary and continuous "
+            f"outcomes; this outcome is {outcome_type}. Fit the nested pair "
+            "(baseline_cols, then baseline_cols + focal_cols) with the "
+            "study's own estimator on the training set, compare their "
+            "held-out scores, bootstrap the difference over the test rows "
+            "(1000 resamples, random_state=42; resample schools when "
             "test_school_ids.csv exists) and record "
-            "results['incremental_validity'] = {'status': 'ok', "
-            "'baseline_r2', 'full_r2', 'delta_r2', 'ci_lower', 'ci_upper', "
+            "results['incremental_validity'] = {'status': 'ok', the two "
+            "scores, their difference, 'ci_lower', 'ci_upper', "
             "'baseline_cols', 'focal_cols'}."
         )
     else:
@@ -560,7 +772,7 @@ def _incremental_instruction(
             "its 95% CI as results['incremental_validity'] with "
             "'status': 'ok'."
         )
-    lines.append(_NOT_RUN_ENDING)
+    lines.append(_STRICT_ENDING)
     return "\n".join(lines)
 
 
@@ -669,6 +881,11 @@ def _check_outcome_not_in_train_x(
         pass  # Can't read file — not a pre-critic error, pipeline will surface it
 
 
+#: How a run out of wall-clock time reads in results.errors: the
+#: executor's "Timeout after 600s", or "timed out".
+_TIMEOUT = re.compile(r"\btimed?[\s-]?out\b", re.IGNORECASE)
+
+
 def _check_model_count(ctx: object, result: PreCriticResult) -> None:
     """pcc_02 (major): results.json must have at least 4 individual models."""
     results = getattr(ctx, "results_object", None) or {}
@@ -692,6 +909,23 @@ def _check_model_count(ctx: object, result: PreCriticResult) -> None:
         # stops (PRE_CRITIC_UNRESOLVED) and still writes no paper.
         errors = results.get("errors") if isinstance(results, dict) else None
         recorded = "; ".join(str(e) for e in (errors or [])[:2])
+        # A wall-clock timeout is not a failing model, and wrapping each
+        # model in try/except does not make the code finish in time. The
+        # instruction says so, and a second timeout after that revision
+        # stops the run instead of spending the remaining cycles, each up
+        # to four executions at the full time limit, on the same outcome.
+        timed_out = next(
+            (str(e) for e in (errors or []) if _TIMEOUT.search(str(e))), ""
+        )
+        timeout_advice = (
+            " The code ran out of time: every model then failed together, "
+            "and a try/except does not change that. Keep the battery and "
+            "its grids, but spend less time on them: run grid searches "
+            "with n_jobs=-1, never fit the same model twice, and keep SHAP, "
+            "bootstrap and permutation work at the sample sizes the skills "
+            "give."
+            if timed_out else ""
+        )
         result.failures.append(
             CheckFailure(
                 check_id="pcc_02",
@@ -713,6 +947,11 @@ def _check_model_count(ctx: object, result: PreCriticResult) -> None:
                     "and continues with the next model (SPEC section 8), so "
                     "one failing model cannot empty the battery, and write "
                     "results.json even when some models fail."
+                    + timeout_advice
+                ),
+                stop_on_repeat=(
+                    f"the analysis code ran out of time ({' '.join(timed_out.split())[:300]})"
+                    if timed_out else ""
                 ),
             )
         )

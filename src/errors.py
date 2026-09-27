@@ -7,6 +7,8 @@ the user interface; this module only fixes the vocabulary.
 """
 from __future__ import annotations
 
+import re
+
 #: Every code a run may end with. ``resumable`` says whether ``--resume``
 #: can continue once the cause is fixed (for example after topping up an
 #: account), as opposed to needing a changed question or configuration.
@@ -25,7 +27,8 @@ ABORT_CODES: dict[str, dict[str, bool]] = {
     "DATA_CONTRACT_FAILED": {"resumable": True},
     "ANALYSIS_FAILED": {"resumable": True},
     # A pre-review finding no revision can fix (confirmed leakage, a data
-    # report that failed validation).
+    # report that failed validation). One recorded before findings were
+    # classified may be resumable after all: see reopened_pre_critic_stop.
     "PRE_CRITIC_ABORT": {"resumable": False},
     # A pre-review finding a revision could have fixed was still failing
     # when the revision cycles ran out. Not resumable: a resume re-enters
@@ -80,3 +83,44 @@ def code_for_exception(exc: BaseException) -> str:
 
 def is_resumable(code: str) -> bool:
     return ABORT_CODES.get(code, {"resumable": True})["resumable"]
+
+
+#: Pre-review checks whose critical finding a revision can fix
+#: (``revisable`` in src/pre_critic_checks.py).
+REVISABLE_PRE_CRITIC_CHECKS: frozenset[str] = frozenset({"pcc_02", "pcc_07"})
+
+_LEAD_CHECK = re.compile(r"^(pcc_[a-z0-9]+):")
+
+
+def reopened_pre_critic_stop(abort_info: object) -> bool:
+    """True for a PRE_CRITIC_ABORT a revision can now fix.
+
+    Before 2026-09-27 every critical pre-review finding stopped the run as
+    PRE_CRITIC_ABORT, which is not resumable, so a study stopped for a
+    missing "above and beyond" comparison (pcc_07) could only be run
+    again from the start after the fix that revises such findings. Such a
+    record is recognised by what it lacks: every later PRE_CRITIC_* record
+    lists its findings in ``checks``, and a later PRE_CRITIC_ABORT always
+    holds one no revision can fix. Its message is led by the first
+    critical finding, and the checks ran in the order pcc_01, pcc_06,
+    pcc_07, pcc_02, so a message led by pcc_07 or pcc_02 means neither
+    leakage (pcc_01) nor a failed validation (pcc_06) was found. Resuming
+    it retries CRITIQUING, where the checks run again under the current
+    rules and a revisable finding is sent back for revision.
+    """
+    if not isinstance(abort_info, dict):
+        return False
+    if abort_info.get("code") != "PRE_CRITIC_ABORT":
+        return False
+    if abort_info.get("stage") != "CRITIQUING" or "checks" in abort_info:
+        return False
+    lead = _LEAD_CHECK.match(str(abort_info.get("message") or "").strip())
+    return lead is not None and lead.group(1) in REVISABLE_PRE_CRITIC_CHECKS
+
+
+def abort_is_resumable(abort_info: object) -> bool:
+    """Whether ``--resume`` can continue a run stopped with ``abort_info``."""
+    if not isinstance(abort_info, dict):
+        return False
+    code = str(abort_info.get("code") or "UNKNOWN")
+    return is_resumable(code) or reopened_pre_critic_stop(abort_info)
