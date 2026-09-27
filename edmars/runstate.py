@@ -729,6 +729,9 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
             "timeout_s": _num(data.get("timeout_s")),
             "since": ts,
             "stage": stage or state.current_stage,
+            # Whose code: a revision re-runs the Analyst's or the
+            # DataEngineer's code under the REVISING step.
+            "agent": ev.get("agent") if isinstance(ev.get("agent"), str) else None,
         }
         state.code_running = True
     elif etype == "attempt.end":
@@ -2006,7 +2009,12 @@ def describe_now(state: RunState, now: datetime | None = None) -> str:
         elapsed = fmt_duration((ref - since).total_seconds()) if isinstance(since, datetime) else ""
         limit = att.get("timeout_s")
         limit_min = int(math.ceil(float(limit) / 60)) if limit else 20
-        what = "the analysis code" if st.key == "ANALYZING" else "the data-preparation code"
+        agent = str(att.get("agent") or "").lower().replace("_", "")
+        if agent in ("analyst", "dataengineer"):
+            analysis = agent == "analyst"
+        else:
+            analysis = st.key == "ANALYZING"
+        what = "the analysis code" if analysis else "the data-preparation code"
         text = f"Running {what}"
         if att.get("attempt"):
             text += f" (attempt {att['attempt']} of {att.get('max_attempts') or 4})"

@@ -342,6 +342,24 @@ def test_tail_running_run_waits_on_ai_and_counts_usage(run_home: Path) -> None:
     assert "Running the data-preparation code" in state.now_text
 
 
+@pytest.mark.parametrize(("agent", "what"), [
+    ("analyst", "Running the analysis code"),
+    ("data_engineer", "Running the data-preparation code"),
+    (None, "Running the data-preparation code"),  # an event without the agent: as before
+])
+def test_a_revision_names_the_code_of_the_agent_it_re_runs(agent: str | None, what: str) -> None:
+    # A revision re-runs the Analyst's code under the REVISING step, and
+    # the Now line took any step but ANALYZING for data preparation. The
+    # automatic checks' pcc_07 revision re-runs only the Analyst.
+    state = fold([
+        event(1, "run.start", 0, task_type="prediction"),
+        event(2, "stage.start", 0, stage="REVISING", cycle=1),
+        event(3, "attempt.start", 1, stage="REVISING", agent=agent, attempt=1, max_attempts=3,
+              timeout_s=1200),
+    ])
+    assert runstate.describe_now(state).startswith(f"{what} (attempt 1 of 3)")
+
+
 def test_tail_reader_is_incremental_and_does_not_double_count_cost(run_home: Path) -> None:
     run = make_run(run_home, pid=alive_pid(), log=log_lines((0, "Starting FORMULATING stage")),
                    pdf=False, data_report=None,
