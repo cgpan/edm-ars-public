@@ -2831,13 +2831,17 @@ class Orchestrator:
             self.ctx.current_state = PipelineState.ABORTED
             self._log("Orchestrator", f"Pre-Critic guard stopped the run [{code}]: {message}")
 
+        # No critic_score: the report's overall_quality_score of 1 is a
+        # placeholder for a review that never ran. The Mac test's
+        # events.jsonl and console.log said "score 1" while the result
+        # screen and summary.html said "not scored".
         events.emit(
             self.ctx,
             "verdict",
             stage="CRITIQUING",
             cycle=self.ctx.revision_cycle,
             plain=f"Automatic pre-review check: {verdict}",
-            critic_score=report.get("overall_quality_score"),
+            critic_score=None,
             verdict=verdict,
             unverified=False,
             source="pre_critic",

@@ -1687,7 +1687,11 @@ def _enrich(state: RunState, run_dir: Path, files: _FileCache, *, tail: bool) ->
 
     review = files.load(run_dir / "review_report.json")
     if isinstance(review, dict):
-        score = _num(review.get("overall_quality_score"))
+        # A report the automatic checks wrote in place of a review carries
+        # overall_quality_score 1 as a placeholder, never a score to show,
+        # even when no event says the checks decided the round.
+        by_checks = review.get("_source") == "pre_critic_short_circuit"
+        score = None if by_checks else _num(review.get("overall_quality_score"))
         if score is not None:
             metrics["critic_score"] = score
         verdict = review.get("effective_verdict") or review.get("overall_verdict")

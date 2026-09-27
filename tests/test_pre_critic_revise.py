@@ -308,6 +308,12 @@ def test_confirmed_leakage_still_aborts(tmp_path: Path, question: str) -> None:
     if question == _QUESTION:
         assert ids["pcc_07"] is True
     assert not (tmp_path / "paper.tex").exists()
+    # No review ran, so the verdict has no score. The Mac study's verdict
+    # event said critic_score 1 (the report's placeholder), and console.log
+    # "critic verdict: ABORT, score 1", while summary.html said "not scored".
+    [verdict] = [e["data"] for e in _events(tmp_path) if e["type"] == "verdict"]
+    assert verdict["source"] == "pre_critic" and verdict["verdict"] == "ABORT"
+    assert verdict["critic_score"] is None
 
 
 # ---------------------------------------------------------------------------
