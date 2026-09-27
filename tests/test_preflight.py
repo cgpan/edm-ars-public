@@ -367,6 +367,33 @@ def test_gate_with_unimportable_lsar_warns(
     assert str(root) not in sys.path
 
 
+def test_under_edmars_the_lsar_fixes_name_the_edmars_command(
+    config: dict, data_file: str, all_tools: None, tmp_path: Path,
+    _restore_lsar_modules: None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The Mac test's console.log said "python -m pip install -r
+    # .../requirements.txt", which fails in the installed copy's
+    # environment (uv makes it without pip), while the edmars screen said
+    # `edmars setup reviewer`.
+    monkeypatch.setenv("EDMARS_RUN_ID", "preflight")
+    root = tmp_path / "LSAR-fake"
+    (root / "lsar").mkdir(parents=True)
+    (root / "lsar" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "lsar" / "pipeline.py").write_text(
+        "import a_dependency_that_is_not_installed\n", encoding="utf-8")
+    config["review_gate"]["lsar_project_path"] = str(root)
+    sys.modules.pop("lsar", None)
+    findings = check_run_prerequisites(config, "prediction", "hsls09_public", data_file, True)
+    [lsar] = [f for f in findings if f.code == "LSAR_IMPORT_FAILED"]
+    assert lsar.fix == "Run `edmars setup reviewer`."
+    assert "pip" not in lsar.fix
+
+    config["review_gate"]["lsar_project_path"] = str(tmp_path / "nowhere")
+    findings = check_run_prerequisites(config, "prediction", "hsls09_public", data_file, True)
+    [lsar] = [f for f in findings if f.code == "LSAR_NOT_FOUND"]
+    assert lsar.fix == "Run `edmars setup reviewer`."
+
+
 def test_gate_disabled_skips_lsar(
     config: dict, data_file: str, all_tools: None, tmp_path: Path
 ) -> None:

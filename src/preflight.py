@@ -435,10 +435,23 @@ def _r_install_fix(rscript: str, packages: list[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Set by the edmars app for every study it starts, and for its pre-start
+#: check (edmars/runner.py).
+_EDMARS_RUN_ID_ENV = "EDMARS_RUN_ID"
+
+#: How an edmars user repairs the reviewer. The fixes below are for a
+#: checkout; in an installed copy the environment is made by uv and has no
+#: pip, so the Mac test's console.log advised "python -m pip install -r
+#: .../requirements.txt", which fails there ("No module named pip"),
+#: while the edmars screen said `edmars setup reviewer`.
+_EDMARS_LSAR_FIX = "Run `edmars setup reviewer`."
+
+
 def _check_lsar(config: dict) -> list[Finding]:
     rg = config.get("review_gate") or {}
     root = str(rg.get("lsar_project_path") or "")
-    fix = (
+    under_edmars = bool(os.environ.get(_EDMARS_RUN_ID_ENV, "").strip())
+    fix = _EDMARS_LSAR_FIX if under_edmars else (
         "Clone https://github.com/cgpan/LSAR-public next to this "
         "repository (or anywhere, then set LSAR_HOME to its folder) and "
         "install its requirements, or set review_gate.enabled: false."
@@ -464,9 +477,11 @@ def _check_lsar(config: dict) -> list[Finding]:
             "LSAR_IMPORT_FAILED", WARN,
             f"LSAR at {root} could not be imported ({error}); the review "
             "gate will not run.",
-            f"Install LSAR's requirements into this Python: "
-            f"{Path(sys.executable).name} -m pip install -r "
-            f"{os.path.join(root, 'requirements.txt')}",
+            _EDMARS_LSAR_FIX if under_edmars else (
+                f"Install LSAR's requirements into this Python: "
+                f"{Path(sys.executable).name} -m pip install -r "
+                f"{os.path.join(root, 'requirements.txt')}"
+            ),
         ))
     if not os.environ.get("DEEPSEEK_API_KEY"):
         findings.append(Finding(
