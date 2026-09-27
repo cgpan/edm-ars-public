@@ -2432,7 +2432,8 @@ def confirmation_card(
         base = _sget(settings, "provider_base_url")
         ai += f" at {base}" if base else ""
     lines += _wrap("AI:", ai)
-    lines += _wrap("Time:", TIME_WITH_REVIEW if reviewed else TIME_WITHOUT_REVIEW)
+    time_text = TIME_WITH_REVIEW if reviewed else TIME_WITHOUT_REVIEW
+    lines += _wrap("Time:", f"{time_text}. {estimates.ENDS_SOONER}")
     if provider == "deepseek":
         cost = estimates.cost_deepseek(reviewed)
     else:

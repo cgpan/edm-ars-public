@@ -37,6 +37,13 @@ TIME_WITH_REVIEW = (
     "usually 20-60 minutes with the automated review, occasionally about 2 hours"
 )
 
+#: Said after either time. The ranges are for studies that reach a
+#: paper; both Mac test studies were stopped by the checks, after 14 min
+#: (2026-09-26) and 8 min 47 s (2026-09-27), well under them. Two early
+#: stops are no reason to change the ranges of a complete study, but the
+#: card must not suggest a stopped study has hung.
+ENDS_SOONER = "A study that stops early ends sooner."
+
 #: What the automated review adds to a study (one to six reviews).
 REVIEW_TIME = "about 10-45 minutes"
 
