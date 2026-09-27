@@ -28,7 +28,7 @@ from src.causal_data_contract import (
 )
 from src.context import PipelineContext, PipelineState
 from src.dataset_adapter import create_dataset_adapter
-from src.errors import code_for_exception, is_resumable
+from src.errors import code_for_exception, is_resumable, reopened_pre_critic_stop
 from src.findings_memory import FindingsMemory, RunEntry
 from src.pre_critic_checks import PreCriticResult, run_pre_critic_checks
 from src.review_gate import ReviewGate
@@ -967,7 +967,8 @@ class Orchestrator:
                 "to resume. Start a new run.",
             )
             return
-        if not is_resumable(code):
+        reopened = reopened_pre_critic_stop(info)
+        if not (is_resumable(code) or reopened):
             self._log(
                 "Orchestrator",
                 f"Checkpoint is ABORTED in {stage} with {code}, which a resume "
@@ -975,6 +976,13 @@ class Orchestrator:
                 "Nothing to resume; start a new run.",
             )
             return
+        if reopened:
+            self._log(
+                "Orchestrator",
+                f"The run was stopped by a pre-review finding this version "
+                f"sends back for revision instead ({info.get('message', '')}). "
+                "Retrying CRITIQUING, where the checks run again.",
+            )
         self._log(
             "Orchestrator",
             f"Resuming an ABORTED run: retrying {stage} (previous failure "

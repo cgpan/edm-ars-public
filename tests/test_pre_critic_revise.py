@@ -509,6 +509,90 @@ def test_an_empty_battery_without_a_timeout_uses_every_cycle(
 
 
 # ---------------------------------------------------------------------------
+# A study stopped before pre-review findings were classified can be resumed
+# ---------------------------------------------------------------------------
+
+
+def _legacy_stop(tmp_path: Path, cfg: dict, lead: str) -> None:
+    """Rewrite a stopped run's checkpoint the way the release before this
+    change wrote a pcc_07 stop: PRE_CRITIC_ABORT, no ``checks``, the first
+    critical finding in the message, a review with no revision sent."""
+    orch = _orch(tmp_path, cfg, max_revision_cycles=0)
+    _stage_study(orch)
+    assert orch.run().current_state == PipelineState.ABORTED
+    cp = _cp(tmp_path)
+    cp["abort_info"] = {
+        "stage": "CRITIQUING",
+        "code": "PRE_CRITIC_ABORT",
+        "message": f"{lead}: The research question says 'above and beyond' ...",
+        "resumable": False,
+        "at": "2026-09-26T21:14:03Z",
+    }
+    report = cp["review_report"]
+    report["overall_verdict"] = "ABORT"
+    for key in ("effective_verdict", "stop_code", "pre_critic_findings"):
+        report.pop(key, None)
+    cp["revision_cycle"] = 0
+    (tmp_path / "checkpoint.json").write_text(json.dumps(cp), encoding="utf-8")
+
+
+def test_a_study_stopped_by_the_old_rule_resumes_into_a_revision(
+    tmp_path: Path,
+) -> None:
+    """The owner's Mac study stopped as PRE_CRITIC_ABORT, not resumable,
+    for a finding this version revises. Without this path the paid run
+    could only be started again from FORMULATING."""
+    from src.errors import abort_is_resumable, reopened_pre_critic_stop
+
+    cfg = _config(tmp_path)
+    _legacy_stop(tmp_path, cfg, "pcc_07")
+    info = _cp(tmp_path)["abort_info"]
+    assert reopened_pre_critic_stop(info) and abort_is_resumable(info)
+
+    second = _orch(tmp_path, cfg)
+    calls, instructions = _stage_study(second)
+    ctx = second.run()
+
+    assert ctx.current_state == PipelineState.COMPLETED
+    assert calls == {"pf": 0, "de": 0, "analyst": 1, "critic": 1, "writer": 1}
+    assert "[pcc_07, REQUIRED]" in instructions[0]
+    assert ctx.revision_cycle == 1
+
+
+@pytest.mark.parametrize("lead", ["pcc_01", "pcc_06"])
+def test_an_old_stop_for_leakage_or_failed_validation_stays_stopped(
+    tmp_path: Path, lead: str,
+) -> None:
+    from src.errors import abort_is_resumable
+
+    cfg = _config(tmp_path)
+    _legacy_stop(tmp_path, cfg, lead)
+    assert not abort_is_resumable(_cp(tmp_path)["abort_info"])
+
+    second = _orch(tmp_path, cfg)
+    calls, _ = _stage_study(second)
+    assert second.run().current_state == PipelineState.ABORTED
+    assert sum(calls.values()) == 0
+
+
+def test_a_classified_pre_critic_abort_is_never_reopened() -> None:
+    """Every record written since findings were classified lists them; a
+    PRE_CRITIC_ABORT among those holds a finding no revision can fix."""
+    from src.errors import abort_is_resumable
+
+    info = {
+        "stage": "CRITIQUING", "code": "PRE_CRITIC_ABORT",
+        "message": "pcc_07: ...", "resumable": False,
+        "checks": [{"check_id": "pcc_07", "revisable": True},
+                   {"check_id": "pcc_01", "revisable": False}],
+    }
+    assert not abort_is_resumable(info)
+    unclassified = {k: v for k, v in info.items() if k != "checks"}
+    assert abort_is_resumable(unclassified)
+    assert not abort_is_resumable({**unclassified, "stage": "ANALYZING"})
+
+
+# ---------------------------------------------------------------------------
 # Checkpoints and --resume across a pre-review revision
 # ---------------------------------------------------------------------------
 

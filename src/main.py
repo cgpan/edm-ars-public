@@ -42,7 +42,7 @@ from src.config import (  # noqa: E402
 from src.context import PipelineContext, PipelineState  # noqa: E402
 from src.dataset_adapter import _DATASET_REGISTRY, create_dataset_adapter  # noqa: E402
 from src import events  # noqa: E402
-from src.errors import is_resumable  # noqa: E402
+from src.errors import abort_is_resumable  # noqa: E402
 from src.orchestrator import Orchestrator  # noqa: E402
 from src.preflight import (  # noqa: E402
     FAIL,
@@ -712,9 +712,10 @@ def _retry_stage(abort_info: Any) -> str | None:
     """The stage a resumed ABORTED run retries, or None when it cannot.
 
     Mirrors the orchestrator's rule (D3): the abort record must name a
-    non-terminal stage, and its code must be one ``src.errors`` marks as
-    resumable. A record-less ABORTED checkpoint (an older run) has nothing
-    to retry.
+    non-terminal stage, and ``src.errors.abort_is_resumable`` must accept
+    it (a resumable code, or a pre-review stop recorded before findings
+    were classified whose finding a revision can now fix). A record-less
+    ABORTED checkpoint (an older run) has nothing to retry.
     """
     if not isinstance(abort_info, dict):
         return None
@@ -722,7 +723,7 @@ def _retry_stage(abort_info: Any) -> str | None:
     terminal = {"COMPLETED", "INCOMPLETE", "ABORTED"}
     if stage not in PipelineState.__members__ or stage in terminal:
         return None
-    if not is_resumable(str(abort_info.get("code") or "UNKNOWN")):
+    if not abort_is_resumable(abort_info):
         return None
     return stage
 

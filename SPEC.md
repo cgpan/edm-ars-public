@@ -552,8 +552,11 @@ cycle:
   promised test cannot run, or a second timeout of an analysis that trained
   no model.
 
-Both codes are not resumable. `run_status.json` carries the findings in
-`abort.checks`.
+Both codes are not resumable, with one exception: a `PRE_CRITIC_ABORT`
+recorded before findings were classified (its abort record has no `checks`)
+and led by a finding a revision can now fix (pcc_07, pcc_02) resumes at
+CRITIQUING, where the checks run again and the finding is revised.
+`run_status.json` carries the findings in `abort.checks`.
 
 ### 5.2 Checkpointing
 

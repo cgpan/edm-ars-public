@@ -1070,6 +1070,29 @@ def test_an_abort_without_a_record_is_not_resumable(
     assert "NOT_RESUMABLE" in out and "without a record" in out
 
 
+def test_a_pre_review_stop_this_version_revises_can_be_resumed(
+    env: dict[str, Path],
+) -> None:
+    """The owner's Mac study stopped as PRE_CRITIC_ABORT (not resumable)
+    for pcc_07, before findings were classified. This version sends that
+    finding back for revision, so --resume retries CRITIQUING; a stop
+    led by leakage, or any record that lists its checks, stays final."""
+    legacy = {"stage": "CRITIQUING", "code": "PRE_CRITIC_ABORT",
+              "message": "pcc_07: The research question says 'above and beyond'",
+              "resumable": False}
+    base = env["root"] / "runs"
+    _checkpoint(base / "mac", current_state="ABORTED", abort_info=legacy)
+    _checkpoint(base / "leak", current_state="ABORTED", abort_info={
+        **legacy, "message": "pcc_01: Outcome variable 'X4EVRATNDCLG' is a column"})
+    _checkpoint(base / "new", current_state="ABORTED", abort_info={
+        **legacy, "checks": [{"check_id": "pcc_01", "revisable": False}]})
+
+    assert [os.path.basename(p) for p, _ in main_mod._resumable_runs(str(base))] == ["mac"]
+    plan = main_mod._plan_run(main_mod._build_parser().parse_args(
+        ["--config", str(env["config"]), "--output-dir", str(base / "mac"), "--resume"]))
+    assert plan.retry_stage == "CRITIQUING"
+
+
 def test_resumable_runs_follow_the_abort_code_not_a_stored_flag(
     env: dict[str, Path],
 ) -> None:
