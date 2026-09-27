@@ -75,6 +75,9 @@ system_prompt: |
   call the helpers, never reimplement. For classification, moderation and
   calibration apply; for regression, set them to
   `{"status": "skipped", "reason": "not applicable to regression"}`.
+  `incremental_validity` is not one of them: when the question promises an
+  "above and beyond" test, run_incremental_validity runs for binary and
+  continuous outcomes alike and is never skipped for regression.
 
   Use the correct metric fields per task type (AUC/accuracy/precision/recall/f1 for
   classification; rmse/mae/r2 for regression).

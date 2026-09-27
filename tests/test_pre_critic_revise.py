@@ -92,6 +92,11 @@ _INCREMENTAL_SKIPPED = {
     "reason": "no focal column present in the design matrix",
 }
 
+#: What an archived GPA run wrote when its helper call raised: a null
+#: record beside a warning. Not the test, and not the Analyst's word that
+#: the test cannot run either.
+_NULL_WITH_WARNING = object()
+
 
 @pytest.fixture(autouse=True)
 def _compile_ok(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,15 +106,17 @@ def _compile_ok(monkeypatch: pytest.MonkeyPatch) -> None:
 def _stage_study(
     orch: Any,
     *,
-    revised_incremental: dict | None = _INCREMENTAL_OK,
+    revised_incremental: Any = _INCREMENTAL_OK,
+    first_incremental: Any = None,
     leak: bool = False,
     question: str = _QUESTION,
 ) -> tuple[dict[str, int], list[str | None]]:
     """Wire the stub agents for the observed study.
 
-    The first analysis has no incremental-validity record. A revision
-    adds ``revised_incremental`` (None: adds nothing). ``leak`` writes the
-    outcome into train_X.csv.
+    The first analysis records ``first_incremental`` (None: no record). A
+    revision records ``revised_incremental`` (None: adds nothing).
+    ``_NULL_WITH_WARNING`` for either writes a null record and a failure
+    warning. ``leak`` writes the outcome into train_X.csv.
     """
     calls = _wire(orch, review=_PASS_REVIEW)
     out = orch.ctx.output_dir
@@ -136,8 +143,14 @@ def _stage_study(
         calls["analyst"] += 1
         instructions.append(revision_instructions)
         results = copy.deepcopy(_RESULTS)
-        if revision_instructions and revised_incremental is not None:
-            results["incremental_validity"] = copy.deepcopy(revised_incremental)
+        record = revised_incremental if revision_instructions else first_incremental
+        if record is _NULL_WITH_WARNING:
+            results["incremental_validity"] = None
+            results["warnings"] = [
+                "run_incremental_validity failed: Unknown label type: continuous."
+            ]
+        elif record is not None:
+            results["incremental_validity"] = copy.deepcopy(record)
         Path(out, "results.json").write_text(json.dumps(results), encoding="utf-8")
         return results
 
@@ -302,11 +315,13 @@ def test_confirmed_leakage_still_aborts(tmp_path: Path, question: str) -> None:
 def test_a_finding_still_failing_after_the_last_cycle_stops_the_run(
     tmp_path: Path,
 ) -> None:
-    """Both revisions come back with the helper's skipped record, which is
-    not the test. No paper may be written around the missing result."""
+    """Both revisions come back with a null record and a failure warning,
+    which is not the test and not the Analyst's word that it cannot run,
+    so each goes back until the cycles run out. No paper may be written
+    around the missing result."""
     cfg = _config(tmp_path)
     orch = _orch(tmp_path, cfg)
-    calls, instructions = _stage_study(orch, revised_incremental=_INCREMENTAL_SKIPPED)
+    calls, instructions = _stage_study(orch, revised_incremental=_NULL_WITH_WARNING)
 
     ctx = orch.run()
 
@@ -358,6 +373,18 @@ def test_with_no_revision_cycles_the_finding_stops_the_run_at_once(
     abort = _status(tmp_path)["abort"]
     assert abort["code"] == "PRE_CRITIC_UNRESOLVED"
     assert "(0 of 0 used)" in abort["message"]
+
+
+def test_a_first_analysis_with_a_null_record_is_revised(tmp_path: Path) -> None:
+    """The archived GPA shape: the helper call raised, the Analyst wrote
+    incremental_validity: null and a warning. The key name used to pass
+    for the test, so this went straight to the Critic and the Writer."""
+    orch = _orch(tmp_path, _config(tmp_path))
+    calls, instructions = _stage_study(orch, first_incremental=_NULL_WITH_WARNING)
+
+    assert orch.run().current_state == PipelineState.COMPLETED
+    assert calls["analyst"] == 2
+    assert "[pcc_07, REQUIRED]" in instructions[1]
 
 
 # ---------------------------------------------------------------------------
