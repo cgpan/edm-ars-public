@@ -211,6 +211,50 @@ def test_few_papers_says_which_sources_turned_the_search_away(run_home: Path) ->
         "Check the related-work section and the references."]
 
 
+def test_openalex_standing_in_for_arxiv_is_named_with_its_papers(run_home: Path) -> None:
+    # arXiv refused (HTTP 406) and OpenAlex answered in its place: the old
+    # line said the related papers "all come from Semantic Scholar".
+    lit = {"degraded": False, "n_papers": 21,
+           "sources": {"semantic_scholar": "ok", "arxiv": "refused", "arxiv_http_status": 406,
+                       "openalex": "ok", "n_semantic_scholar": 12, "n_arxiv": 0, "n_openalex": 9}}
+    run = _ready_run(run_home, status=v2_status(literature=lit))
+    out = classify(run)
+    [line] = out.concerns
+    assert line == ("arXiv refused our requests (HTTP 406); OpenAlex supplied 9 papers instead, so the "
+                    "related papers come from Semantic Scholar and OpenAlex. Check the related-work "
+                    "section and the references.")
+    from edmars.results import render_summary_html, result_text
+    from edmars.runstate import load_state
+
+    assert "OpenAlex supplied 9 papers instead" in " ".join(result_text(out, load_state(run), run).split())
+    html = render_summary_html(out, load_state(run), run)
+    assert "OpenAlex supplied 9 papers instead" in html and "all come from Semantic Scholar" not in html
+    # The live view's line for the step names OpenAlex too.
+    assert "OpenAlex, if arXiv refuses" in " ".join(messages()["stages"]["FORMULATING"]["now"].split())
+
+
+def test_openalex_alone_is_not_called_few_papers(run_home: Path) -> None:
+    # Round 1 on the Mac: Semantic Scholar rate-limited and arXiv refused.
+    # With OpenAlex answering, the pool is OpenAlex's, not empty.
+    lit = {"degraded": True, "n_papers": 28,
+           "sources": {"semantic_scholar": "rate_limited", "arxiv": "refused", "arxiv_http_status": 406,
+                       "openalex": "ok", "n_semantic_scholar": 0, "n_arxiv": 0, "n_openalex": 28}}
+    [line] = endstates.literature_concerns(lit)
+    assert line.startswith("Semantic Scholar turned our searches away (too many requests) and arXiv refused "
+                           "our requests (HTTP 406); OpenAlex supplied 28 papers instead, so the related "
+                           "papers all come from OpenAlex. Check the related-work section")
+    assert "Few related papers" not in line
+    assert "edmars setup literature" in line
+    # OpenAlex turned away too: few papers, and each source is named.
+    lit["n_papers"] = 0
+    lit["sources"] = {**lit["sources"], "openalex": "rate_limited", "openalex_http_status": 429,
+                      "n_openalex": 0}
+    [line] = endstates.literature_concerns(lit)
+    assert line.startswith("Few related papers were found: Semantic Scholar turned our searches away (too "
+                           "many requests) and arXiv refused our requests (HTTP 406); OpenAlex, asked "
+                           "instead, turned our searches away (too many requests).")
+
+
 def test_ready_gate_not_run_is_never_a_zero_score(run_home: Path) -> None:
     gate = {"enabled": True, "ran": False, "skip_reason": "lsar_not_found", "passed": None,
             "score": None, "threshold": None, "advisory": None, "venue": "EDM"}

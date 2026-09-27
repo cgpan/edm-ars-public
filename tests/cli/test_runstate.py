@@ -256,6 +256,58 @@ def test_literature_notes_follow_the_pipelines_retrieval_status() -> None:
     assert runstate.lit_retrieval_status(ok_then_refused) == {"arxiv": "ok"}
 
 
+def test_openalex_papers_are_tallied_with_the_other_sources() -> None:
+    # arXiv refused every Python client on the Mac (HTTP 406); the pipeline
+    # then asks OpenAlex with the same words. Its rows must count, and the
+    # live view must not read as if only Semantic Scholar had answered.
+    events = [_lit(3, "semantic_scholar", 1, 20), _lit(4, "semantic_scholar", 2, 15),
+              _lit(5, "semantic_scholar", 3, 0, "rate_limited"),
+              _lit(6, "arxiv", 1, 0, "refused", http_status=406),
+              _lit(7, "arxiv", 2, 0, "skipped"), _lit(8, "arxiv", 3, 0, "skipped"),
+              _lit(9, "openalex", 1, 10), _lit(10, "openalex", 2, 3), _lit(11, "openalex", 3, 10)]
+    state = fold([event(1, "run.start", 0), *events])
+    assert state.metrics["lit_sources"] == {"semantic_scholar": 35, "arxiv": 0, "openalex": 23}
+    assert state.metrics["papers_found"] == 58
+    assert state.metrics["lit_status"] == {"semantic_scholar": "ok", "arxiv": "refused",
+                                           "arxiv_http_status": 406, "openalex": "ok", "n_openalex": 23}
+    detail = _formulating_detail(events)
+    assert detail == "58 papers found · arXiv refused our requests (HTTP 406); OpenAlex supplied 23 papers instead"
+
+
+def test_an_openalex_that_also_turned_us_away_is_said_after_arxiv() -> None:
+    events = [_lit(3, "semantic_scholar", 1, 0, "rate_limited"),
+              _lit(4, "arxiv", 1, 0, "refused", http_status=406),
+              _lit(5, "openalex", 1, 0, "rate_limited", http_status=429),
+              _lit(6, "openalex", 2, 0, "skipped"), _lit(7, "openalex", 3, 0, "skipped")]
+    state = fold([event(1, "run.start", 0), *events])
+    assert state.metrics["lit_status"] == {"semantic_scholar": "rate_limited", "arxiv": "refused",
+                                           "arxiv_http_status": 406, "openalex": "rate_limited",
+                                           "n_openalex": 0, "openalex_http_status": 429}
+    assert _formulating_detail(events) == (
+        "0 papers found · Semantic Scholar turned our searches away (too many requests) · arXiv refused "
+        "our requests (HTTP 406); OpenAlex, asked instead, turned our searches away (too many requests)")
+
+
+def test_literature_notes_read_openalex_from_the_pipelines_retrieval_status() -> None:
+    notes = runstate.literature_notes
+    refused = {"semantic_scholar": "ok", "arxiv": "refused", "arxiv_http_status": 406}
+    assert notes({**refused, "openalex": "ok", "n_openalex": 1}) == [
+        "arXiv refused our requests (HTTP 406); OpenAlex supplied 1 paper instead"]
+    assert notes({**refused, "openalex": "ok", "n_openalex": 0}) == [
+        "arXiv refused our requests (HTTP 406); OpenAlex, asked instead, found none"]
+    assert notes({**refused, "openalex": "refused", "openalex_http_status": 403}) == [
+        "arXiv refused our requests (HTTP 406); OpenAlex, asked instead, refused our requests (HTTP 403)"]
+    assert notes({"arxiv": "failed", "openalex": "failed", "openalex_http_status": 503}) == [
+        "arXiv search failed; OpenAlex, asked instead, failed (HTTP 503)"]
+    # Not asked (arXiv answered) or turned off: nothing to say about it.
+    assert notes({"semantic_scholar": "ok", "arxiv": "ok", "openalex": "not_needed", "n_openalex": 0}) == []
+    assert notes({**refused, "openalex": "disabled", "n_openalex": 0}) == [
+        "arXiv refused our requests (HTTP 406)"]
+    # Asked alongside an arXiv that answered (openalex.when: always).
+    assert notes({"arxiv": "ok", "openalex": "failed", "openalex_http_status": 502}) == [
+        "OpenAlex search failed (HTTP 502)"]
+
+
 def test_usage_events_are_priced_like_src_cost() -> None:
     pricing = {"deepseek-v4-pro": {"input": 0.28, "cached_input": 0.028, "output": 0.42}}
     [ev] = usage_events([{"agent": "Analyst", "model": "deepseek-v4-pro", "prompt_tokens": 1_000_000,

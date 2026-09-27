@@ -926,24 +926,44 @@ def literature_concerns(lit: dict[str, Any]) -> list[str]:
     Names the source that did not answer and how: the Mac test's arXiv
     search was refused (HTTP 406) and its Semantic Scholar searches
     rate-limited, and the old line said only that the search was "partly
-    unavailable".
+    unavailable". When OpenAlex stood in for arXiv the line says so and
+    how many papers it supplied, instead of claiming the papers all came
+    from Semantic Scholar.
     """
     raw = lit.get("sources")
     sources: dict[str, Any] = raw if isinstance(raw, dict) else {}
     notes = literature_notes(sources)
     key_hint = (" A free Semantic Scholar key (`edmars setup literature`) makes that much "
                 "less likely." if sources.get("semantic_scholar") == "rate_limited" else "")
+    from_openalex = sources.get("openalex") == "ok" and bool(_count(sources.get("n_openalex")))
+    from_s2 = sources.get("semantic_scholar") == "ok" and _count(sources.get("n_semantic_scholar")) != 0
     if lit.get("degraded"):
+        if from_openalex and notes and not from_s2 and sources.get("arxiv") != "ok":
+            # Semantic Scholar gave nothing, and OpenAlex filled in for
+            # arXiv: not "few" papers, but one source's papers.
+            return [f"{' and '.join(notes)}, so the related papers all come from OpenAlex. "
+                    f"Check the related-work section and the references.{key_hint}"]
         why = (": " + " and ".join(notes) + "." if notes
                else " (the literature search was partly unavailable).")
         return [f"Few related papers were found{why} Check the related-work section and "
                 f"the references.{key_hint}"]
     if notes:
-        only = ("all come from Semantic Scholar" if sources.get("semantic_scholar") == "ok"
-                else "come from fewer sources than usual")
+        if from_s2 and from_openalex:
+            only = "come from Semantic Scholar and OpenAlex"
+        elif from_s2 and sources.get("arxiv") != "ok":
+            only = "all come from Semantic Scholar"
+        else:
+            only = "come from fewer sources than usual"
         return [f"{'; '.join(notes)}, so the related papers {only}. "
                 "Check the related-work section and the references."]
     return []
+
+
+def _count(value: Any) -> int | None:
+    """A paper count from run_status.json; None when absent or not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
 
 
 def _gate_sentence(gate: dict[str, Any]) -> str:

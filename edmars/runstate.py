@@ -379,6 +379,12 @@ def _lit_progress(state: RunState, data: dict[str, Any]) -> None:
     state.metrics["lit_status"] = lit_retrieval_status(state.metrics["lit_queries"])
 
 
+#: Sources the live tally reports, in the pipeline's retrieval_status
+#: order. OpenAlex is asked when arXiv does not answer (or in every run
+#: with ``openalex.when: always``); it has no rows otherwise.
+_LIT_SOURCES = ("semantic_scholar", "arxiv", "openalex")
+
+
 def lit_retrieval_status(queries: Mapping[str, Any]) -> dict[str, Any]:
     """The live tally of ``lit.progress`` events, in the shape of the
     pipeline's ``retrieval_status`` (CONTRACT section 6), which
@@ -386,30 +392,36 @@ def lit_retrieval_status(queries: Mapping[str, Any]) -> dict[str, Any]:
 
     Same rule as ProblemFormulator._retrieval_status: a source is ``ok``
     if any query returned; otherwise ``rate_limited``, ``refused`` or
-    ``failed``. ``arxiv_http_status`` is the refusing (or first failing)
-    request's status.
+    ``failed``. ``arxiv_http_status`` and ``openalex_http_status`` are
+    the refusing (or first failing) request's status. ``n_openalex`` is
+    the papers OpenAlex's queries returned; the pipeline's own count,
+    once the step ends, is after duplicates of other sources' papers
+    are dropped, so it can be smaller.
     """
     out: dict[str, Any] = {}
-    for source, public in (("semantic_scholar", "semantic_scholar"), ("arxiv", "arxiv")):
+    for source in _LIT_SOURCES:
         rows = queries.get(source) if isinstance(queries, Mapping) else None
         if not isinstance(rows, Mapping) or not rows:
             continue
         statuses = [str(r.get("status") or "") for r in rows.values() if isinstance(r, Mapping)]
         if "ok" in statuses:
-            out[public] = "ok"
+            out[source] = "ok"
         elif "rate_limited" in statuses:
-            out[public] = "rate_limited"
+            out[source] = "rate_limited"
         elif "refused" in statuses:
-            out[public] = "refused"
+            out[source] = "refused"
         elif any(s and s != "skipped" for s in statuses):
-            out[public] = "failed"
-        if source == "arxiv" and out.get(public) in ("refused", "failed"):
-            wanted = out[public]
+            out[source] = "failed"
+        if source == "openalex":
+            out["n_openalex"] = sum(int(_int(r.get("found")) or 0) for r in rows.values()
+                                    if isinstance(r, Mapping))
+        if source != "semantic_scholar" and out.get(source) in ("refused", "failed", "rate_limited"):
+            wanted = out[source]
             codes = [_int(r.get("http_status")) for r in rows.values()
                      if isinstance(r, Mapping) and r.get("status") == wanted]
             code = next((c for c in codes if c is not None), None)
             if code is not None:
-                out["arxiv_http_status"] = code
+                out[f"{source}_http_status"] = code
     return out
 
 
@@ -420,23 +432,59 @@ def literature_notes(sources: Mapping[str, Any] | None) -> list[str]:
     retrieval_status) or :func:`lit_retrieval_status`'s live tally. arXiv's
     front end refuses some clients outright (the Mac test got HTTP 406 on
     every query); that is a refusal, not a failure, and is said so.
+
+    When arXiv did not answer, the pipeline asks OpenAlex instead, and
+    arXiv's line says what that brought: "arXiv refused our requests
+    (HTTP 406); OpenAlex supplied 12 papers instead". That line comes
+    last, after Semantic Scholar's, because it ends the story.
     """
     if not isinstance(sources, Mapping):
         return []
     notes: list[str] = []
-    code = _int(sources.get("arxiv_http_status"))
-    http = f" (HTTP {code})" if code is not None else ""
-    arxiv = sources.get("arxiv")
-    if arxiv == "refused":
-        notes.append(f"arXiv refused our requests{http}")
-    elif arxiv == "failed":
-        notes.append(f"arXiv search failed{http}")
+    arxiv_note = _source_trouble("arXiv", sources.get("arxiv"), _int(sources.get("arxiv_http_status")))
+    openalex = sources.get("openalex")
+    oa_code = _int(sources.get("openalex_http_status"))
+    # arXiv's line, finished with what OpenAlex brought in its place.
+    stood_in: str | None = None
+    if arxiv_note and openalex == "ok":
+        n = _int(sources.get("n_openalex"))
+        if n:
+            stood_in = f"{arxiv_note}; OpenAlex supplied {n} paper{'s' if n != 1 else ''} instead"
+        elif n == 0:
+            stood_in = f"{arxiv_note}; OpenAlex, asked instead, found none"
+        else:
+            stood_in = f"{arxiv_note}; OpenAlex was searched instead"
+    elif arxiv_note and openalex in ("refused", "rate_limited", "failed"):
+        stood_in = f"{arxiv_note}; OpenAlex, asked instead, {_source_trouble('', openalex, oa_code) or ''}".rstrip()
+    elif arxiv_note:
+        notes.append(arxiv_note)
     s2 = sources.get("semantic_scholar")
     if s2 == "rate_limited":
         notes.append("Semantic Scholar turned our searches away (too many requests)")
     elif s2 == "failed":
         notes.append("Semantic Scholar search failed")
+    if stood_in:
+        notes.append(stood_in)
+    elif not arxiv_note:
+        # Asked alongside an arXiv that answered (openalex.when: always).
+        trouble = _source_trouble("OpenAlex", openalex, oa_code)
+        if trouble:
+            notes.append(trouble)
     return notes
+
+
+def _source_trouble(label: str, state: Any, code: int | None) -> str | None:
+    """"arXiv refused our requests (HTTP 406)" and the like; None when the
+    source answered, was not asked or was turned off."""
+    http = f" (HTTP {code})" if code is not None else ""
+    who = f"{label} " if label else ""
+    if state == "refused":
+        return f"{who}refused our requests{http}"
+    if state == "rate_limited":
+        return f"{who}turned our searches away (too many requests)"
+    if state == "failed":
+        return f"{label} search failed{http}" if label else f"failed{http}"
+    return None
 
 
 def _stage_start(state: RunState, key: str, ts: datetime | None, cycle: int | None) -> None:

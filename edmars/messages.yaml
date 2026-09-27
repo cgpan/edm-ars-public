@@ -23,7 +23,8 @@ stages:
     title: "Framing the question & finding related studies"
     now: >-
       The AI is turning your question into a precise study plan and
-      searching Semantic Scholar and arXiv for related papers.
+      searching Semantic Scholar and arXiv (OpenAlex, if arXiv refuses)
+      for related papers.
   ENGINEERING:
     title: "Preparing the data"
     now: >-
