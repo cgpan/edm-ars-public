@@ -322,6 +322,9 @@ Subprocess timeout: **300s** for model training steps; **600s** for SHAP computa
 {
   "best_model": "string",
   "best_metric_value": 0.0,
+  "best_model_scope": "individual",
+  "best_overall_model": "string",
+  "best_overall_metric_value": 0.0,
   "primary_metric": "AUC|RMSE",
   "all_models": {
     "LogisticRegression": {
@@ -342,6 +345,15 @@ Subprocess timeout: **300s** for model training steps; **600s** for SHAP computa
   "warnings": []
 }
 ```
+
+`best_model` is the best **individual** model (StackingEnsemble excluded,
+per the interpretability output rule above). After ANALYZING, and after an
+Analyst revision, the orchestrator adds `best_model_scope` (`"individual"`,
+or `"overall"` if the analysis named an ensemble), `best_overall_model` and
+`best_overall_metric_value` (ensemble included), computed from `all_models`
+in the primary metric's direction (`src/best_model.py`). When the ensemble
+scores higher, the paper reports both and calls `best_model` the best
+individual model.
 
 ---
 
