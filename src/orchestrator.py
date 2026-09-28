@@ -376,8 +376,22 @@ def _emit_sample_metric(ctx: Any, report: Any, stage: str = "ENGINEERING") -> No
         return
 
 
+def _plain_metric(value: float) -> str:
+    """A metric value for a sentence: three decimals; an integer as is."""
+    if isinstance(value, int):
+        return str(value)
+    return f"{value:.3f}"
+
+
 def _emit_results_metric(ctx: Any, results: Any, stage: str = "ANALYZING") -> None:
     """One ``metric`` event for the analysis headline, best effort.
+
+    The sentence (``plain``) rounds the value to three decimals; ``value``
+    and ``ci`` keep full precision. The round-3 progress view printed
+    "Best model XGBoost: AUC = 0.801488285622901" -- fifteen digits, and
+    "best" for a model the ensemble beat. results.json names the best
+    INDIVIDUAL model by design (SPEC 4.3); when ``best_model_scope`` says
+    so, the event says "best single model".
 
     Never raises. It runs inside the ANALYZING and REVISING stages after
     the stage's work is done, and results.json is model-written: a
@@ -405,15 +419,20 @@ def _emit_results_metric(ctx: Any, results: Any, stage: str = "ANALYZING") -> No
             hi = row.get(f"{metric.lower()}_ci_upper")
             if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
                 ci = [lo, hi]
+        which = (
+            "best single model"
+            if results.get("best_model_scope") == "individual"
+            else "best model"
+        )
         events.emit(
             ctx,
             "metric",
             stage=stage,
-            plain=f"Best model {best}: {metric} = {value}",
+            plain=f"{which.capitalize()} {best}: {metric} = {_plain_metric(value)}",
             key=metric,
             value=value,
             ci=ci,
-            label=f"{metric} of the best model ({best})",
+            label=f"{metric} of the {which} ({best})",
         )
     except Exception:  # noqa: BLE001
         return
@@ -1781,7 +1800,8 @@ class Orchestrator:
             self.ctx.completed_stages.append("ANALYZING")
             self.ctx.current_state = PipelineState.CRITIQUING
             self._log("Orchestrator", "ANALYZING stage complete")
-            _emit_results_metric(self.ctx, result)
+            # The annotated results (best_model_scope), not the Analyst's.
+            _emit_results_metric(self.ctx, self.ctx.results_object)
             self._save_checkpoint()
             self._check_cost()
         except Exception as e:
@@ -2802,7 +2822,7 @@ class Orchestrator:
         elif agent_name == "Analyst":
             self.ctx.results_object = result
             self._annotate_best_model()
-            _emit_results_metric(self.ctx, result, stage="REVISING")
+            _emit_results_metric(self.ctx, self.ctx.results_object, stage="REVISING")
 
     # ------------------------------------------------------------------
     # Output file helpers

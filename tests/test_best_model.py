@@ -260,6 +260,54 @@ def test_an_analyst_revision_is_annotated_too(tmp_path: Path) -> None:
     assert on_disk["best_model_scope"] == "individual"
 
 
+def _headline_events(out: Path, stage: str) -> list[dict]:
+    from tests.test_orchestrator_terminal import _events
+
+    return [
+        e for e in _events(out)
+        if e["type"] == "metric" and e["stage"] == stage and e["data"]["key"] == "AUC"
+    ]
+
+
+def _assert_round3_headline(event: dict) -> None:
+    # The progress view printed "Best model XGBoost: AUC = 0.801488285622901"
+    # while the ensemble scored 0.802 in the same file.
+    assert event["plain"] == "Best single model XGBoost: AUC = 0.801"
+    assert event["data"]["label"] == "AUC of the best single model (XGBoost)"
+    # The numbers a reader computes with keep every digit.
+    auc = ROUND3_AUC["XGBoost"]
+    assert event["data"]["value"] == auc
+    assert event["data"]["ci"] == [auc - 0.015, auc + 0.015]
+
+
+def test_the_analysis_headline_event_says_best_single_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("src.invariants.run_invariants", lambda _d: [])
+    orch = _orch(tmp_path, _config(tmp_path))
+    _wire(orch)
+    _analyst_round3(orch)
+
+    orch.run()
+
+    events = _headline_events(tmp_path, "ANALYZING")
+    assert len(events) == 1
+    _assert_round3_headline(events[0])
+
+
+def test_a_revised_analysis_headline_event_says_best_single_model(tmp_path: Path) -> None:
+    orch = _orch(tmp_path, _config(tmp_path))
+    _wire(orch)
+    _analyst_round3(orch)
+    orch.ctx.current_state = PipelineState.REVISING
+
+    orch._run_agent("Analyst", revision_instructions="add the incremental test")
+
+    events = _headline_events(tmp_path, "REVISING")
+    assert len(events) == 1
+    _assert_round3_headline(events[0])
+
+
 # ---------------------------------------------------------------------------
 # What the Writer and the Analyst are told
 # ---------------------------------------------------------------------------

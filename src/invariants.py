@@ -2383,11 +2383,20 @@ def check_class_balance_sample(a: RunArtifacts) -> list[Finding]:
     against 12,942. The field sits in a report about the analytic
     sample, so a paper reading it as the analytic sample is reading what
     the artifact says.
+
+    Since the orchestrator recounts the classes itself (src.class_balance)
+    the field is labelled: ``{"sample", "n", "counts", "shares"}``. That
+    shape is held to what its labels say (see
+    ``_labelled_class_balance_problems``); the flat ``{label: count}``
+    shape, which archived runs and a skipped recount still carry, keeps
+    the n_train comparison above.
     """
     dr = a.data_report
     cb = dr.get("class_balance")
     if not isinstance(cb, dict) or not cb:
         return []
+    if isinstance(cb.get("counts"), dict) or "sample" in cb:
+        return _check_labelled_class_balance(dr, cb)
     vals = [v for v in (_f(x) for x in cb.values()) if v is not None]
     if not vals or any(0 < v < 1 for v in vals):
         return []  # proportions, not counts
@@ -2412,6 +2421,91 @@ def check_class_balance_sample(a: RunArtifacts) -> list[Finding]:
             artifact="data_report.json",
             evidence={"class_balance": cb, "sum": total,
                       "n_train": n_train, "analytic_n": analytic},
+            defect_ids=("J16",),
+        )
+    ]
+
+
+def _which_split(dr: dict, value: float) -> str:
+    """``", which is n_train"`` when *value* is one of the splits' sizes."""
+    for key in ("n_train", "n_test"):
+        n = _f(dr.get(key))
+        if n is not None and abs(value - n) <= 0.5:
+            return f", which is {key}"
+    return ""
+
+
+def _count_sum(counts: Any) -> float | None:
+    """The sum of a ``{label: count}`` map, or None when any is not a number."""
+    if not isinstance(counts, dict) or not counts:
+        return None
+    vals = [_f(v) for v in counts.values()]
+    if any(v is None for v in vals):
+        return None
+    return sum(v for v in vals if v is not None)
+
+
+def _labelled_class_balance_problems(dr: dict, cb: dict) -> list[str]:
+    """What a labelled ``class_balance`` gets wrong about its own sample.
+
+    The field the Writer is told to report as the analytic sample must
+    say so: its ``sample`` label names the analytic sample, its ``n`` is
+    ``analytic_n``, and its ``counts`` sum to its ``n``. The recount
+    writes all three from the same two y files, so a failure means the
+    field came from somewhere else, or ``analytic_n`` disagrees with the
+    files the analysis read. Without an ``n``, the counts are held to
+    ``analytic_n`` directly.
+    """
+    problems: list[str] = []
+    sample = cb.get("sample")
+    if not (isinstance(sample, str) and sample.strip().lower().startswith("analytic")):
+        problems.append(
+            f"it is labelled {sample!r}, not the analytic sample"
+            if sample not in (None, "")
+            else "it does not say which sample it counts"
+        )
+    n = _f(cb.get("n"))
+    analytic = _f(dr.get("analytic_n"))
+    if n is not None and analytic is not None and abs(n - analytic) > 0.5:
+        problems.append(
+            f"its n is {n:,.0f}{_which_split(dr, n)}, not analytic_n ({analytic:,.0f})"
+        )
+    total = _count_sum(cb.get("counts"))
+    ref, name = (n, "its n") if n is not None else (analytic, "analytic_n")
+    if total is not None and ref is not None and abs(total - ref) > 0.5:
+        problems.append(
+            f"its counts sum to {total:,.0f}{_which_split(dr, total)}, "
+            f"not {name} ({ref:,.0f})"
+        )
+    return problems
+
+
+def _check_labelled_class_balance(dr: dict, cb: dict) -> list[Finding]:
+    problems = _labelled_class_balance_problems(dr, cb)
+    if not problems:
+        return []
+    return [
+        Finding(
+            code="INV_CLASS_BALANCE_WRONG_SAMPLE",
+            severity="major",
+            message=(
+                "data_report.class_balance is the class split the paper "
+                "reports for the analytic sample, but "
+                + "; ".join(problems)
+                + ". Anything reading it as the analytic sample's split "
+                "reads another sample's, or counts that do not add up."
+            ),
+            artifact="data_report.json",
+            evidence={
+                "class_balance": cb,
+                "sample": cb.get("sample"),
+                "n": _f(cb.get("n")),
+                "sum": _count_sum(cb.get("counts")),
+                "analytic_n": _f(dr.get("analytic_n")),
+                "n_train": _f(dr.get("n_train")),
+                "n_test": _f(dr.get("n_test")),
+                "problems": problems,
+            },
             defect_ids=("J16",),
         )
     ]
