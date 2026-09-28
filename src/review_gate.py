@@ -119,6 +119,9 @@ _TRAILER_RE = re.compile(
     r"|begin\{thebibliography\}|end\{document\})"
 )
 _FENCE_RE = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
+#: Fence info strings that hold LaTeX (compared lower-cased and stripped):
+#: models write ```latex, ```LaTeX, ```tex or a bare ```.
+_LATEX_FENCE_INFOS = frozenset({"", "latex", "tex"})
 _SECTION_MARKER_RE = re.compile(r"SECTION[\s:#_-]*(\d+)", re.IGNORECASE)
 _LEVEL_RANK: dict[str, int] = {"abstract": 0, "section": 1, "subsection": 2}
 
@@ -1192,13 +1195,32 @@ class ReviewGate:
         if response_text is None:
             return paper_tex  # Return original on failure
 
+        truncated = bool((self._last_reply or {}).get("truncated"))
         revised_tex = self._extract_latex(response_text)
         if revised_tex:
             self._log("Paper revision complete")
             return revised_tex
-        else:
-            self._log("Could not extract LaTeX from LLM response; keeping original")
-            return paper_tex
+        # No complete document in the reply. What the model did return
+        # (only the sections it changed, or a document cut off at the
+        # token limit) is spliced into the existing manuscript section by
+        # section, the way the Writer rebuilds a paper inside its template:
+        # the preamble, the title block and the trailer are never taken
+        # from the reply.
+        spliced = self._splice_reply_sections(
+            paper_tex, response_text, truncated=truncated
+        )
+        if spliced is not None:
+            return spliced
+        self._log(
+            "Could not extract LaTeX from LLM response ("
+            + (
+                "the reply was cut off at the token limit"
+                if truncated
+                else "no complete document and no known section in it"
+            )
+            + "); keeping original"
+        )
+        return paper_tex
 
     # -- LLM plumbing shared by both revision paths ---------------------
 
@@ -1551,7 +1573,11 @@ class ReviewGate:
         if response_text is None:
             return paper_tex
 
-        returned = self._parse_section_response(response_text, blocks)
+        returned = self._parse_section_response(
+            response_text,
+            blocks,
+            truncated=bool((self._last_reply or {}).get("truncated")),
+        )
         if not returned:
             self._log(
                 "Could not extract any revised section from the LLM "
@@ -1607,7 +1633,7 @@ class ReviewGate:
         return out
 
     def _parse_section_response(
-        self, text: str, blocks: list[TexBlock]
+        self, text: str, blocks: list[TexBlock], truncated: bool = False
     ) -> dict[int, str]:
         """Map returned section bodies onto target block indices.
 
@@ -1622,6 +1648,11 @@ class ReviewGate:
         candidates: list[tuple[Optional[int], str]] = []
         for m in _FENCE_RE.finditer(text):
             info, body = m.group(1), m.group(2)
+            if "\\documentclass" in body or "\\begin{document}" in body:
+                # The whole paper came back instead of the sections: its
+                # top-level blocks are the candidates.
+                candidates.extend((None, b.text) for b in self._top_level_blocks(body))
+                continue
             prefix = text[max(0, m.start() - 200): m.start()]
             marks = _SECTION_MARKER_RE.findall(prefix + " " + info)
             marker = int(marks[-1]) - 1 if marks else None
@@ -1629,6 +1660,11 @@ class ReviewGate:
         if not candidates:
             for blk in self._split_sections(text):
                 candidates.append((None, blk.text))
+            if truncated and candidates:
+                # Unfenced and cut off at the token limit: the last block
+                # is the one that was cut. (A cut-off fenced block has no
+                # closing fence and was never a candidate.)
+                candidates.pop()
 
         out: dict[int, str] = {}
         leftovers: list[str] = []
@@ -1654,6 +1690,99 @@ class ReviewGate:
         if len(remaining) == 1 and len(leftovers) == 1:
             out[remaining[0]] = leftovers[0]
         return out
+
+    def _top_level_blocks(self, tex: str) -> list[TexBlock]:
+        """The abstract and the \\section blocks of *tex*, in order.
+
+        Subsections are inside their sections, so these never overlap and
+        can be spliced independently.
+        """
+        return [
+            b for b in self._split_sections(tex) if b.level in ("abstract", "section")
+        ]
+
+    @staticmethod
+    def _reply_latex(text: str) -> str:
+        """The LaTeX a reply carries: its LaTeX fences, else the reply.
+
+        Closed ```latex / ```tex / bare fences are joined; a fence left
+        open at the end (a reply cut off at the token limit) contributes
+        what it has. A reply with fences of other kinds only has none.
+        """
+        bodies: list[str] = []
+        tail_start = 0
+        for m in _FENCE_RE.finditer(text):
+            tail_start = m.end()
+            if m.group(1).strip().lower() in _LATEX_FENCE_INFOS:
+                bodies.append(m.group(2))
+        tail = re.search(r"```([^\n]*)\n(.*)\Z", text[tail_start:], re.DOTALL)
+        if tail and tail.group(1).strip().lower() in _LATEX_FENCE_INFOS:
+            bodies.append(tail.group(2))
+        if bodies:
+            return "\n\n".join(bodies)
+        return "" if "```" in text else text
+
+    def _splice_reply_sections(
+        self, paper_tex: str, reply: str, truncated: bool = False
+    ) -> Optional[str]:
+        """Splice the sections a reply returned into *paper_tex*.
+
+        For a whole-document request whose reply is not a complete
+        document. Each returned abstract or \\section block replaces the
+        manuscript block with the same heading after passing the
+        per-section guards; everything else stays byte-identical. When
+        the reply was cut off at the token limit its last block is
+        dropped, since that is the block that was cut. Returns None when
+        nothing could be spliced.
+        """
+        returned = self._top_level_blocks(self._reply_latex(reply))
+        if truncated and returned:
+            cut = returned.pop()
+            self._log(
+                f"Reply was cut off at the token limit: its last block "
+                f"'{cut.title}' is incomplete and is not used"
+            )
+        if not returned:
+            return None
+        blocks = self._top_level_blocks(paper_tex)
+        accepted: dict[int, str] = {}
+        for rb in returned:
+            idx = next(
+                (i for i, b in enumerate(blocks)
+                 if i not in accepted
+                 and _normalize_title(b.title) == _normalize_title(rb.title)),
+                None,
+            )
+            if idx is None:
+                idx = next(
+                    (i for i, b in enumerate(blocks)
+                     if i not in accepted and _titles_match(rb.title, b.title)),
+                    None,
+                )
+            if idx is None:
+                self._log(
+                    f"Returned block '{rb.title}' matches no section of the "
+                    "manuscript; not used"
+                )
+                continue
+            safe, reason = self._section_revision_is_safe(blocks[idx].text, rb.text)
+            if not safe:
+                self._log(
+                    f"Returned section '{blocks[idx].title}' REJECTED: {reason}. "
+                    "Keeping the original section."
+                )
+                continue
+            if rb.text.strip() == blocks[idx].text.strip():
+                continue
+            accepted[idx] = rb.text
+        if not accepted:
+            return None
+        self._log(
+            "The reply was not a complete document; spliced "
+            f"{len(accepted)} returned section(s) into the manuscript: "
+            f"{[blocks[i].title for i in sorted(accepted)]}"
+        )
+        return self._splice_sections(paper_tex, blocks, accepted)
 
     @staticmethod
     def _match_block_by_heading(
@@ -2010,20 +2139,24 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         return True, ""
 
     def _extract_latex(self, text: str) -> Optional[str]:
-        """Extract LaTeX from a ```latex ... ``` code block in LLM response."""
-        match = re.search(
-            r"```latex\s*\n(.*?)```",
-            text,
-            re.DOTALL,
-        )
-        if match:
-            return match.group(1).strip()
-        # Fallback: look for \documentclass ... \end{document}
-        match = re.search(
-            r"(\\documentclass.*?\\end\{document\})",
-            text,
-            re.DOTALL,
-        )
+        """The complete revised document in a reply, or None.
+
+        A fenced block (```latex, ```LaTeX, ```tex or bare) holding
+        ``\\documentclass`` .. ``\\end{document}`` wins; then such a span
+        anywhere in the reply, fenced or not (a model that forgot the
+        closing fence). A block without both ends is not a document: it
+        used to be returned as one and then rejected as truncated, and is
+        now left to :meth:`_splice_reply_sections`.
+        """
+        if not text:
+            return None
+        for m in _FENCE_RE.finditer(text):
+            if m.group(1).strip().lower() not in _LATEX_FENCE_INFOS:
+                continue
+            body = m.group(2).strip()
+            if "\\documentclass" in body and "\\end{document}" in body:
+                return body
+        match = re.search(r"(\\documentclass.*?\\end\{document\})", text, re.DOTALL)
         if match:
             return match.group(1).strip()
         return None
