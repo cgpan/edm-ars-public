@@ -1024,6 +1024,8 @@ def _ready(run_dir: Path, state: RunState, status: dict[str, Any] | None,
                 code = "CLEAN"
     if code == "GATE_NOT_RUN" and gate.get("enabled") is False:
         code = "CLEAN"  # switched off by choice: nothing to warn about
+    if code == "CLEAN" and n_critical > 0:
+        code = "ADVISORY_FINDINGS"  # a serious finding is never "Ready" alone
 
     concerns = _concerns(run_dir, state, status, skip_gate=False)
     ctx = _ctx(run_dir, state)
@@ -1089,6 +1091,20 @@ def _ready(run_dir: Path, state: RunState, status: dict[str, Any] | None,
     if kind == "ready" and (findings or concerns):
         # Clean release, but majors or other notes remain worth a look.
         fix = "Read the paper carefully, starting with the items listed above."
+    if n_critical > 0 and code != "ADVISORY_FINDINGS":
+        # The pipeline's reason_code names one advisory, most serious
+        # first by its own order: a failed review gate, unresolved review
+        # concerns or a review that did not run outrank critical
+        # findings. The round-3 Mac study was labelled "Ready, below the
+        # review benchmark" with a serious finding (the paper named the
+        # wrong models in its main comparison) that only the list below
+        # the scores mentioned. Say both.
+        key = "with_serious_one" if n_critical == 1 else "with_serious_many"
+        default = "{label} — 1 serious issue to check" if n_critical == 1 \
+            else "{label} — {n} serious issues to check"
+        label = fill(labels.get(key, default), label=label, n=n_critical)
+        problems = "1 serious problem" if n_critical == 1 else f"{n_critical} serious problems"
+        headline += f" The final checks also found {problems} to fix before sharing it."
     return Outcome(
         label=label,
         headline=headline,

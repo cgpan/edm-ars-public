@@ -367,3 +367,37 @@ def test_the_key_result_keeps_the_claim_when_the_metrics_agree_or_cannot_say(
     from edmars.runstate import load_state
 
     assert results.result_sentence(load_state(_ready(run_home, results=found))) == expected
+
+
+def test_a_serious_finding_is_listed_before_the_scores_under_a_review_label(
+        run_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # The round-3 Mac study: "Ready, below the review benchmark", with a
+    # serious finding that only the list below the scores mentioned.
+    from tests.cli.test_endstates import MAC_R3_FINDINGS, MAC_R3_GATE
+
+    run = _ready(run_home, review_gate_enabled=True, invariants=invariants_file(MAC_R3_FINDINGS),
+                 gate_summary={"cycles_used": 2, "final_score": 5.1, "passed": False,
+                               "threshold_used": 6.3, "advisory_mode": False, "venue": "EDM",
+                               "ran": True},
+                 status=v2_status(reason_code="GATE_FAILED", gate=MAC_R3_GATE,
+                                  counts={"critical": 1, "major": 2, "minor": 0}))
+    _, out = _show(run, capsys)
+    lines = [line.strip() for line in out.splitlines()]
+    assert lines[0] == "[!] Ready, below the review benchmark - 1 serious issue to check"
+    assert lines.index("Please check") < lines.index("Scores")
+    after = " ".join(" ".join(lines[lines.index("Please check") + 1:]).split())
+    assert after.startswith("[x] The paper names the wrong models in its main comparison "
+                            "[INV_COMPARATOR_MISNAMED]")
+    html_text = (run / "summary.html").read_text(encoding="utf-8")
+    assert "Ready, below the review benchmark — 1 serious issue to check" in html_text
+    assert html_text.index("<h2>Please check</h2>") < html_text.index("<h2>Scores</h2>")
+
+
+def test_without_a_serious_finding_the_scores_come_first(
+        run_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    run = _ready(run_home, invariants=invariants_file([("INV_HANDTYPED_CROSSREF", "major")]),
+                 status=v2_status(counts={"critical": 0, "major": 1, "minor": 0}))
+    _, out = _show(run, capsys)
+    lines = [line.strip() for line in out.splitlines()]
+    assert lines[0] == "[ok] Ready"
+    assert lines.index("Scores") < lines.index("Please check")

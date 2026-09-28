@@ -102,6 +102,10 @@ outcomes:
   serious_many: "Ready, with {n} serious issues to check"
   issues_one: "Ready, with 1 issue to check"
   issues_many: "Ready, with {n} issues to check"
+  # Added to another label (a failed review gate, unresolved concerns ...)
+  # when the final checks also found serious problems.
+  with_serious_one: "{label} — 1 serious issue to check"
+  with_serious_many: "{label} — {n} serious issues to check"
   not_checked: "Ready, final checks did not run"
   not_ready: "Not ready"
   stopped: "Stopped"

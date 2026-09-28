@@ -234,13 +234,19 @@ def render_result(outcome: Outcome, state: RunState, run_dir: Path, *, plain: bo
         if sentence:
             add()
             add(f"Key result: {sentence}", "bold")
+        serious_first = has_serious(outcome)
+        if serious_first:
+            # A serious finding comes before the scores: a label such as
+            # "Ready, below the review benchmark" is about the review.
+            _please_check(outcome, add, plain)
         score_lines = [x for x in (_critic_line(state), _gate_line(state, outcome), _checks_line(state, outcome)) if x]
         if score_lines:
             add()
             add("Scores", "bold")
             for line in score_lines:
                 add(f"  {line}")
-        _please_check(outcome, add, plain)
+        if not serious_first:
+            _please_check(outcome, add, plain)
         if outcome.why:
             add()
             add(f"Why: {outcome.why}")
@@ -321,6 +327,11 @@ def _cost(state: RunState, add: Any) -> None:
     add(cost_line(state), "dim")
     if state.calls_cut_off:
         add(CUT_OFF_NOTE, "dim")
+
+
+def has_serious(outcome: Outcome) -> bool:
+    """True when the final checks found a serious (critical) problem."""
+    return any(f.get("severity") == "critical" for f in outcome.findings)
 
 
 def _please_check(outcome: Outcome, add: Any, plain: bool) -> None:
@@ -456,6 +467,27 @@ def _href(name: str) -> str:
     return _e(quote(name))
 
 
+def _please_check_html(outcome: Outcome, add: Any) -> None:
+    """summary.html's "Please check" list."""
+    if not outcome.findings and not outcome.concerns:
+        return
+    add("<h2>Please check</h2><ul>")
+    for f in outcome.findings:
+        sev = f.get("severity") or ""
+        label = "serious" if sev == "critical" else "check"
+        count = int(f.get("count") or 1)
+        times = f" ({count} places)" if count > 1 else ""
+        add(f'<li class="{_e(sev)}"><strong>{_e(label)}:</strong> {_e(f.get("title") or f.get("code"))}'
+            f'{_e(times)} <code>{_e(f.get("code"))}</code>')
+        if f.get("message"):
+            add(f'<details><summary class="muted">Technical detail</summary>'
+                f'<p class="muted">{_e(f.get("message"))}</p></details>')
+        add("</li>")
+    for concern in outcome.concerns:
+        add(f'<li class="major">{_e(concern)}</li>')
+    add("</ul>")
+
+
 def render_summary_html(outcome: Outcome, state: RunState, run_dir: Path) -> str:
     parts: list[str] = []
     add = parts.append
@@ -490,27 +522,16 @@ def render_summary_html(outcome: Outcome, state: RunState, run_dir: Path) -> str
         if outcome.commands:
             add("<p>" + "<br>".join(f"<code>{_e(c)}</code>" for c in outcome.commands) + "</p>")
     scores = [x for x in (_critic_line(state), _gate_line(state, outcome), _checks_line(state, outcome)) if x]
+    serious_first = has_serious(outcome)
+    if serious_first:
+        _please_check_html(outcome, add)
     if scores:
         add("<h2>Scores</h2><ul>")
         for line in scores:
             add(f"<li>{_e(line)}</li>")
         add("</ul>")
-    if outcome.findings or outcome.concerns:
-        add("<h2>Please check</h2><ul>")
-        for f in outcome.findings:
-            sev = f.get("severity") or ""
-            label = "serious" if sev == "critical" else "check"
-            count = int(f.get("count") or 1)
-            times = f" ({count} places)" if count > 1 else ""
-            add(f'<li class="{_e(sev)}"><strong>{_e(label)}:</strong> {_e(f.get("title") or f.get("code"))}'
-                f'{_e(times)} <code>{_e(f.get("code"))}</code>')
-            if f.get("message"):
-                add(f'<details><summary class="muted">Technical detail</summary>'
-                    f'<p class="muted">{_e(f.get("message"))}</p></details>')
-            add("</li>")
-        for concern in outcome.concerns:
-            add(f'<li class="major">{_e(concern)}</li>')
-        add("</ul>")
+    if not serious_first:
+        _please_check_html(outcome, add)
     if outcome.kind in READY_KINDS and outcome.why:
         add(f"<p>{_e(outcome.why)}</p>")
     files = [(n, m) for n, m in _files(run_dir) if not n[0].isdigit()]
