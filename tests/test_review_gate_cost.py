@@ -143,7 +143,8 @@ class TestLsarReviewsAreMetered:
         [cost] = [kw for t, kw in seen if t == "gate.cost"]
         assert cost["n_calls"] == 2
         assert cost["cost_usd"] == pytest.approx(sum(kw["cost_usd"] for kw in ends))
-        assert "US$" in cost["plain"]
+        assert cost["plain"].startswith("Review 1 of cycle 1 used 2 AI calls; "
+                                        "the review gate has cost US$")
 
     def test_lsar_s_own_timestamps_are_used(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

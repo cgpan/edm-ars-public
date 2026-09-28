@@ -979,11 +979,22 @@ class ReviewGate:
                 "time_sources": sorted({u.time_source or "call" for u in usages}),
             })
             self._announce_spent(
-                f"LSAR review {review_dir.name} used {len(usages)} AI calls",
+                f"{self._review_label(review_dir)} used {len(usages)} AI calls",
                 cycle=cycle,
             )
         except Exception:  # noqa: BLE001 - metering is never fatal
             pass
+
+    @staticmethod
+    def _review_label(review_dir: Path) -> str:
+        """cycle_1 -> "Review 1 of cycle 1"; cycle_102 -> "Review 2 of cycle 1"."""
+        m = re.fullmatch(r"cycle_(\d+)", review_dir.name)
+        if not m:
+            return f"The review in {review_dir.name}"
+        n = int(m.group(1))
+        if n >= 100:
+            return f"Review {n % 100} of cycle {n // 100}"
+        return f"Review 1 of cycle {n}"
 
     @staticmethod
     def _review_cycle_number(review_dir: Path) -> Optional[int]:
