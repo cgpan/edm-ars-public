@@ -322,6 +322,21 @@ def test_a_dataengineer_revision_is_recounted_too(tmp_path: Path) -> None:
     assert orch.ctx.data_report[REPORTED_KEY] == {"class_0": 3319, "class_1": 10454}
 
 
+def test_the_writer_is_told_which_sample_class_balance_counts() -> None:
+    """The round-3 Writer explained the training split's missing 20% as
+    "excluded due to missing outcome data"."""
+    from src.agents.base import load_prompt
+    from src.skills import SkillRegistry
+    from tests.test_v2_1_phase_3b24_writer_slim import SKILLS_ROOT, _CONFIG, _render
+
+    prompt = load_prompt("writer", _CONFIG, task_type="prediction")["system_prompt"]
+    rendered = _render(SkillRegistry(SKILLS_ROOT), prompt, "prediction")
+
+    assert "## Methods — Data" in rendered
+    assert "`data_report.class_balance`" in rendered
+    assert "Never\n  explain the difference as excluded or missing students." in rendered
+
+
 def test_the_writer_and_outline_prompts_carry_the_labelled_fields(tmp_path: Path) -> None:
     """Both read data_report from the context; what they are sent is what
     the recount wrote, labels included."""

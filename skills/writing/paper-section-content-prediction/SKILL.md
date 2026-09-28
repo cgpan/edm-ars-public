@@ -110,6 +110,16 @@ summarize its contribution (1–2 sentences) and position the present
 study against it. Conclude with an explicit statement of how this
 study extends the literature.
 
+## Methods — Data
+
+- The outcome's split in the analytic sample is
+  `data_report.class_balance` (its `sample` reads "analytic sample
+  (train + test)"): report its counts and shares with `analytic_n`.
+  `class_balance_train` and `class_balance_test` are the two splits; if
+  you report them, say which split each is.
+- Counts that do not add up to `analytic_n` belong to a split. Never
+  explain the difference as excluded or missing students.
+
 ## Methods — Models
 
 List all model families present in `results.json.all_models`. If MLP
