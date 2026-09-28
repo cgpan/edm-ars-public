@@ -284,6 +284,67 @@ def _sentences(text: str) -> list[str]:
     return re.split(r"(?<=[.!?])\s+", text)
 
 
+#: Blocks that are never prose: floats, table bodies and environments
+#: LaTeX does not typeset as text.
+_NON_PROSE_ENV = re.compile(
+    r"(?s)\\begin\s*\{((?:figure|table|tabular|tabularx|longtable|threeparttable"
+    r"|wrapfigure|wraptable|sidewaystable|sidewaysfigure|CCSXML|comment"
+    r"|verbatim|Verbatim|lstlisting|minted|thebibliography)\*?)\}"
+    r".*?\\end\s*\{\1\}"
+)
+_UNESCAPED_COMMENT = re.compile(r"(?<!\\)%.*")
+
+
+def _drop_command_with_arg(tex: str, command: str) -> str:
+    r"""Remove every ``\command[...]{...}``, matching braces to any depth.
+
+    A caption routinely nests braces (``$n = 3{,}562$``), so a
+    ``[^}]*`` pattern stops at the first ``}`` and leaves the rest of the
+    caption behind as a fragment of prose.
+    """
+    out: list[str] = []
+    i = 0
+    pat = re.compile(r"\\" + command + r"\*?\s*(?:\[[^\]]*\]\s*)*\{")
+    while True:
+        m = pat.search(tex, i)
+        if m is None:
+            out.append(tex[i:])
+            return "".join(out)
+        out.append(tex[i:m.start()])
+        depth, j = 1, m.end()
+        while j < len(tex) and depth:
+            if tex[j] == "\\":
+                j += 2
+                continue
+            depth += {"{": 1, "}": -1}.get(tex[j], 0)
+            j += 1
+        out.append("\n\n")
+        i = j
+
+
+def _prose_sentences(tex: str) -> list[str]:
+    """Sentences of body prose, with nothing but prose in any of them.
+
+    ``_sentences`` splits on terminal punctuation only, so a table ends
+    up inside whichever sentence happens to surround it. On one real
+    paper the header row ended at "Bal. Acc.", the split fell there, and
+    the next "sentence" was every model-name row of the table followed by
+    the paper's actual comparison sentence -- so a check read five model
+    names into a sentence that names two. Floats, table bodies, captions
+    and non-typeset environments are removed first and replaced by a
+    paragraph break, and a paragraph break always ends a sentence.
+    """
+    body = tex.split(r"\begin{document}", 1)[-1]
+    body = _UNESCAPED_COMMENT.sub("", body)
+    body = _NON_PROSE_ENV.sub("\n\n", body)
+    for cmd in ("caption", "Description"):
+        body = _drop_command_with_arg(body, cmd)
+    out: list[str] = []
+    for para in re.split(r"\n\s*\n", body):
+        out.extend(s for s in _sentences(para.strip()) if s.strip())
+    return out
+
+
 def _reads_metric_as_positive_class(paper: str) -> str | None:
     """Return the offending sentence, or None.
 
@@ -373,6 +434,36 @@ def check_macro_metric_mislabel(a: RunArtifacts) -> list[Finding]:
     return out
 
 
+#: A sentence that reports the paired model comparison by name.
+_TEST_REPORT = re.compile(r"\bAUC difference\b|\bnext-best\b|\bnext best\b", re.IGNORECASE)
+#: What turns a sentence holding the rounded difference into a report of
+#: the test rather than a coincidence of digits.
+_COMPARISON_CUE = re.compile(
+    r"differen|compar|bootstrap|\\Delta|\bdelta\b|\bversus\b|\bvs\b|outperform"
+    r"|runner-up|\bpaired\b|significan|exceed|advantage|margin|improv"
+    r"|\b(?:higher|lower|better|worse|greater|smaller) than\b",
+    re.IGNORECASE,
+)
+
+
+def _model_name_pattern(name: str) -> re.Pattern:
+    """Match a results.json model key however prose spells it.
+
+    Keys are CamelCase identifiers; prose writes "Logistic Regression",
+    "random forest", "Stacking Ensemble". Matching the key literally saw
+    only XGBoost in "The paired cluster-bootstrap test of the AUC
+    difference between Logistic Regression and the runner-up (Random
+    Forest)", the one sentence in which a paper named the wrong
+    comparator. Word boundaries keep a short key from matching inside a
+    longer word.
+    """
+    parts: list[str] = []
+    for chunk in re.split(r"[^A-Za-z0-9]+", name):
+        parts += re.findall(r"[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|[A-Z]+|\d+", chunk)
+    body = r"[\s\-]*".join(re.escape(p) for p in parts) if parts else re.escape(name)
+    return re.compile(r"(?<![A-Za-z0-9])" + body + r"s?(?![A-Za-z0-9])", re.IGNORECASE)
+
+
 def check_comparator_unnamed(a: RunArtifacts) -> list[Finding]:
     """The comparison the paper names is not the comparison that was run.
 
@@ -424,16 +515,25 @@ def check_comparator_unnamed(a: RunArtifacts) -> list[Finding]:
         # block-incremental sentence and the sentence that actually names
         # the comparator ("...between XGBoost and the next-best
         # individual model (RandomForest)...") came later.
+        #
+        # Sentences come from prose only. A results table sitting just
+        # above the comparison sentence used to be split into it, and the
+        # table's model-name rows were read as models the sentence names.
         rounded = {f"{abs(diff):.{k}f}" for k in (3, 4)} if diff is not None else set()
         candidates = [
             s
-            for s in _sentences(paper)
-            if re.search(r"\bAUC difference\b|\bnext-best\b|\bnext best\b", s, re.IGNORECASE)
-            or any(r in s for r in rounded)
+            for s in _prose_sentences(paper)
+            if _TEST_REPORT.search(s)
+            # The rounded value alone is not enough: "All five models
+            # performed within 0.010 AUC of one another: ..." lists every
+            # model beside a number that happens to equal the difference,
+            # and reports no test.
+            or (any(r in s for r in rounded) and _COMPARISON_CUE.search(s))
         ]
+        patterns = {name: _model_name_pattern(name) for name in metrics}
         for window in candidates:
             named_models = [
-                name for name in metrics if re.search(re.escape(name), window)
+                name for name, pat in patterns.items() if pat.search(window)
             ]
             wrong = [n for n in named_models if n not in truth]
             if wrong:

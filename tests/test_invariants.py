@@ -176,6 +176,141 @@ def test_comparator_not_misnamed_when_the_paper_names_the_real_pair(tmp_path):
     assert "INV_COMPARATOR_MISNAMED" not in _codes(run)
 
 
+#: The first finished paper from the owner's Mac test (round 3): five
+#: models, and a comparison test recorded as XGBoost minus
+#: LogisticRegression. Values copied from that run's results.json.
+_R3_RESULTS = {
+    "best_model": "XGBoost",
+    "all_models": {
+        "LogisticRegression": {"auc": 0.7884831280985126},
+        "RandomForest": {"auc": 0.7985067167759475},
+        "XGBoost": {"auc": 0.801488285622901},
+        "ElasticNet": {"auc": 0.7812581960658883},
+        "StackingEnsemble": {"auc": 0.802020230289461},
+    },
+    "model_comparison_test": {
+        "auc_diff": 0.013005157524388355,
+        "model_a": "XGBoost",
+        "model_b": "LogisticRegression",
+        "contrast": "XGBoost - LogisticRegression",
+    },
+}
+
+#: Table 1 of that paper, then the sentence that follows it. The header
+#: row ends in "Bal. Acc.", so a split on terminal punctuation fell there
+#: and glued every model-name row to the comparison sentence.
+_R3_TABLE_THEN_COMPARISON = r"""\begin{document}
+\subsection{Model Comparison}
+Table~\ref{tab:models} reports the performance of all five models.
+
+\begin{table}
+\caption{Model comparison on the held-out test set ($n = 3{,}562$). AUC is the primary metric; 95\% confidence intervals are bootstrap (1,000 iterations).}
+\label{tab:models}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lrrrrr}
+\toprule
+Model & AUC & CI Low & CI High & Acc. & Bal. Acc. \\
+\midrule
+LogisticRegression & 0.788 & 0.773 & 0.804 & 0.761 & 0.616 \\
+RandomForest & 0.799 & 0.784 & 0.814 & 0.759 & 0.617 \\
+XGBoost & 0.801 & 0.787 & 0.817 & 0.765 & 0.623 \\
+ElasticNet & 0.781 & 0.766 & 0.797 & 0.753 & 0.576 \\
+StackingEnsemble & 0.802 & 0.787 & 0.817 & 0.765 & 0.630 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+The paired comparison between XGBoost and Logistic Regression showed a statistically significant difference: AUC difference $= 0.013$, 95\% CI [0.006, 0.021], cluster-bootstrap, $p < 0.05$. The advantage is small in magnitude.
+\end{document}
+"""
+
+
+def test_a_table_above_the_comparison_sentence_is_not_part_of_it(tmp_path):
+    """Round-3 Mac paper: a correct sentence reported as critical.
+
+    The sentence names XGBoost and Logistic Regression, which is the pair
+    results.json recorded. The finding named RandomForest, ElasticNet and
+    StackingEnsemble -- rows of the table above it.
+    """
+    run = _run(tmp_path, results__json=_R3_RESULTS, paper__tex=_R3_TABLE_THEN_COMPARISON)
+    assert "INV_COMPARATOR_MISNAMED" not in _codes(run)
+
+
+def test_the_comparison_sentence_still_fires_when_it_names_the_wrong_model(tmp_path):
+    """The same table and layout, with the sentence itself wrong."""
+    tex = _R3_TABLE_THEN_COMPARISON.replace(
+        "between XGBoost and Logistic Regression", "between XGBoost and Random Forest"
+    )
+    run = _run(tmp_path, results__json=_R3_RESULTS, paper__tex=tex)
+    hits = _by_code(run, "INV_COMPARATOR_MISNAMED")
+    assert len(hits) == 1
+    assert hits[0].evidence["named_in_paper"] == ["RandomForest", "XGBoost"]
+    assert "midrule" not in hits[0].evidence["sentence"]
+
+
+def test_a_comparator_spelled_as_prose_is_still_read(tmp_path):
+    """J53: the one sentence that named the wrong model spelled it out.
+
+    "...between Logistic Regression and the runner-up (Random Forest)"
+    where the test was LogisticRegression minus XGBoost. The CamelCase
+    key never appears in that sentence; only the table above it had
+    matched before, and for the wrong reason.
+    """
+    run = _run(
+        tmp_path,
+        results__json={
+            "all_models": {
+                "LogisticRegression": {"auc": 0.823899450821177},
+                "XGBoost": {"auc": 0.8184131758811203},
+                "RandomForest": {"auc": 0.8174343},
+            },
+            "model_comparison_test": {"auc_diff": 0.005486274940056712},
+        },
+        paper__tex=(
+            r"\begin{document} The paired cluster-bootstrap test of the AUC "
+            r"difference between Logistic Regression and the runner-up (Random "
+            r"Forest) yielded $\Delta$AUC = 0.005, 95\% CI [0.002, 0.009]. "
+            r"\end{document}"
+        ),
+    )
+    hits = _by_code(run, "INV_COMPARATOR_MISNAMED")
+    assert len(hits) == 1
+    assert hits[0].evidence["named_in_paper"] == ["LogisticRegression", "RandomForest"]
+
+
+def test_a_range_that_equals_the_difference_is_not_a_test_report(tmp_path):
+    """"All five models performed within 0.010 AUC of one another: ..."
+
+    0.010 is also the rounded auc_diff, so the sentence was read as the
+    test report and every model it lists as a comparator. The paper's
+    real test sentence names the right pair.
+    """
+    run = _run(
+        tmp_path,
+        results__json={
+            "all_models": {
+                "LogisticRegression": {"auc": 0.749},
+                "ElasticNet": {"auc": 0.759486570710109389},
+                "XGBoost": {"auc": 0.756},
+            },
+            "model_comparison_test": {
+                "auc_diff": 0.759486570710109389 - 0.749,
+                "model_a": "ElasticNet",
+                "model_b": "LogisticRegression",
+            },
+        },
+        paper__tex=(
+            r"\begin{document} All five models performed within 0.010 AUC of one "
+            r"another: Logistic Regression (0.749), XGBoost (0.756) and "
+            r"ElasticNet (0.760). The paired cluster-bootstrap comparison between "
+            r"ElasticNet and Logistic Regression yielded $\Delta$AUC = 0.010. "
+            r"\end{document}"
+        ),
+    )
+    assert "INV_COMPARATOR_MISNAMED" not in _codes(run)
+
+
 def test_unnamed_comparands_is_only_minor(tmp_path):
     """Measured base rate 17/18 -- a probe, not a detector.
 
