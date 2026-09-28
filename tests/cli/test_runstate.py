@@ -524,6 +524,31 @@ def test_minority_share() -> None:
     assert runstate.minority_share({"only": 1}) is None
 
 
+#: data_report.class_balance as the orchestrator writes it since the
+#: round-3 fixes (src/class_balance.py): the round-3 Mac study's analytic
+#: sample, recounted from train_y.csv and test_y.csv.
+R3_CLASS_BALANCE = {
+    "sample": "analytic sample (train + test)", "n": 17335,
+    "counts": {"class_0": 4281, "class_1": 13054},
+    "shares": {"class_0": 0.247, "class_1": 0.753},
+}
+
+
+def test_minority_share_reads_the_labelled_class_balance() -> None:
+    assert runstate.minority_share(R3_CLASS_BALANCE) == pytest.approx(4281 / 17335)
+    assert runstate.minority_share({"sample": "x", "n": 10, "shares": {"a": 0.2, "b": 0.8}}) ==         pytest.approx(0.2)
+
+
+def test_the_data_step_shows_the_smaller_group_from_the_labelled_class_balance(run_home: Path) -> None:
+    from tests.cli._run_support import DATA_REPORT
+
+    report = dict(DATA_REPORT, class_balance=R3_CLASS_BALANCE,
+                  class_balance_train={"sample": "training split", "n": 13773,
+                                       "counts": {"class_0": 3319, "class_1": 10454}})
+    state = load_state(make_run(run_home, data_report=report))
+    assert _stage(state, "ENGINEERING").detail ==         "17,335 students · 42 predictors · smaller outcome group 25%"
+
+
 def test_process_alive_checks_start_time() -> None:
     pid, created = alive_pid()
     assert runstate.process_alive(pid, created) is True

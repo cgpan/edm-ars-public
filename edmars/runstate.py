@@ -2603,7 +2603,14 @@ def gate_now_text(state: RunState, base: str) -> str:
 
 def minority_share(balance: Any) -> float | None:
     """The smaller class's share from ``data_report.class_balance``, which
-    holds either proportions or counts."""
+    holds either proportions or counts, or (since the round-3 fixes) a
+    labelled summary of the analytic sample, ``{"sample", "n", "counts",
+    "shares"}``, recounted by the orchestrator (src/class_balance.py)."""
+    if isinstance(balance, dict):
+        for key in ("counts", "shares"):
+            if isinstance(balance.get(key), dict):
+                balance = balance[key]
+                break
     if not isinstance(balance, dict) or len(balance) < 2:
         return None
     values = [v for v in (_num(x) for x in balance.values()) if v is not None and v >= 0]
