@@ -15,6 +15,7 @@ PDF, this module:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -406,6 +407,12 @@ class ReviewGate:
         self._last_reply: dict[str, Any] = {}
         #: Where the gate keeps this cycle's raw revision replies.
         self._revision_dir: Optional[Path] = None
+        #: Why the last revise_from_review kept the original (None when it
+        #: returned a revision), for gate_summary.json.
+        self._revision_miss: Optional[str] = None
+        #: The reviews behind the last _maybe_median_sample result:
+        #: (score, report, sample id).
+        self._last_samples: list[tuple[float, dict, int]] = []
 
         # Build the reviser's LLM client through the same code path as the
         # agents (src/agents/llm_client.py): same base-URL precedence, same
@@ -1144,8 +1151,10 @@ class ReviewGate:
         * **whole-document** — kept for short manuscripts whose complete
           revision fits comfortably inside the reply budget.
 
-        Returns the revised LaTeX string (the original on any failure).
+        Returns the revised LaTeX string (the original on any failure;
+        ``self._revision_miss`` then says why).
         """
+        self._revision_miss = None
         review_block = report_json.get("review", {})
         strengths = review_block.get("strengths", [])
         weaknesses = review_block.get("weaknesses", [])
@@ -1193,6 +1202,7 @@ class ReviewGate:
         self._log("Calling LLM for whole-document paper revision (LSAR feedback)")
         response_text = self._call_revision_llm(prompt)
         if response_text is None:
+            self._revision_miss = self._call_failure_reason()
             return paper_tex  # Return original on failure
 
         truncated = bool((self._last_reply or {}).get("truncated"))
@@ -1211,15 +1221,13 @@ class ReviewGate:
         )
         if spliced is not None:
             return spliced
-        self._log(
-            "Could not extract LaTeX from LLM response ("
-            + (
-                "the reply was cut off at the token limit"
-                if truncated
-                else "no complete document and no known section in it"
-            )
-            + "); keeping original"
+        why = (
+            "the reply was cut off at the token limit"
+            if truncated
+            else "no complete document and no known section in it"
         )
+        self._revision_miss = f"no LaTeX could be taken from the reply ({why})"
+        self._log(f"Could not extract LaTeX from LLM response ({why}); keeping original")
         return paper_tex
 
     # -- LLM plumbing shared by both revision paths ---------------------
@@ -1296,6 +1304,17 @@ class ReviewGate:
                 "tokens."
             )
         return text
+
+    def _call_failure_reason(self) -> str:
+        """Why _call_revision_llm returned None, in a phrase."""
+        if self._llm_client is None:
+            return (
+                "no reviser: "
+                + (self.revision_unavailable_reason or "no client")
+            )
+        if self.revision_failures:
+            return f"the revision call failed ({self.revision_failures[-1]['code']})"
+        return "the revision call failed"
 
     def _revision_call(
         self, prompt: str, max_tokens: int, raw_name: str
@@ -1571,6 +1590,7 @@ class ReviewGate:
         )
         response_text = self._call_revision_llm(prompt)
         if response_text is None:
+            self._revision_miss = self._call_failure_reason()
             return paper_tex
 
         returned = self._parse_section_response(
@@ -1579,6 +1599,14 @@ class ReviewGate:
             truncated=bool((self._last_reply or {}).get("truncated")),
         )
         if not returned:
+            self._revision_miss = (
+                "no requested section could be taken from the reply"
+                + (
+                    " (it was cut off at the token limit)"
+                    if (self._last_reply or {}).get("truncated")
+                    else ""
+                )
+            )
             self._log(
                 "Could not extract any revised section from the LLM "
                 "response; keeping original"
@@ -1586,6 +1614,7 @@ class ReviewGate:
             return paper_tex
 
         accepted: dict[int, str] = {}
+        rejected: list[str] = []
         for idx, body in returned.items():
             original = blocks[idx].text
             safe, reason = self._section_revision_is_safe(original, body)
@@ -1594,6 +1623,7 @@ class ReviewGate:
                     f"Section '{blocks[idx].title}' REJECTED and discarded: "
                     f"{reason}. Keeping the original section."
                 )
+                rejected.append(f"{blocks[idx].title}: {reason}")
                 continue
             if body.strip() == original.strip():
                 continue
@@ -1603,6 +1633,12 @@ class ReviewGate:
         if missing:
             self._log(f"Sections not returned by the model (left as-is): {missing}")
         if not accepted:
+            self._revision_miss = (
+                "every returned section was rejected ("
+                + "; ".join(rejected) + ")"
+                if rejected
+                else "the reply returned the sections unchanged"
+            )
             self._log(
                 "No revised section survived the safety guards; keeping the "
                 "original manuscript"
@@ -2181,6 +2217,11 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         k = int(rg_cfg.get("median_samples", 3))
         band = float(rg_cfg.get("median_trigger_band", 1.5))
         first_score = (first_report.get("scores") or {}).get("overall_score")
+        self._last_samples = (
+            [(first_score, first_report, cycle)]
+            if isinstance(first_score, (int, float))
+            else []
+        )
         if k <= 1 or first_score is None:
             return first_report
         if abs(first_score - self.pass_threshold) > band:
@@ -2199,6 +2240,7 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             if rep is not None and score is not None:
                 samples.append((score, rep, sample_id))
         samples.sort(key=lambda triple: triple[0])
+        self._last_samples = list(samples)
         median_score, median_report, median_id = samples[len(samples) // 2]
         self._log(
             f"Median sampling: scores={[round(s, 2) for s, _, _ in samples]} "
@@ -2214,6 +2256,83 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             "gated_sample_dir": f"cycle_{median_id}",
         }
         return median_report
+
+    @staticmethod
+    def _normalized_tex(tex: str) -> str:
+        """*tex* without LaTeX comments and with whitespace collapsed.
+
+        Two manuscripts equal under this read the same once compiled, so
+        a revision that changed only these did not change the paper.
+        """
+        no_comments = re.sub(r"(?<!\\)%.*", "", tex)
+        return " ".join(no_comments.split())
+
+    def _reviewed_fingerprint(self, cycle: int) -> Optional[str]:
+        """Identity of the manuscript a cycle's review read.
+
+        The text LSAR extracted from the PDF (``paper.md`` in the cycle's
+        folder) when it is there; otherwise the LaTeX the review PDF was
+        built from. None when neither can be read.
+        """
+        candidates = (
+            (self.output_dir / "lsar_review" / f"cycle_{cycle}" / "paper.md", False),
+            (self.output_dir / "paper_for_review.tex", True),
+            (self.output_dir / "paper.tex", True),
+        )
+        for path, is_tex in candidates:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            norm = self._normalized_tex(text) if is_tex else " ".join(text.split())
+            return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+        return None
+
+    def _pool_reviews(
+        self,
+        earlier: dict,
+        samples: list[tuple[float, dict, int]],
+        cycle: int,
+    ) -> dict:
+        """One median over every review of the same manuscript.
+
+        A later review of a manuscript that was already reviewed must not
+        replace the earlier score: all of its reviews are samples of the
+        reviewer's opinion of one paper. The gate is scored on their
+        median (the mean of the two middle scores when there is an even
+        number). The dimensions and prose come from the middle review
+        (the lower of the two middle ones for an even number, so the
+        per-dimension floor is judged conservatively), and the record
+        says both.
+        """
+        pooled = sorted(earlier["samples"] + samples, key=lambda t: t[0])
+        n = len(pooled)
+        lower = pooled[(n - 1) // 2]
+        median = (
+            float(lower[0])
+            if n % 2
+            else (float(pooled[n // 2 - 1][0]) + float(pooled[n // 2][0])) / 2.0
+        )
+        report = json.loads(json.dumps(lower[1], default=str))
+        scores = report.setdefault("scores", {})
+        scores["overall_score"] = round(median, 4)
+        scores["median_sampling"] = {
+            "n_samples": n,
+            "all_scores": [t[0] for t in pooled],
+            "median_score": round(median, 4),
+            "gated_sample_dir": f"cycle_{lower[2]}",
+            "gated_sample_score": lower[0],
+            "pooled_cycles": [earlier["cycle"], cycle],
+        }
+        self._log(
+            f"Cycle {cycle} reviewed the same manuscript as cycle "
+            f"{earlier['cycle']} (the text the reviewer read is identical). "
+            f"Its {len(samples)} review(s) are pooled with the earlier "
+            f"{len(earlier['samples'])} into one median, {round(median, 2)} "
+            f"(scores {[t[0] for t in pooled]}), instead of replacing the "
+            "earlier score."
+        )
+        return report
 
     #: Optional ``(event_type, **data) -> None`` hook the orchestrator sets
     #: to receive ``gate.cycle`` / ``gate.review`` / ``gate.skipped``
@@ -2262,6 +2381,18 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         # paper.tex changed after the last score.
         last_cycle_failure: Optional[str] = None
         revised_since_last_review = False
+        # How many revisions paper.tex has had, and which cycle's review
+        # the final score comes from.
+        revisions_applied = 0
+        final_cycle: Optional[int] = None
+        final_from: Optional[str] = None
+        # Set when the gate wanted a revision and did not get a changed
+        # manuscript: the gate then ends with the last reviewed result
+        # instead of paying for reviews of the same paper.
+        revision_failed = False
+        revision_failure_reason: Optional[str] = None
+        # Every reviewed manuscript: its fingerprint, cycle and reviews.
+        reviewed: list[dict] = []
 
         for cycle in range(1, self.max_cycles + 1):
             self._log(f"--- Review gate cycle {cycle}/{self.max_cycles} ---")
@@ -2305,6 +2436,22 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                     self._log("LSAR returned no result; skipping review gate")
                 break
             report_json = self._maybe_median_sample(report_json, pdf_path, cycle)
+            samples = list(self._last_samples)
+            fingerprint = self._reviewed_fingerprint(cycle)
+            earlier = next(
+                (r for r in reviewed
+                 if fingerprint is not None and r["fingerprint"] == fingerprint),
+                None,
+            )
+            pooled_with: Optional[int] = None
+            if earlier is not None and samples:
+                report_json = self._pool_reviews(earlier, samples, cycle)
+                earlier["samples"] = earlier["samples"] + samples
+                pooled_with = earlier["cycle"]
+            elif fingerprint is not None:
+                reviewed.append(
+                    {"fingerprint": fingerprint, "cycle": cycle, "samples": samples}
+                )
 
             # 3. Evaluate gate
             passed, diagnosis = self.evaluate_gate(report_json)
@@ -2331,6 +2478,8 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             final_score = diagnosis["overall_score"]
             final_recommendation = diagnosis["recommendation"]
             final_passed = passed
+            final_cycle = cycle
+            final_from = "revised" if revisions_applied else "original"
 
             median_info = (report_json.get("scores") or {}).get("median_sampling")
             gated_dir = (
@@ -2349,6 +2498,11 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                     "suggested_focus_areas": diagnosis["suggested_focus_areas"],
                     "median_sampling": median_info,
                     "honesty_blockers": honesty,
+                    # Which manuscript this cycle reviewed: the Writer's
+                    # ("original") or one the gate revised.
+                    "manuscript": final_from,
+                    "revisions_before": revisions_applied,
+                    "pooled_with_cycle": pooled_with,
                 }
             )
             revised_since_last_review = False
@@ -2401,12 +2555,6 @@ Overall: {diagnosis.get('overall_score', '?')}/10
 
                 current_tex = tex_path.read_text(encoding="utf-8")
 
-                # Build review markdown for the prompt
-                review_md_path = cycle_dir / "lsar_report.md"
-                review_md = ""
-                if review_md_path.exists():
-                    review_md = review_md_path.read_text(encoding="utf-8")
-
                 # Keep the pre-revision manuscript so a bad revision is
                 # always recoverable (and diffable after the run).
                 try:
@@ -2431,35 +2579,36 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                     self._revision_dir = None
 
                 # Arc P4 guards. revise_from_review returns the ORIGINAL
-                # string on LLM failure, and the old code wrote it back
-                # and recompiled anyway while logging "Revised paper.tex
-                # written" — a no-op that looked like progress.
+                # string on LLM failure. Reviewing that again cannot tell
+                # the gate anything new, and the Mac study (round 3) paid
+                # for three more reviews of an unchanged paper whose lower
+                # median then replaced the score: the gate now ends here
+                # with the last reviewed result.
+                miss: Optional[str] = None
                 if revised_tex == current_tex:
-                    # The old message claimed it was "skipping rewrite and
-                    # recompile". Only half of that was true: paper.tex is
-                    # not rewritten, but the loop continues and the next
-                    # cycle's prepare_pdf runs pdflatex again anyway (8.5s
-                    # later in the live run). Say what actually happens.
-                    self._log(
-                        "Revision was a no-op (LLM failed or returned the "
-                        "original); paper.tex left unchanged. The next cycle "
-                        "still recompiles and re-reviews the unchanged "
-                        "manuscript."
+                    miss = getattr(self, "_revision_miss", None) or (
+                        "the reviser returned the manuscript unchanged"
                     )
-                    continue
-                safe, reason = self._revision_is_safe(current_tex, revised_tex)
-                if not safe:
-                    self._log(
-                        f"Revision REJECTED and discarded: {reason}. "
-                        "Keeping the pre-revision manuscript."
-                    )
-                    continue
+                else:
+                    safe, reason = self._revision_is_safe(current_tex, revised_tex)
+                    if not safe:
+                        self._log(
+                            f"Revision REJECTED and discarded: {reason}. "
+                            "Keeping the pre-revision manuscript."
+                        )
+                        miss = f"the revision was rejected: {reason}"
+                if miss is not None:
+                    revision_failed = True
+                    revision_failure_reason = miss
+                    self._revision_failed(cycle, miss)
+                    break
 
                 # Arc P3 backstop: the reviser writes prose freely and can
                 # introduce a citation key that references.bib does not
                 # have. Reconcile before writing, or the reviewed PDF for
                 # the next cycle renders it as [?].
                 bib_path = self.output_dir / "references.bib"
+                pending_bib: Optional[str] = None
                 try:
                     from src.citations import reconcile_citations
 
@@ -2483,7 +2632,7 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                         revised_tex, current_bib, papers
                     )
                     if revised_bib != current_bib:
-                        bib_path.write_text(revised_bib, encoding="utf-8")
+                        pending_bib = revised_bib
                     self._log(
                         f"Post-revision reconciliation: {cstats['cited']} cited, "
                         f"{cstats['backfilled']} back-filled, "
@@ -2492,9 +2641,25 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 except Exception as exc:  # noqa: BLE001
                     self._log(f"Post-revision reconciliation skipped: {exc}")
 
-                # Write revised paper.tex and recompile
+                if self._normalized_tex(revised_tex) == self._normalized_tex(
+                    current_tex
+                ):
+                    miss = (
+                        "the revision changed only whitespace or LaTeX "
+                        "comments, which a reviewer cannot see"
+                    )
+                    revision_failed = True
+                    revision_failure_reason = miss
+                    self._revision_failed(cycle, miss)
+                    break
+
+                # Write revised paper.tex (and the reconciled bibliography)
+                # and recompile
+                if pending_bib is not None:
+                    bib_path.write_text(pending_bib, encoding="utf-8")
                 tex_path.write_text(revised_tex, encoding="utf-8")
                 revised_since_last_review = True
+                revisions_applied += 1
                 self._log("Revised paper.tex written; recompiling LaTeX")
                 self._compile_full_latex(self.output_dir)
 
@@ -2552,6 +2717,17 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 (not revised_since_last_review) if ran else None
             ),
             "last_cycle_failure": last_cycle_failure if ran else None,
+            # Which manuscript final_score was given to: "original" (the
+            # Writer's paper) or "revised" (after the gate revised it),
+            # and in which cycle.
+            "final_score_from": final_from if ran else None,
+            "final_score_cycle": final_cycle if ran else None,
+            "revisions_applied": revisions_applied,
+            # True when a revision was due and no changed manuscript came
+            # of it; the gate then ended with the last reviewed result.
+            "revision_failed": revision_failed,
+            "revision_failure_reason": revision_failure_reason,
+            "reply": dict(self._last_reply) if self._last_reply else None,
         }
 
         # Persist summary
@@ -2577,6 +2753,27 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 "reviewed and no score exists."
             )
         return summary
+
+    def _revision_failed(self, cycle: int, reason: str) -> None:
+        """Log and announce a revision that produced no changed paper.
+
+        The gate ends with cycle *cycle*'s result: another review of the
+        same manuscript would cost as much as the first and cannot tell
+        the gate anything about a revision that did not happen.
+        """
+        message = (
+            f"The review gate could not revise the paper after cycle {cycle} "
+            f"({reason}). The gate ends with cycle {cycle}'s score; no further "
+            "review of the unchanged paper was paid for."
+        )
+        self._log(message)
+        self._event(
+            "warning",
+            cycle=cycle,
+            plain=message,
+            code="GATE_REVISION_FAILED",
+            message=message,
+        )
 
     def _cycle_not_reviewed(self, cycle: int, reason: str, revised: bool) -> None:
         """Log and announce a cycle that reviewed nothing after an earlier
