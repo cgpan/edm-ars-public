@@ -67,6 +67,31 @@ def test_success_with_serious_issues_lists_them(run_home: Path, capsys: pytest.C
     assert "Release:" not in out and "YES" not in out
 
 
+@pytest.mark.parametrize("severity", ["critical", "major"])
+def test_the_why_line_points_at_the_list_that_is_above_it(
+        run_home: Path, capsys: pytest.CaptureFixture[str], severity: str) -> None:
+    # The round-3 screen said "Why: ... Each item below is something the
+    # paper states ...", under the "Please check" list it meant. A serious
+    # finding moves the list above the scores; either way it is above Why.
+    run = _ready(run_home, invariants=invariants_file([("INV_SUPERLATIVE_CONTRADICTED", severity)]),
+                 status=v2_status(reason_code="ADVISORY_FINDINGS",
+                                  counts={"critical": int(severity == "critical"),
+                                          "major": int(severity == "major")}))
+    _, out = _show(run, capsys)
+    lines = [line.strip() for line in out.splitlines()]
+    why = next(i for i, line in enumerate(lines) if line.startswith("Why:"))
+    assert lines.index("Please check") < why
+    flat = " ".join(out.split())
+    said = flat[flat.index("Why: "):flat.index("What to do: ")]
+    assert "Each item in the list above is something the paper states" in said
+    assert "below" not in said
+
+    html_text = (run / "summary.html").read_text(encoding="utf-8")
+    assert "Each item in the list above is something the paper states" in html_text
+    assert html_text.index("<h2>Please check</h2>") < html_text.index("Each item in the list above")
+    assert "Each item below" not in html_text
+
+
 def test_gate_scores_on_success_screen(run_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     gate = {"enabled": True, "ran": True, "skip_reason": None, "passed": False, "score": 5.1,
             "threshold": 6.3, "advisory": False, "venue": "EDM"}
