@@ -154,6 +154,15 @@ def test_revision_problems_reach_the_run_errors_only_when_they_mattered() -> Non
     assert "could not revise" in _revision_problem(unavailable)
     failed = {**base, "revision_failures": [{"code": "MODEL_GONE", "message": "404"}]}
     assert "(MODEL_GONE)" in _revision_problem(failed)
+    # The gate no longer re-reviews an unrevised paper; the note says so.
+    assert "reviewed an unrevised paper" not in _revision_problem(failed)
+    assert "instead of reviewing the unchanged paper again" in _revision_problem(failed)
+    # A revision that came back unusable, with no provider error behind it.
+    unusable = {**base, "revision_failed": True, "final_score_cycle": 1,
+                "revision_failure_reason": "no LaTeX could be taken from the reply"}
+    note = _revision_problem(unusable)
+    assert "(no LaTeX could be taken from the reply)" in note
+    assert "cycle 1's score" in note
     # A pass, a single cycle, or a gate that never ran had nothing to revise.
     assert _revision_problem({**unavailable, "passed": True}) is None
     assert _revision_problem({**unavailable, "max_cycles": 1}) is None

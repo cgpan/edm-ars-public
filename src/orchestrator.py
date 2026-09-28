@@ -486,6 +486,12 @@ def _revision_problem(summary: Any) -> Optional[str]:
     why = summary.get("revision_unavailable_reason")
     raw = summary.get("revision_failures")
     failures = [f for f in raw if isinstance(f, dict)] if isinstance(raw, list) else []
+    cycle = summary.get("final_score_cycle")
+    ending = (
+        f"the gate ended with cycle {cycle}'s score"
+        if isinstance(cycle, int) and not isinstance(cycle, bool)
+        else "the gate ended with the last reviewed score"
+    ) + " instead of reviewing the unchanged paper again."
     if why:
         return (
             "The review gate could not revise the paper between cycles: "
@@ -495,7 +501,13 @@ def _revision_problem(summary: Any) -> Optional[str]:
         codes = sorted({str(f.get("code") or "UNKNOWN") for f in failures})
         return (
             f"The review gate's revision failed {len(failures)} time(s) "
-            f"({', '.join(codes)}); later cycles reviewed an unrevised paper."
+            f"({', '.join(codes)}); {ending}"
+        )
+    if summary.get("revision_failed"):
+        reason = summary.get("revision_failure_reason") or "no reason recorded"
+        return (
+            "The review gate could not revise the paper "
+            f"({_one_line(reason, 300)}); {ending}"
         )
     return None
 
@@ -1106,9 +1118,13 @@ class Orchestrator:
         failed review scored 0.0, which is what the old record said (B2).
 
         A gate that ran also carries ``final_manuscript_reviewed`` (False
-        when paper.tex was revised after the review ``score`` comes from)
-        and ``last_cycle_failure`` (why the next cycle reviewed nothing),
-        both None when the summary does not say.
+        when paper.tex was revised after the review ``score`` comes from),
+        ``last_cycle_failure`` (why the next cycle reviewed nothing),
+        ``final_score_from`` ("original" or "revised": which manuscript
+        the score was given to) and ``revision_failed`` /
+        ``revision_failure_reason`` (a revision was due and no changed
+        paper came of it, so the gate stopped), each None when the
+        summary does not say.
         """
         rg_cfg = self.config.get("review_gate", {}) or {}
         enabled = bool(rg_cfg.get("enabled", False))
@@ -1155,6 +1171,16 @@ class Orchestrator:
             block["last_cycle_failure"] = (
                 _one_line(failure, 200) if failure else None
             )
+            # Which manuscript the score was given to: "original" (the
+            # Writer's) or "revised" (after the gate revised it).
+            source = res.get("final_score_from")
+            block["final_score_from"] = (
+                source if source in ("original", "revised") else None
+            )
+            failed = res.get("revision_failed")
+            block["revision_failed"] = failed if isinstance(failed, bool) else None
+            why = res.get("revision_failure_reason")
+            block["revision_failure_reason"] = _one_line(why, 300) if why else None
         else:
             skip = res.get("skip_reason")
             if not skip and res.get("error"):
@@ -2515,6 +2541,16 @@ class Orchestrator:
                     else ""
                 )
                 if gate.get("final_manuscript_reviewed") is False
+                else ""
+            ),
+            (
+                "the review gate could not revise the paper"
+                + (
+                    f" ({gate['revision_failure_reason']})"
+                    if gate.get("revision_failure_reason")
+                    else ""
+                )
+                if gate.get("revision_failed")
                 else ""
             ),
             "critic verdict was not PASS" if unverified else "",

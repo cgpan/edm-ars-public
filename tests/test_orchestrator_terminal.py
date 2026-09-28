@@ -620,6 +620,55 @@ def test_a_gate_whose_last_cycle_failed_says_the_paper_was_not_re_reviewed(
     )
 
 
+def test_run_status_says_which_manuscript_the_gate_score_belongs_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Mac study (round 3): the revision failed and the score was the
+    Writer's manuscript's. run_status says so, and why the gate stopped."""
+    _no_invariants(monkeypatch)
+    orch = _orch(tmp_path, _config(tmp_path, review_gate__enabled=True))
+    orch.ctx.review_gate_result = {
+        "ran": True, "skip_reason": None, "passed": False, "cycles_used": 1,
+        "final_score": 5.7, "threshold_used": 6.3,
+        "final_manuscript_reviewed": True, "last_cycle_failure": None,
+        "final_score_from": "original", "final_score_cycle": 1,
+        "revision_failed": True,
+        "revision_failure_reason": "no LaTeX could be taken from the reply "
+                                   "(the reply was cut off at the token limit)",
+    }
+    orch.ctx.current_state = PipelineState.VERIFYING
+
+    orch._run_verifying()
+
+    gate = _status(tmp_path)["gate"]
+    assert gate["final_score_from"] == "original"
+    assert gate["revision_failed"] is True
+    assert "cut off at the token limit" in gate["revision_failure_reason"]
+    assert "the review gate could not revise the paper (no LaTeX" in (
+        _status(tmp_path)["reason"])
+
+
+def test_a_revised_score_is_labelled_revised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_invariants(monkeypatch)
+    orch = _orch(tmp_path, _config(tmp_path, review_gate__enabled=True))
+    orch.ctx.review_gate_result = {
+        "ran": True, "passed": True, "cycles_used": 2, "final_score": 6.8,
+        "threshold_used": 6.3, "final_manuscript_reviewed": True,
+        "final_score_from": "revised", "revision_failed": False,
+        "revision_failure_reason": None,
+    }
+    orch.ctx.current_state = PipelineState.VERIFYING
+
+    orch._run_verifying()
+
+    status = _status(tmp_path)
+    assert status["gate"]["final_score_from"] == "revised"
+    assert status["gate"]["revision_failed"] is False
+    assert "could not revise" not in status["reason"]
+
+
 def test_an_unverified_paper_outranks_a_gate_that_did_not_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
