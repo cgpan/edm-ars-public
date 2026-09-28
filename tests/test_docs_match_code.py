@@ -10,6 +10,8 @@ trusts it. Each check below ties one published statement to its source:
 * the README's layout block and data filenames to the repository and the
   dataset adapters;
 * every third-party import in src/ to a requirements file;
+* the README's cost section to the review-gate subtotal run_cost.json
+  writes;
 * PRIVACY.md's "characters per failed attempt" to what the DataEngineer
   and Analyst repair prompts really carry.
 """
@@ -325,3 +327,25 @@ def test_readme_cost_section_names_the_rates_it_was_priced_at() -> None:
             assert str(rates["source"]) in cost, model
         else:
             assert model in cost, f"{model}'s rate is unverified; say so"
+
+
+def test_readme_says_run_cost_counts_the_review_gate(tmp_path: Path) -> None:
+    """The README said run_cost.json "leaves out the review gate's own
+    calls" after fix/r3-gate put them in it, as component "review" with
+    its own subtotal, so a reader checking a bill against run_cost.json
+    would add the reviews a second time. The README must not say the
+    reviews are missing, and must name the keys the file really writes."""
+    from src.cost import REVIEW_COMPONENT, TokenUsage, record_usage, write_summary
+
+    readme = " ".join(_readme().split())
+    assert "leaves out the review gate" not in readme
+    record_usage(str(tmp_path), TokenUsage(
+        agent="LSAR", model="m", provider="deepseek", prompt_tokens=10,
+        completion_tokens=1, component=REVIEW_COMPONENT))
+    written = write_summary(str(tmp_path), {})
+    assert written is not None
+    assert REVIEW_COMPONENT in written["by_component"]
+    assert f"component `{REVIEW_COMPONENT}`" in readme
+    for key in ("by_component", "pipeline_cost_usd", "review_cost_usd"):
+        assert key in written, key
+        assert f"`{key}`" in readme, key

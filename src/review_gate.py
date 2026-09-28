@@ -15,15 +15,46 @@ PDF, this module:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from src.cost import (
+    REVIEW_COMPONENT,
+    TokenUsage,
+    cost_usd,
+    extract_usage,
+    load_pricing,
+    load_review_usage,
+    rate_is_unverified,
+    rate_period,
+    record_usage,
+    review_usages,
+    write_review_window,
+)
+
+
+def _utc_now_iso() -> str:
+    """Naive-UTC ISO time, the form ``BaseAgent._meter`` stamps calls with."""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+#: finish_reason (OpenAI-compatible) / stop_reason (Anthropic) of a reply
+#: the provider cut off at the token limit.
+_TRUNCATION_REASONS = frozenset({"length", "max_tokens"})
+
+
+def _is_truncation(finish_reason: Any) -> bool:
+    return str(finish_reason or "").strip().lower() in _TRUNCATION_REASONS
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +120,9 @@ _TRAILER_RE = re.compile(
     r"|begin\{thebibliography\}|end\{document\})"
 )
 _FENCE_RE = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
+#: Fence info strings that hold LaTeX (compared lower-cased and stripped):
+#: models write ```latex, ```LaTeX, ```tex or a bare ```.
+_LATEX_FENCE_INFOS = frozenset({"", "latex", "tex"})
 _SECTION_MARKER_RE = re.compile(r"SECTION[\s:#_-]*(\d+)", re.IGNORECASE)
 _LEVEL_RANK: dict[str, int] = {"abstract": 0, "section": 1, "subsection": 2}
 
@@ -351,8 +385,34 @@ class ReviewGate:
                 )
         # Arc P4: most recent manuscript lint, fed to the reviser.
         self._last_lint: Any = None
+        # Metering. Every LLM call the gate pays for (each LSAR review's
+        # calls, each revision call) goes to the run's token_usage.jsonl
+        # as it happens, as component "review", and is announced as an
+        # llm.end event so a live view's cost moves during the gate.
+        #: The rows recorded, for the orchestrator's checkpoint copy.
+        self.usage_records: list[TokenUsage] = []
+        #: One entry per LSAR review: folder, window, calls, cost.
+        self.review_costs: list[dict] = []
+        self._pricing: Optional[dict] = None
+        self._spent: dict[str, Any] = {
+            "usd": 0.0, "calls": 0, "unpriced": 0, "estimated": False,
+        }
         self.revision_model: str = rg_cfg.get("revision_model", "claude-sonnet-4-6")
         self.revision_max_tokens: int = rg_cfg.get("revision_max_tokens", 16000)
+        #: The budget for the one retry of a reply cut off at the limit.
+        self.revision_retry_max_tokens: int = int(
+            rg_cfg.get("revision_retry_max_tokens", 2 * self.revision_max_tokens)
+        )
+        #: How the last revision reply ended (see _call_revision_llm).
+        self._last_reply: dict[str, Any] = {}
+        #: Where the gate keeps this cycle's raw revision replies.
+        self._revision_dir: Optional[Path] = None
+        #: Why the last revise_from_review kept the original (None when it
+        #: returned a revision), for gate_summary.json.
+        self._revision_miss: Optional[str] = None
+        #: The reviews behind the last _maybe_median_sample result:
+        #: (score, report, sample id).
+        self._last_samples: list[tuple[float, dict, int]] = []
 
         # Build the reviser's LLM client through the same code path as the
         # agents (src/agents/llm_client.py): same base-URL precedence, same
@@ -719,12 +779,21 @@ class ReviewGate:
             pipeline = LSARPipeline(config_path=config_path)
             self._log(f"Running LSAR review (cycle {cycle}, venue={self.venue})")
 
-            report_md, report_json = pipeline.run(
-                pdf_path=Path(pdf_path),
-                venue=self.venue,
-                force=True,
-                output_dir=cycle_dir,
-            )
+            started = _utc_now_iso()
+            started_epoch = time.time()
+            try:
+                report_md, report_json = pipeline.run(
+                    pdf_path=Path(pdf_path),
+                    venue=self.venue,
+                    force=True,
+                    output_dir=cycle_dir,
+                )
+            finally:
+                # Metered whether or not the review finished: a review
+                # that raised part-way still paid for its calls.
+                self._meter_review(
+                    cycle_dir, started, _utc_now_iso(), started_epoch
+                )
 
             # Persist LSAR outputs alongside EDM-ARS artefacts
             (cycle_dir / "lsar_report.md").write_text(
@@ -767,6 +836,190 @@ class ReviewGate:
             _detach_lsar_log_file(lsar_log_file)
             if added_to_path and lsar_root in sys.path:
                 sys.path.remove(lsar_root)
+
+    # ------------------------------------------------------------------
+    # 2a. Metering: the gate's reviews and revisions are part of the run
+    # ------------------------------------------------------------------
+
+    def _gate_pricing(self) -> dict:
+        if self._pricing is None:
+            try:
+                self._pricing = load_pricing(self.config)
+            except Exception:  # noqa: BLE001 - unpriced is a valid outcome
+                self._pricing = {}
+        return self._pricing
+
+    def _record_calls(self, usages: list[TokenUsage], cycle: Optional[int] = None) -> Optional[float]:
+        """Write *usages* to the run's token_usage.jsonl and announce each.
+
+        Each call becomes an ``llm.end`` event, the one a live view
+        already adds to its running cost. Returns the priced cost of
+        these calls, None when none of them could be priced. Never raises.
+        """
+        pricing = self._gate_pricing()
+        batch: Optional[float] = None
+        for usage in usages:
+            try:
+                usage.component = REVIEW_COMPONENT
+                record_usage(str(self.output_dir), usage)
+                self.usage_records.append(usage)
+                cost = cost_usd(usage, pricing)
+                estimated = False
+                self._spent["calls"] += 1
+                if cost is None:
+                    self._spent["unpriced"] += 1
+                else:
+                    rates = pricing.get(usage.model)
+                    estimated = rate_is_unverified(rates) or (
+                        rate_period(usage, rates) == "untimed"
+                    )
+                    batch = (batch or 0.0) + cost
+                    self._spent["usd"] += cost
+                    self._spent["estimated"] = self._spent["estimated"] or estimated
+                self._event(
+                    "llm.end",
+                    cycle=cycle,
+                    agent=usage.agent,
+                    model=usage.model,
+                    provider=usage.provider,
+                    ok=True,
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    cached_tokens=usage.cached_prompt_tokens,
+                    cost_usd=cost,
+                    cost_estimated=estimated,
+                    component=REVIEW_COMPONENT,
+                )
+            except Exception:  # noqa: BLE001 - metering is never fatal
+                continue
+        return batch
+
+    def _announce_spent(self, what: str, cycle: Optional[int] = None) -> None:
+        """A ``gate.cost`` event with the gate's running total."""
+        spent = self._spent
+        total = round(float(spent["usd"]), 6)
+        approx = spent["estimated"] or spent["unpriced"]
+        self._event(
+            "gate.cost",
+            cycle=cycle,
+            plain=(
+                f"{what}; the review gate has cost "
+                f"{'about ' if approx else ''}US${total:.2f} so far "
+                f"({spent['calls']} AI calls)"
+            ),
+            cost_usd=total,
+            n_calls=spent["calls"],
+            unpriced_calls=spent["unpriced"],
+            cost_estimated=bool(spent["estimated"]),
+        )
+
+    def _drain_lsar_usage(self) -> list:
+        """Calls LSAR measured but never wrote out.
+
+        An LSAR before f0ac437 (LSAR fix/released-issues) writes
+        token_usage.json only when a review completes, so the calls of a
+        review that raised part-way are still in its in-process log. A
+        later LSAR writes the file however the review ends and empties
+        the log as it does, so this returns [] and nothing is counted
+        twice. Only callable while LSAR is importable.
+        """
+        try:
+            from lsar.utils.llm_client import drain_usage_log  # type: ignore[import-not-found]
+
+            calls = drain_usage_log()
+            return [c for c in calls if isinstance(c, dict)] if isinstance(calls, list) else []
+        except Exception:  # noqa: BLE001 - an older LSAR, or none
+            return []
+
+    def _meter_review(
+        self, review_dir: Path, started: str, ended: str, started_epoch: float
+    ) -> None:
+        """Meter one LSAR review. Never raises.
+
+        Reads the ``token_usage.json`` LSAR wrote into *review_dir* during
+        this review (one left by an earlier review of the same folder is
+        ignored), or the calls a failed review left in LSAR's log, and
+        records them as component "review". Untimed calls are priced from
+        the review's window, saved beside them as review_window.json.
+        """
+        try:
+            write_review_window(review_dir, started, ended)
+            usage_path = review_dir / "token_usage.json"
+            usages: list[TokenUsage] = []
+            fresh = (
+                usage_path.exists()
+                and usage_path.stat().st_mtime >= started_epoch - 1.0
+            )
+            if fresh:
+                usages = load_review_usage(review_dir, self._gate_pricing())
+            leftover = self._drain_lsar_usage()
+            if leftover:
+                # A review that raised: keep what it spent beside its other
+                # artefacts too, so the folder accounts for itself.
+                payload = {"calls": leftover, "note": (
+                    "Written by the EDM-ARS review gate: LSAR raised before "
+                    "writing its own usage for this review."
+                )}
+                if not fresh:
+                    try:
+                        usage_path.write_text(
+                            json.dumps(payload, indent=2), encoding="utf-8"
+                        )
+                    except OSError:
+                        pass
+                usages += review_usages(
+                    payload, started=started, ended=ended,
+                    pricing=self._gate_pricing(),
+                )
+            cycle = self._review_cycle_number(review_dir)
+            cost = self._record_calls(usages, cycle=cycle)
+            self.review_costs.append({
+                "review_dir": review_dir.name,
+                "started_utc": started,
+                "ended_utc": ended,
+                "n_calls": len(usages),
+                "cost_usd": None if cost is None else round(cost, 6),
+                "time_sources": sorted({u.time_source or "call" for u in usages}),
+            })
+            self._announce_spent(
+                f"{self._review_label(review_dir)} used {len(usages)} AI calls",
+                cycle=cycle,
+            )
+        except Exception:  # noqa: BLE001 - metering is never fatal
+            pass
+
+    @staticmethod
+    def _review_label(review_dir: Path) -> str:
+        """cycle_1 -> "Review 1 of cycle 1"; cycle_102 -> "Review 2 of cycle 1"."""
+        m = re.fullmatch(r"cycle_(\d+)", review_dir.name)
+        if not m:
+            return f"The review in {review_dir.name}"
+        n = int(m.group(1))
+        if n >= 100:
+            return f"Review {n % 100} of cycle {n // 100}"
+        return f"Review 1 of cycle {n}"
+
+    @staticmethod
+    def _review_cycle_number(review_dir: Path) -> Optional[int]:
+        """cycle_1 -> 1; a median sample's cycle_102 -> 1."""
+        m = re.fullmatch(r"cycle_(\d+)", review_dir.name)
+        if not m:
+            return None
+        n = int(m.group(1))
+        return n // 100 if n >= 100 else n
+
+    def _meter_revision_response(self, response: Any) -> Optional[TokenUsage]:
+        """Record one revision call's measured usage. Never raises."""
+        try:
+            usage = extract_usage(
+                response, "ReviewGate", self._llm_model, self._llm_provider
+            )
+            usage.timestamp = _utc_now_iso()
+            usage.stage = "REVIEWING"
+            self._record_calls([usage])
+            return usage
+        except Exception:  # noqa: BLE001
+            return None
 
     # ------------------------------------------------------------------
     # 3. Evaluate pass/fail gate
@@ -912,8 +1165,10 @@ class ReviewGate:
         * **whole-document** — kept for short manuscripts whose complete
           revision fits comfortably inside the reply budget.
 
-        Returns the revised LaTeX string (the original on any failure).
+        Returns the revised LaTeX string (the original on any failure;
+        ``self._revision_miss`` then says why).
         """
+        self._revision_miss = None
         review_block = report_json.get("review", {})
         strengths = review_block.get("strengths", [])
         weaknesses = review_block.get("weaknesses", [])
@@ -961,15 +1216,33 @@ class ReviewGate:
         self._log("Calling LLM for whole-document paper revision (LSAR feedback)")
         response_text = self._call_revision_llm(prompt)
         if response_text is None:
+            self._revision_miss = self._call_failure_reason()
             return paper_tex  # Return original on failure
 
+        truncated = bool((self._last_reply or {}).get("truncated"))
         revised_tex = self._extract_latex(response_text)
         if revised_tex:
             self._log("Paper revision complete")
             return revised_tex
-        else:
-            self._log("Could not extract LaTeX from LLM response; keeping original")
-            return paper_tex
+        # No complete document in the reply. What the model did return
+        # (only the sections it changed, or a document cut off at the
+        # token limit) is spliced into the existing manuscript section by
+        # section, the way the Writer rebuilds a paper inside its template:
+        # the preamble, the title block and the trailer are never taken
+        # from the reply.
+        spliced = self._splice_reply_sections(
+            paper_tex, response_text, truncated=truncated
+        )
+        if spliced is not None:
+            return spliced
+        why = (
+            "the reply was cut off at the token limit"
+            if truncated
+            else "no complete document and no known section in it"
+        )
+        self._revision_miss = f"no LaTeX could be taken from the reply ({why})"
+        self._log(f"Could not extract LaTeX from LLM response ({why}); keeping original")
+        return paper_tex
 
     # -- LLM plumbing shared by both revision paths ---------------------
 
@@ -986,10 +1259,20 @@ class ReviewGate:
         wait is logged before it starts; a failure that remains is logged
         with its code (KEY_REJECTED, NO_CREDIT, MODEL_GONE, ...) and kept
         in ``revision_failures`` instead of vanishing into a bare None.
-        """
-        from src.agents.llm_client import call_with_retries
-        from src.errors import ProviderError
 
+        A reply the provider cut off at the token limit (finish_reason
+        ``length``, stop_reason ``max_tokens``) is asked for once more
+        with ``revision_retry_max_tokens``. Each raw reply is saved in the
+        cycle's folder (``revision_raw.txt``, ``revision_raw_retry.txt``)
+        when the gate set one, and ``self._last_reply`` says how the reply
+        ended, for the extraction that follows.
+        """
+        self._last_reply = {
+            "finish_reason": None,
+            "truncated": False,
+            "retried": False,
+            "max_tokens": self.revision_max_tokens,
+        }
         if self._llm_client is None:
             self._log(
                 "LLM revision skipped: "
@@ -997,45 +1280,169 @@ class ReviewGate:
             )
             return None
 
-        def _attempt() -> str:
+        first = self._revision_call(prompt, self.revision_max_tokens, "revision_raw.txt")
+        if first is None:
+            return None
+        text, finish = first
+        self._last_reply.update(finish_reason=finish, truncated=_is_truncation(finish))
+        if not self._last_reply["truncated"]:
+            return text
+        retry_budget = self.revision_retry_max_tokens
+        if retry_budget <= self.revision_max_tokens:
+            self._log(
+                f"The revision reply was cut off at {self.revision_max_tokens} "
+                f"tokens (finish_reason={finish}); no larger budget is "
+                "configured (review_gate.revision_retry_max_tokens)."
+            )
+            return text
+        self._log(
+            f"The revision reply was cut off at {self.revision_max_tokens} "
+            f"tokens (finish_reason={finish}); asking once more with "
+            f"{retry_budget}."
+        )
+        second = self._revision_call(prompt, retry_budget, "revision_raw_retry.txt")
+        self._last_reply["retried"] = True
+        if second is None:
+            # The retry failed outright; the cut-off first reply is still
+            # what there is, and extraction knows it is incomplete.
+            return text
+        text, finish = second
+        self._last_reply.update(
+            finish_reason=finish,
+            truncated=_is_truncation(finish),
+            max_tokens=retry_budget,
+        )
+        if self._last_reply["truncated"]:
+            self._log(
+                f"The retried revision reply was cut off too, at {retry_budget} "
+                "tokens."
+            )
+        return text
+
+    def _call_failure_reason(self) -> str:
+        """Why _call_revision_llm returned None, in a phrase."""
+        if self._llm_client is None:
+            return (
+                "no reviser: "
+                + (self.revision_unavailable_reason or "no client")
+            )
+        if self.revision_failures:
+            return f"the revision call failed ({self.revision_failures[-1]['code']})"
+        return "the revision call failed"
+
+    def _revision_call(
+        self, prompt: str, max_tokens: int, raw_name: str
+    ) -> Optional[tuple[str, Optional[str]]]:
+        """One revision request: ``(text, finish_reason)``, None on failure."""
+        from src.agents.llm_client import call_with_retries
+        from src.errors import ProviderError
+
+        def _attempt() -> tuple[str, Optional[str]]:
             if self._llm_provider in ("deepseek", "openai"):
-                response = self._llm_client.chat.completions.create(
-                    model=self._llm_model,
-                    max_tokens=self.revision_max_tokens,
-                    temperature=0.3,
-                    messages=[
+                kwargs: dict[str, Any] = {
+                    "model": self._llm_model,
+                    "temperature": 0.3,
+                    "messages": [
                         {"role": "system", "content": self._REVISION_SYSTEM_TEXT},
                         {"role": "user", "content": prompt},
                     ],
+                }
+                if self._llm_provider == "deepseek":
+                    # As every agent call does (BaseAgent.call_llm):
+                    # DeepSeek-V4 thinks by default, and its reasoning is
+                    # billed as output and counted against max_tokens, so
+                    # a thinking reviser can spend the reply budget before
+                    # it writes the manuscript back.
+                    kwargs["max_tokens"] = max_tokens
+                    kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+                else:
+                    # The GPT-5 family rejects max_tokens (BaseAgent uses
+                    # the same spelling for the same reason).
+                    kwargs["max_completion_tokens"] = max_tokens
+                response = self._llm_client.chat.completions.create(**kwargs)
+                self._meter_revision_response(response)
+                choice = response.choices[0]
+                return (
+                    choice.message.content or "",
+                    getattr(choice, "finish_reason", None),
                 )
-                return response.choices[0].message.content or ""
             with self._llm_client.messages.stream(
                 model=self._llm_model,
-                max_tokens=self.revision_max_tokens,
+                max_tokens=max_tokens,
                 temperature=0.3,
                 system=self._REVISION_SYSTEM_TEXT,
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
-                return stream.get_final_text()
+                final = stream.get_final_message()
+            self._meter_revision_response(final)
+            text = "".join(
+                getattr(block, "text", "") or ""
+                for block in getattr(final, "content", None) or []
+                if getattr(block, "type", None) == "text"
+            )
+            return text, getattr(final, "stop_reason", None)
 
+        self._event(
+            "llm.start",
+            agent="ReviewGate",
+            plain=f"Waiting for {self._llm_model} to revise the paper",
+            model=self._llm_model,
+            provider=self._llm_provider,
+        )
         try:
-            return call_with_retries(
+            text, finish = call_with_retries(
                 _attempt,
                 provider_cfg=self._llm_provider_cfg,
                 model=self._llm_model,
                 settings=self._llm_settings,
                 on_wait=lambda _s, _a, _r, message: self._log(message),
             )
-        except ProviderError as exc:
-            self.revision_failures.append({"code": exc.code, "message": str(exc)})
-            self._log(f"LLM revision call failed [{exc.code}]: {exc}")
-            return None
-        except Exception as exc:
-            self.revision_failures.append(
-                {"code": "UNKNOWN", "message": f"{type(exc).__name__}: {exc}"}
+        except Exception as exc:  # noqa: BLE001 - classified below
+            code = exc.code if isinstance(exc, ProviderError) else "UNKNOWN"
+            message = (
+                str(exc) if isinstance(exc, ProviderError)
+                else f"{type(exc).__name__}: {exc}"
             )
-            self._log(f"LLM revision call failed: {exc}")
+            self.revision_failures.append({"code": code, "message": message})
+            self._log(
+                f"LLM revision call failed [{code}]: {exc}"
+                if isinstance(exc, ProviderError)
+                else f"LLM revision call failed: {exc}"
+            )
+            # Close the llm.start above so a live view stops waiting.
+            self._event(
+                "llm.end",
+                agent="ReviewGate",
+                model=self._llm_model,
+                provider=self._llm_provider,
+                ok=False,
+                error_code=code,
+                error_class=type(exc).__name__,
+                cost_usd=None,
+                component=REVIEW_COMPONENT,
+            )
             return None
+        self._save_revision_raw(raw_name, text, finish, max_tokens)
+        self._announce_spent("The paper revision call finished")
+        return text, finish
+
+    def _save_revision_raw(
+        self, name: str, text: str, finish: Optional[str], max_tokens: int
+    ) -> None:
+        """Keep the reviser's reply exactly as it came, for diagnosis."""
+        folder = getattr(self, "_revision_dir", None)
+        if folder is None:
+            return
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_text(text, encoding="utf-8")
+            self._log(
+                f"Revision reply saved to {folder.name}/{name} "
+                f"({len(text)} chars, finish_reason={finish}, "
+                f"max_tokens={max_tokens})"
+            )
+        except OSError:
+            pass
 
     # -- budget arithmetic ---------------------------------------------
 
@@ -1197,10 +1604,23 @@ class ReviewGate:
         )
         response_text = self._call_revision_llm(prompt)
         if response_text is None:
+            self._revision_miss = self._call_failure_reason()
             return paper_tex
 
-        returned = self._parse_section_response(response_text, blocks)
+        returned = self._parse_section_response(
+            response_text,
+            blocks,
+            truncated=bool((self._last_reply or {}).get("truncated")),
+        )
         if not returned:
+            self._revision_miss = (
+                "no requested section could be taken from the reply"
+                + (
+                    " (it was cut off at the token limit)"
+                    if (self._last_reply or {}).get("truncated")
+                    else ""
+                )
+            )
             self._log(
                 "Could not extract any revised section from the LLM "
                 "response; keeping original"
@@ -1208,6 +1628,7 @@ class ReviewGate:
             return paper_tex
 
         accepted: dict[int, str] = {}
+        rejected: list[str] = []
         for idx, body in returned.items():
             original = blocks[idx].text
             safe, reason = self._section_revision_is_safe(original, body)
@@ -1216,6 +1637,7 @@ class ReviewGate:
                     f"Section '{blocks[idx].title}' REJECTED and discarded: "
                     f"{reason}. Keeping the original section."
                 )
+                rejected.append(f"{blocks[idx].title}: {reason}")
                 continue
             if body.strip() == original.strip():
                 continue
@@ -1225,6 +1647,12 @@ class ReviewGate:
         if missing:
             self._log(f"Sections not returned by the model (left as-is): {missing}")
         if not accepted:
+            self._revision_miss = (
+                "every returned section was rejected ("
+                + "; ".join(rejected) + ")"
+                if rejected
+                else "the reply returned the sections unchanged"
+            )
             self._log(
                 "No revised section survived the safety guards; keeping the "
                 "original manuscript"
@@ -1255,7 +1683,7 @@ class ReviewGate:
         return out
 
     def _parse_section_response(
-        self, text: str, blocks: list[TexBlock]
+        self, text: str, blocks: list[TexBlock], truncated: bool = False
     ) -> dict[int, str]:
         """Map returned section bodies onto target block indices.
 
@@ -1270,6 +1698,11 @@ class ReviewGate:
         candidates: list[tuple[Optional[int], str]] = []
         for m in _FENCE_RE.finditer(text):
             info, body = m.group(1), m.group(2)
+            if "\\documentclass" in body or "\\begin{document}" in body:
+                # The whole paper came back instead of the sections: its
+                # top-level blocks are the candidates.
+                candidates.extend((None, b.text) for b in self._top_level_blocks(body))
+                continue
             prefix = text[max(0, m.start() - 200): m.start()]
             marks = _SECTION_MARKER_RE.findall(prefix + " " + info)
             marker = int(marks[-1]) - 1 if marks else None
@@ -1277,6 +1710,11 @@ class ReviewGate:
         if not candidates:
             for blk in self._split_sections(text):
                 candidates.append((None, blk.text))
+            if truncated and candidates:
+                # Unfenced and cut off at the token limit: the last block
+                # is the one that was cut. (A cut-off fenced block has no
+                # closing fence and was never a candidate.)
+                candidates.pop()
 
         out: dict[int, str] = {}
         leftovers: list[str] = []
@@ -1302,6 +1740,99 @@ class ReviewGate:
         if len(remaining) == 1 and len(leftovers) == 1:
             out[remaining[0]] = leftovers[0]
         return out
+
+    def _top_level_blocks(self, tex: str) -> list[TexBlock]:
+        """The abstract and the \\section blocks of *tex*, in order.
+
+        Subsections are inside their sections, so these never overlap and
+        can be spliced independently.
+        """
+        return [
+            b for b in self._split_sections(tex) if b.level in ("abstract", "section")
+        ]
+
+    @staticmethod
+    def _reply_latex(text: str) -> str:
+        """The LaTeX a reply carries: its LaTeX fences, else the reply.
+
+        Closed ```latex / ```tex / bare fences are joined; a fence left
+        open at the end (a reply cut off at the token limit) contributes
+        what it has. A reply with fences of other kinds only has none.
+        """
+        bodies: list[str] = []
+        tail_start = 0
+        for m in _FENCE_RE.finditer(text):
+            tail_start = m.end()
+            if m.group(1).strip().lower() in _LATEX_FENCE_INFOS:
+                bodies.append(m.group(2))
+        tail = re.search(r"```([^\n]*)\n(.*)\Z", text[tail_start:], re.DOTALL)
+        if tail and tail.group(1).strip().lower() in _LATEX_FENCE_INFOS:
+            bodies.append(tail.group(2))
+        if bodies:
+            return "\n\n".join(bodies)
+        return "" if "```" in text else text
+
+    def _splice_reply_sections(
+        self, paper_tex: str, reply: str, truncated: bool = False
+    ) -> Optional[str]:
+        """Splice the sections a reply returned into *paper_tex*.
+
+        For a whole-document request whose reply is not a complete
+        document. Each returned abstract or \\section block replaces the
+        manuscript block with the same heading after passing the
+        per-section guards; everything else stays byte-identical. When
+        the reply was cut off at the token limit its last block is
+        dropped, since that is the block that was cut. Returns None when
+        nothing could be spliced.
+        """
+        returned = self._top_level_blocks(self._reply_latex(reply))
+        if truncated and returned:
+            cut = returned.pop()
+            self._log(
+                f"Reply was cut off at the token limit: its last block "
+                f"'{cut.title}' is incomplete and is not used"
+            )
+        if not returned:
+            return None
+        blocks = self._top_level_blocks(paper_tex)
+        accepted: dict[int, str] = {}
+        for rb in returned:
+            idx = next(
+                (i for i, b in enumerate(blocks)
+                 if i not in accepted
+                 and _normalize_title(b.title) == _normalize_title(rb.title)),
+                None,
+            )
+            if idx is None:
+                idx = next(
+                    (i for i, b in enumerate(blocks)
+                     if i not in accepted and _titles_match(rb.title, b.title)),
+                    None,
+                )
+            if idx is None:
+                self._log(
+                    f"Returned block '{rb.title}' matches no section of the "
+                    "manuscript; not used"
+                )
+                continue
+            safe, reason = self._section_revision_is_safe(blocks[idx].text, rb.text)
+            if not safe:
+                self._log(
+                    f"Returned section '{blocks[idx].title}' REJECTED: {reason}. "
+                    "Keeping the original section."
+                )
+                continue
+            if rb.text.strip() == blocks[idx].text.strip():
+                continue
+            accepted[idx] = rb.text
+        if not accepted:
+            return None
+        self._log(
+            "The reply was not a complete document; spliced "
+            f"{len(accepted)} returned section(s) into the manuscript: "
+            f"{[blocks[i].title for i in sorted(accepted)]}"
+        )
+        return self._splice_sections(paper_tex, blocks, accepted)
 
     @staticmethod
     def _match_block_by_heading(
@@ -1658,20 +2189,24 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         return True, ""
 
     def _extract_latex(self, text: str) -> Optional[str]:
-        """Extract LaTeX from a ```latex ... ``` code block in LLM response."""
-        match = re.search(
-            r"```latex\s*\n(.*?)```",
-            text,
-            re.DOTALL,
-        )
-        if match:
-            return match.group(1).strip()
-        # Fallback: look for \documentclass ... \end{document}
-        match = re.search(
-            r"(\\documentclass.*?\\end\{document\})",
-            text,
-            re.DOTALL,
-        )
+        """The complete revised document in a reply, or None.
+
+        A fenced block (```latex, ```LaTeX, ```tex or bare) holding
+        ``\\documentclass`` .. ``\\end{document}`` wins; then such a span
+        anywhere in the reply, fenced or not (a model that forgot the
+        closing fence). A block without both ends is not a document: it
+        used to be returned as one and then rejected as truncated, and is
+        now left to :meth:`_splice_reply_sections`.
+        """
+        if not text:
+            return None
+        for m in _FENCE_RE.finditer(text):
+            if m.group(1).strip().lower() not in _LATEX_FENCE_INFOS:
+                continue
+            body = m.group(2).strip()
+            if "\\documentclass" in body and "\\end{document}" in body:
+                return body
+        match = re.search(r"(\\documentclass.*?\\end\{document\})", text, re.DOTALL)
         if match:
             return match.group(1).strip()
         return None
@@ -1696,6 +2231,11 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         k = int(rg_cfg.get("median_samples", 3))
         band = float(rg_cfg.get("median_trigger_band", 1.5))
         first_score = (first_report.get("scores") or {}).get("overall_score")
+        self._last_samples = (
+            [(first_score, first_report, cycle)]
+            if isinstance(first_score, (int, float))
+            else []
+        )
         if k <= 1 or first_score is None:
             return first_report
         if abs(first_score - self.pass_threshold) > band:
@@ -1714,6 +2254,7 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             if rep is not None and score is not None:
                 samples.append((score, rep, sample_id))
         samples.sort(key=lambda triple: triple[0])
+        self._last_samples = list(samples)
         median_score, median_report, median_id = samples[len(samples) // 2]
         self._log(
             f"Median sampling: scores={[round(s, 2) for s, _, _ in samples]} "
@@ -1729,6 +2270,83 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             "gated_sample_dir": f"cycle_{median_id}",
         }
         return median_report
+
+    @staticmethod
+    def _normalized_tex(tex: str) -> str:
+        """*tex* without LaTeX comments and with whitespace collapsed.
+
+        Two manuscripts equal under this read the same once compiled, so
+        a revision that changed only these did not change the paper.
+        """
+        no_comments = re.sub(r"(?<!\\)%.*", "", tex)
+        return " ".join(no_comments.split())
+
+    def _reviewed_fingerprint(self, cycle: int) -> Optional[str]:
+        """Identity of the manuscript a cycle's review read.
+
+        The text LSAR extracted from the PDF (``paper.md`` in the cycle's
+        folder) when it is there; otherwise the LaTeX the review PDF was
+        built from. None when neither can be read.
+        """
+        candidates = (
+            (self.output_dir / "lsar_review" / f"cycle_{cycle}" / "paper.md", False),
+            (self.output_dir / "paper_for_review.tex", True),
+            (self.output_dir / "paper.tex", True),
+        )
+        for path, is_tex in candidates:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            norm = self._normalized_tex(text) if is_tex else " ".join(text.split())
+            return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+        return None
+
+    def _pool_reviews(
+        self,
+        earlier: dict,
+        samples: list[tuple[float, dict, int]],
+        cycle: int,
+    ) -> dict:
+        """One median over every review of the same manuscript.
+
+        A later review of a manuscript that was already reviewed must not
+        replace the earlier score: all of its reviews are samples of the
+        reviewer's opinion of one paper. The gate is scored on their
+        median (the mean of the two middle scores when there is an even
+        number). The dimensions and prose come from the middle review
+        (the lower of the two middle ones for an even number, so the
+        per-dimension floor is judged conservatively), and the record
+        says both.
+        """
+        pooled = sorted(earlier["samples"] + samples, key=lambda t: t[0])
+        n = len(pooled)
+        lower = pooled[(n - 1) // 2]
+        median = (
+            float(lower[0])
+            if n % 2
+            else (float(pooled[n // 2 - 1][0]) + float(pooled[n // 2][0])) / 2.0
+        )
+        report = json.loads(json.dumps(lower[1], default=str))
+        scores = report.setdefault("scores", {})
+        scores["overall_score"] = round(median, 4)
+        scores["median_sampling"] = {
+            "n_samples": n,
+            "all_scores": [t[0] for t in pooled],
+            "median_score": round(median, 4),
+            "gated_sample_dir": f"cycle_{lower[2]}",
+            "gated_sample_score": lower[0],
+            "pooled_cycles": [earlier["cycle"], cycle],
+        }
+        self._log(
+            f"Cycle {cycle} reviewed the same manuscript as cycle "
+            f"{earlier['cycle']} (the text the reviewer read is identical). "
+            f"Its {len(samples)} review(s) are pooled with the earlier "
+            f"{len(earlier['samples'])} into one median, {round(median, 2)} "
+            f"(scores {[t[0] for t in pooled]}), instead of replacing the "
+            "earlier score."
+        )
+        return report
 
     #: Optional ``(event_type, **data) -> None`` hook the orchestrator sets
     #: to receive ``gate.cycle`` / ``gate.review`` / ``gate.skipped``
@@ -1777,6 +2395,18 @@ Overall: {diagnosis.get('overall_score', '?')}/10
         # paper.tex changed after the last score.
         last_cycle_failure: Optional[str] = None
         revised_since_last_review = False
+        # How many revisions paper.tex has had, and which cycle's review
+        # the final score comes from.
+        revisions_applied = 0
+        final_cycle: Optional[int] = None
+        final_from: Optional[str] = None
+        # Set when the gate wanted a revision and did not get a changed
+        # manuscript: the gate then ends with the last reviewed result
+        # instead of paying for reviews of the same paper.
+        revision_failed = False
+        revision_failure_reason: Optional[str] = None
+        # Every reviewed manuscript: its fingerprint, cycle and reviews.
+        reviewed: list[dict] = []
 
         for cycle in range(1, self.max_cycles + 1):
             self._log(f"--- Review gate cycle {cycle}/{self.max_cycles} ---")
@@ -1820,6 +2450,22 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                     self._log("LSAR returned no result; skipping review gate")
                 break
             report_json = self._maybe_median_sample(report_json, pdf_path, cycle)
+            samples = list(self._last_samples)
+            fingerprint = self._reviewed_fingerprint(cycle)
+            earlier = next(
+                (r for r in reviewed
+                 if fingerprint is not None and r["fingerprint"] == fingerprint),
+                None,
+            )
+            pooled_with: Optional[int] = None
+            if earlier is not None and samples:
+                report_json = self._pool_reviews(earlier, samples, cycle)
+                earlier["samples"] = earlier["samples"] + samples
+                pooled_with = earlier["cycle"]
+            elif fingerprint is not None:
+                reviewed.append(
+                    {"fingerprint": fingerprint, "cycle": cycle, "samples": samples}
+                )
 
             # 3. Evaluate gate
             passed, diagnosis = self.evaluate_gate(report_json)
@@ -1846,6 +2492,8 @@ Overall: {diagnosis.get('overall_score', '?')}/10
             final_score = diagnosis["overall_score"]
             final_recommendation = diagnosis["recommendation"]
             final_passed = passed
+            final_cycle = cycle
+            final_from = "revised" if revisions_applied else "original"
 
             median_info = (report_json.get("scores") or {}).get("median_sampling")
             gated_dir = (
@@ -1864,6 +2512,11 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                     "suggested_focus_areas": diagnosis["suggested_focus_areas"],
                     "median_sampling": median_info,
                     "honesty_blockers": honesty,
+                    # Which manuscript this cycle reviewed: the Writer's
+                    # ("original") or one the gate revised.
+                    "manuscript": final_from,
+                    "revisions_before": revisions_applied,
+                    "pooled_with_cycle": pooled_with,
                 }
             )
             revised_since_last_review = False
@@ -1916,12 +2569,6 @@ Overall: {diagnosis.get('overall_score', '?')}/10
 
                 current_tex = tex_path.read_text(encoding="utf-8")
 
-                # Build review markdown for the prompt
-                review_md_path = cycle_dir / "lsar_report.md"
-                review_md = ""
-                if review_md_path.exists():
-                    review_md = review_md_path.read_text(encoding="utf-8")
-
                 # Keep the pre-revision manuscript so a bad revision is
                 # always recoverable (and diffable after the run).
                 try:
@@ -1932,43 +2579,50 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 except OSError:
                     pass
 
-                revised_tex = self.revise_from_review(
-                    paper_tex=current_tex,
-                    report_json=report_json,
-                    diagnosis=diagnosis,
-                    lint_report=self._last_lint,
+                self._revision_dir = (
+                    self.output_dir / "lsar_review" / f"cycle_{cycle}"
                 )
+                try:
+                    revised_tex = self.revise_from_review(
+                        paper_tex=current_tex,
+                        report_json=report_json,
+                        diagnosis=diagnosis,
+                        lint_report=self._last_lint,
+                    )
+                finally:
+                    self._revision_dir = None
 
                 # Arc P4 guards. revise_from_review returns the ORIGINAL
-                # string on LLM failure, and the old code wrote it back
-                # and recompiled anyway while logging "Revised paper.tex
-                # written" — a no-op that looked like progress.
+                # string on LLM failure. Reviewing that again cannot tell
+                # the gate anything new, and the Mac study (round 3) paid
+                # for three more reviews of an unchanged paper whose lower
+                # median then replaced the score: the gate now ends here
+                # with the last reviewed result.
+                miss: Optional[str] = None
                 if revised_tex == current_tex:
-                    # The old message claimed it was "skipping rewrite and
-                    # recompile". Only half of that was true: paper.tex is
-                    # not rewritten, but the loop continues and the next
-                    # cycle's prepare_pdf runs pdflatex again anyway (8.5s
-                    # later in the live run). Say what actually happens.
-                    self._log(
-                        "Revision was a no-op (LLM failed or returned the "
-                        "original); paper.tex left unchanged. The next cycle "
-                        "still recompiles and re-reviews the unchanged "
-                        "manuscript."
+                    miss = getattr(self, "_revision_miss", None) or (
+                        "the reviser returned the manuscript unchanged"
                     )
-                    continue
-                safe, reason = self._revision_is_safe(current_tex, revised_tex)
-                if not safe:
-                    self._log(
-                        f"Revision REJECTED and discarded: {reason}. "
-                        "Keeping the pre-revision manuscript."
-                    )
-                    continue
+                else:
+                    safe, reason = self._revision_is_safe(current_tex, revised_tex)
+                    if not safe:
+                        self._log(
+                            f"Revision REJECTED and discarded: {reason}. "
+                            "Keeping the pre-revision manuscript."
+                        )
+                        miss = f"the revision was rejected: {reason}"
+                if miss is not None:
+                    revision_failed = True
+                    revision_failure_reason = miss
+                    self._revision_failed(cycle, miss)
+                    break
 
                 # Arc P3 backstop: the reviser writes prose freely and can
                 # introduce a citation key that references.bib does not
                 # have. Reconcile before writing, or the reviewed PDF for
                 # the next cycle renders it as [?].
                 bib_path = self.output_dir / "references.bib"
+                pending_bib: Optional[str] = None
                 try:
                     from src.citations import reconcile_citations
 
@@ -1992,7 +2646,7 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                         revised_tex, current_bib, papers
                     )
                     if revised_bib != current_bib:
-                        bib_path.write_text(revised_bib, encoding="utf-8")
+                        pending_bib = revised_bib
                     self._log(
                         f"Post-revision reconciliation: {cstats['cited']} cited, "
                         f"{cstats['backfilled']} back-filled, "
@@ -2001,9 +2655,25 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 except Exception as exc:  # noqa: BLE001
                     self._log(f"Post-revision reconciliation skipped: {exc}")
 
-                # Write revised paper.tex and recompile
+                if self._normalized_tex(revised_tex) == self._normalized_tex(
+                    current_tex
+                ):
+                    miss = (
+                        "the revision changed only whitespace or LaTeX "
+                        "comments, which a reviewer cannot see"
+                    )
+                    revision_failed = True
+                    revision_failure_reason = miss
+                    self._revision_failed(cycle, miss)
+                    break
+
+                # Write revised paper.tex (and the reconciled bibliography)
+                # and recompile
+                if pending_bib is not None:
+                    bib_path.write_text(pending_bib, encoding="utf-8")
                 tex_path.write_text(revised_tex, encoding="utf-8")
                 revised_since_last_review = True
+                revisions_applied += 1
                 self._log("Revised paper.tex written; recompiling LaTeX")
                 self._compile_full_latex(self.output_dir)
 
@@ -2044,6 +2714,16 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 self, "revision_unavailable_reason", None
             ),
             "revision_failures": list(getattr(self, "revision_failures", []) or []),
+            # What the gate itself spent: every LSAR review's calls and the
+            # revision calls, also in token_usage.jsonl / run_cost.json as
+            # component "review".
+            "cost": {
+                "cost_usd": round(float(self._spent["usd"]), 6),
+                "n_calls": self._spent["calls"],
+                "unpriced_calls": self._spent["unpriced"],
+                "estimated": bool(self._spent["estimated"]),
+                "reviews": list(self.review_costs),
+            },
             # False when paper.tex was revised after the review whose
             # score is final_score, i.e. the delivered manuscript was
             # never scored; None when no review ran.
@@ -2051,6 +2731,17 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 (not revised_since_last_review) if ran else None
             ),
             "last_cycle_failure": last_cycle_failure if ran else None,
+            # Which manuscript final_score was given to: "original" (the
+            # Writer's paper) or "revised" (after the gate revised it),
+            # and in which cycle.
+            "final_score_from": final_from if ran else None,
+            "final_score_cycle": final_cycle if ran else None,
+            "revisions_applied": revisions_applied,
+            # True when a revision was due and no changed manuscript came
+            # of it; the gate then ended with the last reviewed result.
+            "revision_failed": revision_failed,
+            "revision_failure_reason": revision_failure_reason,
+            "reply": dict(self._last_reply) if self._last_reply else None,
         }
 
         # Persist summary
@@ -2076,6 +2767,27 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 "reviewed and no score exists."
             )
         return summary
+
+    def _revision_failed(self, cycle: int, reason: str) -> None:
+        """Log and announce a revision that produced no changed paper.
+
+        The gate ends with cycle *cycle*'s result: another review of the
+        same manuscript would cost as much as the first and cannot tell
+        the gate anything about a revision that did not happen.
+        """
+        message = (
+            f"The review gate could not revise the paper after cycle {cycle} "
+            f"({reason}). The gate ends with cycle {cycle}'s score; no further "
+            "review of the unchanged paper was paid for."
+        )
+        self._log(message)
+        self._event(
+            "warning",
+            cycle=cycle,
+            plain=message,
+            code="GATE_REVISION_FAILED",
+            message=message,
+        )
 
     def _cycle_not_reviewed(self, cycle: int, reason: str, revised: bool) -> None:
         """Log and announce a cycle that reviewed nothing after an earlier

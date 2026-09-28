@@ -58,7 +58,7 @@ EVENT_TYPES = frozenset({
     "attempt.start", "attempt.end",
     "lit.progress", "metric", "verdict",
     "compile.end",
-    "gate.cycle", "gate.review", "gate.skipped",
+    "gate.cycle", "gate.review", "gate.skipped", "gate.cost",
     "verify.end", "warning", "error",
 })
 

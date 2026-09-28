@@ -62,3 +62,25 @@ def test_unpriced_run_still_says_not_priced(
     orch = _orch(tmp_path, _config(tmp_path))
     orch._write_cost_summary()
     assert "Run cost: not priced over" in (tmp_path / "pipeline.log").read_text(encoding="utf-8")
+
+
+def test_the_line_gives_the_review_gate_s_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 3 (Mac): the gate's 42 LSAR calls were missing from the cost.
+    Now counted, the line says how much of the total they were, after the
+    part of the line the edmars live view parses."""
+    import re
+
+    payload = {**_payload("measured", cost=0.5), "n_calls": 58,
+               "by_component": {"pipeline": {"n_calls": 15, "cost_usd": 0.3},
+                                "review": {"n_calls": 43, "cost_usd": 0.2}}}
+    monkeypatch.setattr("src.cost.write_summary", lambda _d, _c: payload)
+    orch = _orch(tmp_path, _config(tmp_path))
+    orch._write_cost_summary()
+    [line] = [x for x in (tmp_path / "pipeline.log").read_text(encoding="utf-8")
+              .splitlines() if "Run cost:" in x]
+    assert "the review gate: $0.2000 over 43 of those calls" in line
+    body = line.split("] ", 1)[1]
+    m = re.match(r"^Run cost: (?:\$([\d.]+)|not priced) over (\d+) LLM calls", body)
+    assert m and m.group(2) == "58"
