@@ -1044,6 +1044,69 @@ def test_a_correct_gap_is_not_flagged(tmp_path):
     assert "INV_STATED_GAP_ARITHMETIC" not in _codes(run)
 
 
+#: The round-3 Mac paper's two subgroup sentences, verbatim. Both are
+#: right: 0.835 - 0.743 = 0.092, and the SES cells are 0.8215 and 0.6784
+#: unrounded, 0.1431 apart.
+_R3_RACE_GAP = (
+    r"Among adequately sized groups, White students had the highest AUC "
+    r"(0.835, $n = 1{,}864$) and Hispanic students (race specified) the lowest "
+    r"(0.743, $n = 488$), a gap of 9.2 percentage points that exceeds the "
+    r"fairness threshold."
+)
+_R3_SES_GAP = (
+    r"For SES quintiles, AUC ranged from 0.678 (lowest quintile) to 0.822 "
+    r"(highest quintile), a gap of 14.3 percentage points."
+)
+
+
+def test_a_gap_in_percentage_points_between_proportions(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__tex=r"\begin{document} " + _R3_RACE_GAP + " " + _R3_SES_GAP + r" \end{document}",
+    )
+    assert "INV_STATED_GAP_ARITHMETIC" not in _codes(run)
+
+
+def test_a_wrong_gap_in_percentage_points_still_fires(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            r"\begin{document} "
+            + _R3_RACE_GAP.replace("9.2 percentage points", "12.5 percentage points")
+            + r" \end{document}"
+        ),
+    )
+    hits = _by_code(run, "INV_STATED_GAP_ARITHMETIC")
+    assert len(hits) == 1
+    assert hits[0].evidence["stated_gap"] == "12.5"
+    assert hits[0].evidence["stated_in_points"] is True
+
+
+def test_the_points_scale_needs_a_unit(tmp_path):
+    """"a gap of 9.2" between 0.835 and 0.743 names no scale: still wrong."""
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            r"\begin{document} "
+            + _R3_RACE_GAP.replace("9.2 percentage points", "9.2")
+            + r" \end{document}"
+        ),
+    )
+    assert len(_by_code(run, "INV_STATED_GAP_ARITHMETIC")) == 1
+
+
+def test_a_gap_off_by_more_than_rounding_still_fires(tmp_path):
+    """J39, verbatim: the cells are 0.6690 and 0.7778, 0.1088 apart."""
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            r"\begin{document} The range across the interpretable cells is "
+            r"0.669 to 0.778, a gap of 0.112. \end{document}"
+        ),
+    )
+    assert len(_by_code(run, "INV_STATED_GAP_ARITHMETIC")) == 1
+
+
 def test_an_auc_difference_is_not_a_gap_claim(tmp_path):
     """The measured false-positive driver.
 

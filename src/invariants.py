@@ -1773,8 +1773,12 @@ def check_prose_numeral_unbound(a: RunArtifacts) -> list[Finding]:
 #: sentence, and "RMSE range 0.667" is not a subtraction at all. Only
 #: "gap"/"disparity" survive, and only in a sentence that also frames two
 #: extremes, which is the shape the real defects have.
+#:
+#: The optional second group is a unit that puts the gap on a x100 scale:
+#: "a gap of 9.2 percentage points" between AUCs of 0.835 and 0.743.
 _GAP_WORD = re.compile(
-    r"\b(?:gap|disparity)\b(?:\s+of)?\s*[^.\d]{0,20}(\d+\.\d+)",
+    r"\b(?:gap|disparity)\b(?:\s+of)?\s*[^.\d]{0,20}(\d+\.\d+)"
+    r"(\s*(?:\\?%|percent(?:age)?(?:[- ]points?)?\b|points?\b|pp\b))?",
     re.IGNORECASE,
 )
 _EXTREMES_FRAMING = re.compile(
@@ -1794,6 +1798,15 @@ def check_stated_gap_arithmetic(a: RunArtifacts) -> list[Finding]:
     whose own cells give 0.1088. Both numbers are real and both
     subtractions are wrong, so every check that binds numerals
     individually passes them.
+
+    Two things a correct sentence does that this must allow. It
+    subtracts the unrounded values: "0.678 ... to 0.822, a gap of 14.3
+    percentage points" is 0.8215 - 0.6784, although the printed values
+    differ by 0.144. So the tolerance is the rounding of all three
+    printed numbers, not of the gap alone. And it states a gap between
+    proportions in percentage points, which is the difference times 100;
+    that scale is accepted only when the gap carries such a unit and
+    both operands lie in [0, 1].
     """
     paper = a.paper
     if paper is None:
@@ -1801,30 +1814,42 @@ def check_stated_gap_arithmetic(a: RunArtifacts) -> list[Finding]:
     out: list[Finding] = []
     seen: set = set()
     for s in _sentences(paper):
-        gaps = _GAP_WORD.findall(s)
+        gaps = [(m.group(1), bool(m.group(2))) for m in _GAP_WORD.finditer(s)]
         if not gaps or not _EXTREMES_FRAMING.search(s):
             continue
-        values = [float(v) for v in _DECIMAL.findall(s)]
-        for g in gaps:
+        printed = _DECIMAL.findall(s)
+        values = [float(v) for v in printed]
+        for g, in_points in gaps:
             gv = float(g)
-            others = [v for v in values if v != gv]
+            others = [(float(v), _half_unit(v)) for v in printed if float(v) != gv]
             if len(others) < 2:
                 continue
-            # Tolerance is the printed precision of the gap itself.
-            dec = len(g.split(".")[1])
-            tol = 0.5 * 10 ** (-dec) * 1.02 + 1e-12
-            diffs = {
-                round(abs(x - y), 10)
-                for i, x in enumerate(others)
-                for y in others[i + 1:]
-            }
-            if any(abs(d - gv) <= tol for d in diffs):
+            h_gap = _half_unit(g)
+            pairs = [
+                (x, hx, y, hy)
+                for i, (x, hx) in enumerate(others)
+                for (y, hy) in others[i + 1:]
+            ]
+            if any(
+                abs(abs(x - y) - gv) <= (h_gap + hx + hy) * 1.02 + 1e-12
+                for x, hx, y, hy in pairs
+            ):
                 continue
-            key = (g, tuple(sorted(others)))
+            if in_points and any(
+                0 <= x <= 1 and 0 <= y <= 1
+                and abs(100 * abs(x - y) - gv) <= (h_gap + 100 * (hx + hy)) * 1.02 + 1e-9
+                for x, hx, y, hy in pairs
+            ):
+                continue
+            key = (g, tuple(sorted(v for v, _ in others)))
             if key in seen:  # abstract and body print the same sentence
                 continue
             seen.add(key)
+            diffs = {round(abs(x - y), 10) for x, _, y, _ in pairs}
             plausible = sorted(diffs)[:4]
+            shown = ", ".join(f"{d:g}" for d in plausible)
+            if in_points:
+                shown += " (x100: " + ", ".join(f"{100 * d:g}" for d in plausible) + ")"
             out.append(
                 Finding(
                     code="INV_STATED_GAP_ARITHMETIC",
@@ -1832,14 +1857,14 @@ def check_stated_gap_arithmetic(a: RunArtifacts) -> list[Finding]:
                     message=(
                         f"A stated gap of {g} is not the difference of any "
                         f"pair of numbers in its own sentence "
-                        f"(differences available: "
-                        f"{', '.join(f'{d:g}' for d in plausible)}). Every "
+                        f"(differences available: {shown}). Every "
                         "number here binds to an artifact individually; the "
                         "subtraction between them does not."
                     ),
                     artifact=a.paper_name or "paper.tex",
                     evidence={
                         "stated_gap": g,
+                        "stated_in_points": in_points,
                         "values_in_sentence": values,
                         "available_differences": plausible,
                         "sentence": s.strip()[:300],
@@ -1848,6 +1873,12 @@ def check_stated_gap_arithmetic(a: RunArtifacts) -> list[Finding]:
                 )
             )
     return out
+
+
+def _half_unit(printed: str) -> float:
+    """Half a unit in the last printed place: 0.822 -> 0.0005, 14.3 -> 0.05."""
+    decimals = len(printed.split(".")[1]) if "." in printed else 0
+    return 0.5 * 10 ** (-decimals)
 
 
 _MEAN_CLUSTER = re.compile(
