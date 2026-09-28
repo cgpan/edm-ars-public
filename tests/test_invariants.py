@@ -1663,6 +1663,56 @@ def test_a_split_share_does_not_excuse_a_planned_whole_number(tmp_path):
     assert "INV_PERCENTAGE_FROM_SPEC_NOT_RUN" in _codes(run)
 
 
+def test_the_round_3_paper_keeps_its_true_findings_and_loses_the_false_ones(tmp_path):
+    """The round-3 Mac paper, as far as its evidence reconstructs it.
+
+    Six codes were false positives on it and must not fire. Two findings
+    on the same paper are real and must survive: data_report's
+    class_balance counts n_train, not the analytic sample, and the paper
+    calls XGBoost "the best" while StackingEnsemble's AUC is higher.
+    """
+    results = json.loads(json.dumps(_R3_RESULTS))
+    paper = (
+        _ACM_FRONT_MATTER
+        + r"\Description{ROC curves.}" * 6
+        + r"""
+XGBoost achieved the best discrimination (AUC $= 0.801$, 95\% clustered CI [0.781, 0.820]) and outperformed logistic regression by a small but statistically detectable margin (AUC difference $= 0.013$, 95\% CI [0.006, 0.021]).
+
+"""
+        + _R3_IMPUTATION_SENTENCE.replace(r"\begin{document}", "").replace(r"\end{document}", "")
+        + "\n\n"
+        + _R3_TABLE_THEN_COMPARISON.replace(r"\begin{document}", "").replace(r"\end{document}", "")
+        + "\n\n" + _R3_RACE_GAP + "\n\n" + _R3_SES_GAP + "\n\n"
+        + r"However, the college enrollment outcome itself has approximately 26\% "
+        r"missingness, which may be non-random (MNAR); complete-case analysis may "
+        r"bias estimates."
+        + "\n\\end{document}\n"
+    )
+    run = _run(
+        tmp_path,
+        results__json=results,
+        data_report__json=_R3_DATA_REPORT,
+        research_spec__json={
+            "potential_limitations": [
+                "X4EVRATNDCLG has approximately 26% missingness"
+            ]
+        },
+        paper__tex=paper,
+    )
+    codes = _codes(run)
+    for fp in (
+        "INV_COMPARATOR_MISNAMED",
+        "INV_IMPUTATION_METHOD_MISMATCH",
+        "INV_STATED_GAP_ARITHMETIC",
+        "INV_PERCENTAGE_FROM_SPEC_NOT_RUN",
+        "INV_UNESCAPED_LATEX_SPECIAL",
+        "INV_SCAFFOLDING_LEAKED",
+    ):
+        assert fp not in codes, fp
+    assert "INV_CLASS_BALANCE_WRONG_SAMPLE" in codes
+    assert "INV_SUPERLATIVE_CONTRADICTED" in codes
+
+
 # ---------------------------------------------------------------------------
 # INV_CLASS_BALANCE_WRONG_SAMPLE
 # ---------------------------------------------------------------------------
