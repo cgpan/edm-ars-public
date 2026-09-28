@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import types
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -938,6 +939,53 @@ def test_the_metric_helpers_never_raise(tmp_path: Path) -> None:
     ):
         _emit_results_metric(ctx, results)
     _emit_sample_metric(ctx, {"analytic_n": object()})
+
+
+@pytest.mark.parametrize(
+    "extra, plain, label",
+    [
+        # Annotation skipped (no scope): the old wording, rounded.
+        ({}, "Best model XGBoost: RMSE = 0.614", "RMSE of the best model (XGBoost)"),
+        ({"best_model_scope": "individual"},
+         "Best single model XGBoost: RMSE = 0.614",
+         "RMSE of the best single model (XGBoost)"),
+        # The analysis itself named an ensemble: it is the best overall.
+        ({"best_model_scope": "overall"},
+         "Best model XGBoost: RMSE = 0.614", "RMSE of the best model (XGBoost)"),
+    ],
+)
+def test_the_headline_sentence_rounds_and_names_the_scope(
+    tmp_path: Path, extra: dict, plain: str, label: str
+) -> None:
+    """The progress view shows ``plain``: fifteen digits there are noise.
+    ``value`` and ``ci`` are what a reader computes with, so they keep
+    every digit."""
+    from src.events import EventSink
+    from src.orchestrator import _emit_results_metric
+
+    ctx = types.SimpleNamespace(event_sink=EventSink(str(tmp_path)))
+    results = {
+        "best_model": "XGBoost",
+        "best_metric_value": 0.6139872250513387,
+        "primary_metric": "RMSE",
+        "all_models": {
+            "XGBoost": {"rmse": 0.6139872250513387,
+                        "rmse_ci_lower": 0.5912345678901234,
+                        "rmse_ci_upper": 0.6387654321098765},
+        },
+        **extra,
+    }
+
+    _emit_results_metric(ctx, results)
+
+    (event,) = [e for e in _events(tmp_path) if e["type"] == "metric"]
+    assert event["plain"] == plain
+    assert event["data"] == {
+        "key": "RMSE",
+        "value": 0.6139872250513387,
+        "ci": [0.5912345678901234, 0.6387654321098765],
+        "label": label,
+    }
 
 
 # ---------------------------------------------------------------------------
