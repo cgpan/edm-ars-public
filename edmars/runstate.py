@@ -354,8 +354,9 @@ def fmt_duration(seconds: float | None) -> str:
 
 #: Event types whose ``plain`` text is not "recent news": too frequent,
 #: or (stage boundaries) already shown as the step rows themselves. The
-#: review gate's running cost (``gate.cost``) is in the cost line, and its
-#: text names review folders ("LSAR review cycle_102 used 7 AI calls").
+#: review gate's running cost (``gate.cost``) is in the cost line, and each
+#: finished review has its own recent line (from the gate's log, with its
+#: score), so the event's text would say the same review twice.
 _QUIET_TYPES = frozenset({"llm.start", "llm.end", "heartbeat", "agent.note", "stage.start", "stage.end",
                           "gate.cost"})
 

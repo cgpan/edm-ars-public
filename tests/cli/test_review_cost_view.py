@@ -75,7 +75,7 @@ def _review_calls(evs: list[dict[str, Any]], n: int, each: float, minute: int,
     out = [event(seq + i, "llm.end", minute, stage="REVIEWING", agent="LSAR", ok=True,
                  cost_usd=each, component="review") for i in range(n)]
     out.append(event(seq + n, "gate.cost", minute, stage="REVIEWING",
-                     plain=f"LSAR review cycle_1 used {n} AI calls; the review gate has cost "
+                     plain=f"Review 1 of cycle 1 used {n} AI calls; the review gate has cost "
                            f"US${total_cost:.2f} so far ({total_calls} AI calls)",
                      cost_usd=total_cost, n_calls=total_calls, unpriced_calls=0))
     return out
@@ -100,9 +100,9 @@ def test_the_gates_calls_are_counted_and_named_as_they_are_reported() -> None:
     assert state.review_calls == 7 and state.review_cost_usd == pytest.approx(0.07)
     assert cost_line(state) == ("Cost so far: US$0.370 (22 AI calls, including US$0.070 for "
                                 "the automated peer review)")
-    # The gate's running total is not news for the recent list: its text
-    # names a review folder, and the cost line carries the number.
-    assert not any("cycle_1" in line for line in state.recent)
+    # The gate's running total is not news for the recent list: the cost
+    # line carries the number, and the review's own line its end.
+    assert not any("used 7 AI calls" in line for line in state.recent)
 
 
 def test_a_running_total_alone_is_added_once() -> None:

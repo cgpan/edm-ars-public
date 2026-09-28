@@ -151,7 +151,7 @@ def test_the_review_gate_seen_through_the_real_sink(tmp_path: Path) -> None:
                   provider="deepseek", ok=True, prompt_tokens=20000, completion_tokens=1500,
                   cached_tokens=0, cost_usd=0.005, cost_estimated=False, component="review")
     sink.emit("gate.cost", stage="REVIEWING", cycle=1,
-              plain="LSAR review cycle_1 used 7 AI calls; the review gate has cost US$0.04 so far "
+              plain="Review 1 of cycle 1 used 7 AI calls; the review gate has cost US$0.04 so far "
                     "(7 AI calls)",
               cost_usd=0.035, n_calls=7, unpriced_calls=0, cost_estimated=False)
     gate_log("LSAR review complete (cycle 1): overall_score=3.1")
@@ -160,4 +160,4 @@ def test_the_review_gate_seen_through_the_real_sink(tmp_path: Path) -> None:
     assert cost_line(state) == ("Cost so far: US$0.037 (8 AI calls, including US$0.035 for the "
                                 "automated peer review)")
     assert "LSAR review 1 finished, score 3.1" in state.recent
-    assert not any("cycle_1" in line for line in state.recent)
+    assert not any("used 7 AI calls" in line for line in state.recent)
