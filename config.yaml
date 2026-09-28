@@ -367,6 +367,9 @@ review_gate:
   # this value is only the last resort for the deepseek provider.
   revision_model: "deepseek-v4-pro"
   revision_max_tokens: 16000
+  # A reply cut off at that limit is asked for once more with this budget
+  # (default: twice revision_max_tokens).
+  # revision_retry_max_tokens: 32000
 
 # V5 Arc T - ideation layer (idea tournament + venue routing).
 # Closes backlog H5: the code defaults now live here; every module reads

@@ -622,7 +622,7 @@ class TestReplyParsing:
 
 
 # ---------------------------------------------------------------------------
-# The no-op log used to claim a recompile that still happened
+# A no-op revision: the log once claimed a recompile that still happened
 # ---------------------------------------------------------------------------
 
 
@@ -658,20 +658,18 @@ class TestNoOpLogIsHonest:
         gate.run_gate()
         return logs, calls
 
-    def test_message_does_not_claim_a_skipped_recompile(
-        self, tmp_path: Path
-    ) -> None:
+    def test_a_no_op_ends_the_gate_and_says_so(self, tmp_path: Path) -> None:
+        """The no-op message once claimed a skipped recompile while cycle 2
+        recompiled and re-reviewed the unchanged paper anyway. The Mac study
+        (round 3) paid for three more reviews that way, and their lower
+        median replaced the score. A no-op now ends the gate, and the
+        message says exactly that."""
         logs, calls = self._run_gate_with_noop_revision(tmp_path)
-        noop = [m for m in logs if "no-op" in m]
-        assert noop, logs
-        assert "skipping rewrite and recompile" not in noop[0]
-        assert "left unchanged" in noop[0]
-        assert "next cycle still recompiles" in noop[0].replace("\n", " ")
-        # The claim is now true to what the loop does: paper.tex is never
-        # rewritten, but cycle 2 does prepare (and therefore compile) the
-        # unchanged manuscript again.
+        [line] = [m for m in logs if "could not revise the paper" in m]
+        assert "ends with cycle 1's score" in line
+        assert "no further review of the unchanged paper" in line
         assert calls["compile"] == 0
-        assert calls["prepare"] == 2
+        assert calls["prepare"] == 1
 
     def test_paper_tex_is_untouched_by_a_no_op(self, tmp_path: Path) -> None:
         self._run_gate_with_noop_revision(tmp_path)

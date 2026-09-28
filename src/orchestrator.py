@@ -486,6 +486,12 @@ def _revision_problem(summary: Any) -> Optional[str]:
     why = summary.get("revision_unavailable_reason")
     raw = summary.get("revision_failures")
     failures = [f for f in raw if isinstance(f, dict)] if isinstance(raw, list) else []
+    cycle = summary.get("final_score_cycle")
+    ending = (
+        f"the gate ended with cycle {cycle}'s score"
+        if isinstance(cycle, int) and not isinstance(cycle, bool)
+        else "the gate ended with the last reviewed score"
+    ) + " instead of reviewing the unchanged paper again."
     if why:
         return (
             "The review gate could not revise the paper between cycles: "
@@ -495,7 +501,13 @@ def _revision_problem(summary: Any) -> Optional[str]:
         codes = sorted({str(f.get("code") or "UNKNOWN") for f in failures})
         return (
             f"The review gate's revision failed {len(failures)} time(s) "
-            f"({', '.join(codes)}); later cycles reviewed an unrevised paper."
+            f"({', '.join(codes)}); {ending}"
+        )
+    if summary.get("revision_failed"):
+        reason = summary.get("revision_failure_reason") or "no reason recorded"
+        return (
+            "The review gate could not revise the paper "
+            f"({_one_line(reason, 300)}); {ending}"
         )
     return None
 
@@ -1106,9 +1118,13 @@ class Orchestrator:
         failed review scored 0.0, which is what the old record said (B2).
 
         A gate that ran also carries ``final_manuscript_reviewed`` (False
-        when paper.tex was revised after the review ``score`` comes from)
-        and ``last_cycle_failure`` (why the next cycle reviewed nothing),
-        both None when the summary does not say.
+        when paper.tex was revised after the review ``score`` comes from),
+        ``last_cycle_failure`` (why the next cycle reviewed nothing),
+        ``final_score_from`` ("original" or "revised": which manuscript
+        the score was given to) and ``revision_failed`` /
+        ``revision_failure_reason`` (a revision was due and no changed
+        paper came of it, so the gate stopped), each None when the
+        summary does not say.
         """
         rg_cfg = self.config.get("review_gate", {}) or {}
         enabled = bool(rg_cfg.get("enabled", False))
@@ -1155,6 +1171,16 @@ class Orchestrator:
             block["last_cycle_failure"] = (
                 _one_line(failure, 200) if failure else None
             )
+            # Which manuscript the score was given to: "original" (the
+            # Writer's) or "revised" (after the gate revised it).
+            source = res.get("final_score_from")
+            block["final_score_from"] = (
+                source if source in ("original", "revised") else None
+            )
+            failed = res.get("revision_failed")
+            block["revision_failed"] = failed if isinstance(failed, bool) else None
+            why = res.get("revision_failure_reason")
+            block["revision_failure_reason"] = _one_line(why, 300) if why else None
         else:
             skip = res.get("skip_reason")
             if not skip and res.get("error"):
@@ -1336,12 +1362,24 @@ class Orchestrator:
                     )
                 else:
                     cost_str += " (estimated: a rate is unverified)"
+            # The review gate's share, when it spent anything. Kept after
+            # the counts so the line still starts "Run cost: $X over N LLM
+            # calls", which the edmars live view reads.
+            review = (payload.get("by_component") or {}).get("review") or {}
+            review_str = ""
+            if review.get("n_calls"):
+                review_cost = review.get("cost_usd")
+                review_str = (
+                    "; the review gate: "
+                    + ("not priced" if review_cost is None else f"${review_cost:.4f}")
+                    + f" over {review['n_calls']} of those calls"
+                )
             self._log(
                 "Orchestrator",
                 f"Run cost: {cost_str} over {payload['n_calls']} LLM calls "
                 f"({payload['prompt_tokens']:,} in / "
                 f"{payload['completion_tokens']:,} out; "
-                f"{payload['cached_prompt_tokens']:,} cached) "
+                f"{payload['cached_prompt_tokens']:,} cached{review_str}) "
                 "-> run_cost.json",
             )
             return payload
@@ -2234,6 +2272,7 @@ class Orchestrator:
             self.ctx.current_state = PipelineState.VERIFYING
             return
         self._log("Orchestrator", "Starting REVIEWING stage (LSAR quality gate)")
+        gate: Optional[ReviewGate] = None
         try:
             gate = ReviewGate(
                 config=self.config,
@@ -2306,6 +2345,8 @@ class Orchestrator:
                 plain="The review gate could not run",
                 reason=self.ctx.review_gate_result["skip_reason"],
             )
+
+        self._keep_gate_usage(gate)
 
         # The gate records a verdict; VERIFYING is what decides whether
         # the run is releasable. Proceeding unconditionally here is fine
@@ -2512,6 +2553,16 @@ class Orchestrator:
                     else ""
                 )
                 if gate.get("final_manuscript_reviewed") is False
+                else ""
+            ),
+            (
+                "the review gate could not revise the paper"
+                + (
+                    f" ({gate['revision_failure_reason']})"
+                    if gate.get("revision_failure_reason")
+                    else ""
+                )
+                if gate.get("revision_failed")
                 else ""
             ),
             "critic verdict was not PASS" if unverified else "",
@@ -3129,6 +3180,33 @@ class Orchestrator:
         log_path = os.path.join(self.ctx.output_dir, "pipeline.log")
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"{entry['timestamp']} [{agent}] {message}\n")
+
+    def _keep_gate_usage(self, gate: Any) -> None:
+        """Copy the review gate's metered calls into ``ctx.log``.
+
+        The gate writes each call to token_usage.jsonl as it happens; the
+        checkpoint copy is the second record every agent call already has
+        (see ``cost.load_usage_from_checkpoint``), so a lost or truncated
+        usage file no longer drops the review's share of the cost.
+        Never raises.
+        """
+        for usage in list(getattr(gate, "usage_records", None) or []):
+            try:
+                self.ctx.log.append(
+                    {
+                        "timestamp": usage.timestamp,
+                        "agent": usage.agent,
+                        "tokens_used": usage.total_tokens,
+                        "prompt_tokens": usage.prompt_tokens,
+                        "completion_tokens": usage.completion_tokens,
+                        "cached_prompt_tokens": usage.cached_prompt_tokens,
+                        "model": usage.model,
+                        "component": usage.component,
+                        "time_source": usage.time_source,
+                    }
+                )
+            except Exception:  # noqa: BLE001 - accounting is never fatal
+                continue
 
     def _check_cost(self) -> None:
         """Compare measured spend against the run budget (K1).
