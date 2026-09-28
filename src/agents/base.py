@@ -39,6 +39,17 @@ _PROVIDER_OPENAI = "openai"
 _PROVIDER_DEEPSEEK = "deepseek"
 
 
+def _finish_reason(raw: Any) -> str | None:
+    """A provider's stop reason, with "hit the token limit" as "length".
+
+    OpenAI-compatible APIs (DeepSeek, OpenAI) say ``length``; Anthropic
+    and MiniMax say ``max_tokens``.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    return "length" if raw in ("length", "max_tokens") else raw
+
+
 def parse_llm_json(text: str) -> dict:
     """Strip markdown code fences and parse JSON."""
     text = re.sub(r"^```(?:json)?\s*\n?", "", text.strip(), flags=re.MULTILINE)
@@ -260,6 +271,11 @@ class BaseAgent(ABC):
         self.model = self._resolve_model(provider_cfg, agent_key, config)
         self.client: Any = build_client(provider_cfg, self._llm_settings)
         self._pricing: dict | None = None
+        #: Why the provider stopped its last answer, normalised: "length"
+        #: when it hit max_tokens, else the provider's own word ("stop",
+        #: "end_turn") or None when it did not say. A cut-off JSON answer
+        #: otherwise surfaces only as "Unterminated string" (round 3).
+        self.last_finish_reason: str | None = None
 
         # Phase 3b.10 / §10.2: per-stage max_tokens resolution.
         # Stash the resolved value as a default; per-call max_tokens
@@ -519,6 +535,7 @@ class BaseAgent(ABC):
         would report on figures it never saw.
         """
         max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+        self.last_finish_reason = None
         temperature = temperature_override if temperature_override is not None else self.temperature
         # Resolve {{SKILLS}} placeholder against the orchestrator-supplied
         # skill list once per call. This is a no-op for prompts without
@@ -588,6 +605,9 @@ class BaseAgent(ABC):
                     temperature=temperature,
                 )
                 full_text = response.choices[0].message.content or ""
+                self.last_finish_reason = _finish_reason(
+                    getattr(response.choices[0], "finish_reason", None)
+                )
                 metered["usage"] = self._meter(response)
                 if capture_dir is not None:
                     try:
@@ -624,6 +644,9 @@ class BaseAgent(ABC):
                     extra_body={"thinking": {"type": "disabled"}},
                 )
                 full_text = response.choices[0].message.content or ""
+                self.last_finish_reason = _finish_reason(
+                    getattr(response.choices[0], "finish_reason", None)
+                )
                 metered["usage"] = self._meter(response)
                 if capture_dir is not None:
                     try:
@@ -643,6 +666,9 @@ class BaseAgent(ABC):
                 messages=[{"role": "user", "content": user_message}],
             ) as stream:
                 final_message = stream.get_final_message()
+            self.last_finish_reason = _finish_reason(
+                getattr(final_message, "stop_reason", None)
+            )
             # Phase 3b.7 / sub-phase A.1: MiniMax-M2.7 emits "thinking"
             # content blocks alongside text (similar to Anthropic
             # extended thinking). The SDK's get_final_text() raises

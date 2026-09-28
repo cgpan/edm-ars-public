@@ -51,9 +51,12 @@
 \begin{document}
 
 %%
-%% TITLE — Writer fills this in
+%% TITLE — Writer fills this in. \shorttitle is the running head printed
+%% at the top of every page (at most 60 characters); the pipeline derives
+%% one from the title when it is left out or too long.
 %%
 \title{%%PLACEHOLDER:TITLE%%}
+\renewcommand{\shorttitle}{%%PLACEHOLDER:SHORTTITLE%%}
 
 %%
 %% AUTHORS — fixed, do not modify

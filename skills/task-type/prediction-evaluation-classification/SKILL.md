@@ -99,13 +99,18 @@ execution. Save at 150 dpi minimum.
 
 ## Best-model selection
 
-`results.best_model` = the family with the highest test-set AUC.
-Ties are broken by simpler model first (LR > ElasticNet > RF > XGBoost
-> MLP).
+`results.best_model` = the **individual** model family with the
+highest test-set AUC. StackingEnsemble is never `best_model`: every
+interpretability output comes from the best individual model (SPEC
+§4.3; see `shap-explainer-selection`). Ties are broken by simpler model
+first (LR > ElasticNet > RF > XGBoost > MLP).
 
-StackingEnsemble appears in `model_comparison.csv` but is excluded
-from the SHAP/interpretability "best individual model" — see
-`shap-explainer-selection` for that exclusion.
+StackingEnsemble still appears in `all_models` and
+`model_comparison.csv` like every other model. After the analysis the
+orchestrator adds `best_model_scope` (`"individual"`),
+`best_overall_model` and `best_overall_metric_value` (ensemble
+included) to results.json from `all_models`; do not write those three
+fields yourself.
 
 ## Suspicious AUC flag
 

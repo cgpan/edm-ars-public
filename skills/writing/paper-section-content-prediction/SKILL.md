@@ -110,6 +110,16 @@ summarize its contribution (1–2 sentences) and position the present
 study against it. Conclude with an explicit statement of how this
 study extends the literature.
 
+## Methods — Data
+
+- The outcome's split in the analytic sample is
+  `data_report.class_balance` (its `sample` reads "analytic sample
+  (train + test)"): report its counts and shares with `analytic_n`.
+  `class_balance_train` and `class_balance_test` are the two splits; if
+  you report them, say which split each is.
+- Counts that do not add up to `analytic_n` belong to a split. Never
+  explain the difference as excluded or missing students.
+
 ## Methods — Models
 
 List all model families present in `results.json.all_models`. If MLP
@@ -123,8 +133,19 @@ distribution of the test set for unbiased evaluation."
 ## Results — Model Comparison
 
 - All models' primary metric in a booktabs table.
-- Best model with 95% CI in the exact format
+- The best individual model with 95% CI in the exact format
   `metric = X.XX, 95\% CI [X.XX, X.XX]`.
+- `results.best_model` is the best **individual** model
+  (`best_model_scope: "individual"`): the stacking ensemble is left out
+  because nothing interprets it. Call it "the best individual model", or
+  give its metric as the highest "among the individual models". Never
+  write that it "achieved the best discrimination" or "was the best
+  model" without that qualifier.
+- When `best_overall_model` is not `best_model` (the ensemble scored
+  higher), say so with both numbers in the same paragraph, e.g. "The
+  stacking ensemble's AUC (0.802) was marginally above that of XGBoost
+  (0.801), the best individual model and the one interpreted below."
+  Never rank the individual model above a model that outscored it.
 - For imbalanced classification: also report F2 and Balanced Accuracy
   (table or text) and note that Accuracy alone is misleading for
   imbalanced data.

@@ -284,6 +284,67 @@ def _sentences(text: str) -> list[str]:
     return re.split(r"(?<=[.!?])\s+", text)
 
 
+#: Blocks that are never prose: floats, table bodies and environments
+#: LaTeX does not typeset as text.
+_NON_PROSE_ENV = re.compile(
+    r"(?s)\\begin\s*\{((?:figure|table|tabular|tabularx|longtable|threeparttable"
+    r"|wrapfigure|wraptable|sidewaystable|sidewaysfigure|CCSXML|comment"
+    r"|verbatim|Verbatim|lstlisting|minted|thebibliography)\*?)\}"
+    r".*?\\end\s*\{\1\}"
+)
+_UNESCAPED_COMMENT = re.compile(r"(?<!\\)%.*")
+
+
+def _drop_command_with_arg(tex: str, command: str) -> str:
+    r"""Remove every ``\command[...]{...}``, matching braces to any depth.
+
+    A caption routinely nests braces (``$n = 3{,}562$``), so a
+    ``[^}]*`` pattern stops at the first ``}`` and leaves the rest of the
+    caption behind as a fragment of prose.
+    """
+    out: list[str] = []
+    i = 0
+    pat = re.compile(r"\\" + command + r"\*?\s*(?:\[[^\]]*\]\s*)*\{")
+    while True:
+        m = pat.search(tex, i)
+        if m is None:
+            out.append(tex[i:])
+            return "".join(out)
+        out.append(tex[i:m.start()])
+        depth, j = 1, m.end()
+        while j < len(tex) and depth:
+            if tex[j] == "\\":
+                j += 2
+                continue
+            depth += {"{": 1, "}": -1}.get(tex[j], 0)
+            j += 1
+        out.append("\n\n")
+        i = j
+
+
+def _prose_sentences(tex: str) -> list[str]:
+    """Sentences of body prose, with nothing but prose in any of them.
+
+    ``_sentences`` splits on terminal punctuation only, so a table ends
+    up inside whichever sentence happens to surround it. On one real
+    paper the header row ended at "Bal. Acc.", the split fell there, and
+    the next "sentence" was every model-name row of the table followed by
+    the paper's actual comparison sentence -- so a check read five model
+    names into a sentence that names two. Floats, table bodies, captions
+    and non-typeset environments are removed first and replaced by a
+    paragraph break, and a paragraph break always ends a sentence.
+    """
+    body = tex.split(r"\begin{document}", 1)[-1]
+    body = _UNESCAPED_COMMENT.sub("", body)
+    body = _NON_PROSE_ENV.sub("\n\n", body)
+    for cmd in ("caption", "Description"):
+        body = _drop_command_with_arg(body, cmd)
+    out: list[str] = []
+    for para in re.split(r"\n\s*\n", body):
+        out.extend(s for s in _sentences(para.strip()) if s.strip())
+    return out
+
+
 def _reads_metric_as_positive_class(paper: str) -> str | None:
     """Return the offending sentence, or None.
 
@@ -373,6 +434,36 @@ def check_macro_metric_mislabel(a: RunArtifacts) -> list[Finding]:
     return out
 
 
+#: A sentence that reports the paired model comparison by name.
+_TEST_REPORT = re.compile(r"\bAUC difference\b|\bnext-best\b|\bnext best\b", re.IGNORECASE)
+#: What turns a sentence holding the rounded difference into a report of
+#: the test rather than a coincidence of digits.
+_COMPARISON_CUE = re.compile(
+    r"differen|compar|bootstrap|\\Delta|\bdelta\b|\bversus\b|\bvs\b|outperform"
+    r"|runner-up|\bpaired\b|significan|exceed|advantage|margin|improv"
+    r"|\b(?:higher|lower|better|worse|greater|smaller) than\b",
+    re.IGNORECASE,
+)
+
+
+def _model_name_pattern(name: str) -> re.Pattern:
+    """Match a results.json model key however prose spells it.
+
+    Keys are CamelCase identifiers; prose writes "Logistic Regression",
+    "random forest", "Stacking Ensemble". Matching the key literally saw
+    only XGBoost in "The paired cluster-bootstrap test of the AUC
+    difference between Logistic Regression and the runner-up (Random
+    Forest)", the one sentence in which a paper named the wrong
+    comparator. Word boundaries keep a short key from matching inside a
+    longer word.
+    """
+    parts: list[str] = []
+    for chunk in re.split(r"[^A-Za-z0-9]+", name):
+        parts += re.findall(r"[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|[A-Z]+|\d+", chunk)
+    body = r"[\s\-]*".join(re.escape(p) for p in parts) if parts else re.escape(name)
+    return re.compile(r"(?<![A-Za-z0-9])" + body + r"s?(?![A-Za-z0-9])", re.IGNORECASE)
+
+
 def check_comparator_unnamed(a: RunArtifacts) -> list[Finding]:
     """The comparison the paper names is not the comparison that was run.
 
@@ -424,16 +515,25 @@ def check_comparator_unnamed(a: RunArtifacts) -> list[Finding]:
         # block-incremental sentence and the sentence that actually names
         # the comparator ("...between XGBoost and the next-best
         # individual model (RandomForest)...") came later.
+        #
+        # Sentences come from prose only. A results table sitting just
+        # above the comparison sentence used to be split into it, and the
+        # table's model-name rows were read as models the sentence names.
         rounded = {f"{abs(diff):.{k}f}" for k in (3, 4)} if diff is not None else set()
         candidates = [
             s
-            for s in _sentences(paper)
-            if re.search(r"\bAUC difference\b|\bnext-best\b|\bnext best\b", s, re.IGNORECASE)
-            or any(r in s for r in rounded)
+            for s in _prose_sentences(paper)
+            if _TEST_REPORT.search(s)
+            # The rounded value alone is not enough: "All five models
+            # performed within 0.010 AUC of one another: ..." lists every
+            # model beside a number that happens to equal the difference,
+            # and reports no test.
+            or (any(r in s for r in rounded) and _COMPARISON_CUE.search(s))
         ]
+        patterns = {name: _model_name_pattern(name) for name in metrics}
         for window in candidates:
             named_models = [
-                name for name in metrics if re.search(re.escape(name), window)
+                name for name, pat in patterns.items() if pat.search(window)
             ]
             wrong = [n for n in named_models if n not in truth]
             if wrong:
@@ -1501,13 +1601,33 @@ def check_bibliography_ampersands(a: RunArtifacts) -> list[Finding]:
     ]
 
 
+_DOCUMENTCLASS = re.compile(r"\\documentclass\s*(?:\[[^\]]*\])?\s*\{\s*([^}\s]+)\s*\}")
+
+
+def _document_class(tex: str) -> str | None:
+    r"""The class the manuscript loads, ignoring commented-out lines.
+
+    The journal template carries a commented ``%\documentclass`` line
+    beside the live one, so the first textual match is not enough.
+    """
+    m = _DOCUMENTCLASS.search(re.sub(r"(?<!\\)%.*", "", tex))
+    return m.group(1) if m else None
+
+
 def check_scaffolding_leaked(a: RunArtifacts) -> list[Finding]:
-    """Pipeline machinery typeset as reader-facing prose."""
+    """Pipeline machinery typeset as reader-facing prose.
+
+    ``\\Description`` is acmart's figure alt text. Under acmart it is the
+    required accessibility markup and prints nothing; under any other
+    class it is undefined. The pattern used to be counted in every paper,
+    whatever its class, so every ACM paper the template produced was told
+    it had leaked scaffolding.
+    """
     paper = a.paper
     if paper is None:
         return []
+    doc_class = _document_class(paper)
     patterns = [
-        (r"\\Description\{", "acmart \\Description in a non-acmart class"),
         (r"(?<![A-Za-z])\(P[1-9]\)", "bare pipeline step codes (P1)…(P6)"),
         (r"```", "markdown code fence"),
         (r"%%PLACEHOLDER:", "unfilled template placeholder"),
@@ -1515,10 +1635,21 @@ def check_scaffolding_leaked(a: RunArtifacts) -> list[Finding]:
         (r"\bis stated before it is applied\b", "spec checklist text transcribed as prose"),
         (r"\[---|\+---|—% confidence", "placeholder dash where a number belongs"),
     ]
+    if doc_class != "acmart":
+        patterns.insert(
+            0,
+            (
+                r"\\Description\{",
+                f"acmart \\Description in a non-acmart class ({doc_class or 'none declared'})",
+            ),
+        )
     out: list[Finding] = []
     for pat, label in patterns:
         hits = re.findall(pat, paper)
         if hits:
+            evidence: dict = {"pattern": pat, "count": len(hits)}
+            if pat.startswith(r"\\Description"):
+                evidence["document_class"] = doc_class
             out.append(
                 Finding(
                     code="INV_SCAFFOLDING_LEAKED",
@@ -1529,7 +1660,7 @@ def check_scaffolding_leaked(a: RunArtifacts) -> list[Finding]:
                         "legible to a reviewer as machine generation."
                     ),
                     artifact=a.paper_name or "paper.tex",
-                    evidence={"pattern": pat, "count": len(hits)},
+                    evidence=evidence,
                 )
             )
     return out
@@ -1673,8 +1804,12 @@ def check_prose_numeral_unbound(a: RunArtifacts) -> list[Finding]:
 #: sentence, and "RMSE range 0.667" is not a subtraction at all. Only
 #: "gap"/"disparity" survive, and only in a sentence that also frames two
 #: extremes, which is the shape the real defects have.
+#:
+#: The optional second group is a unit that puts the gap on a x100 scale:
+#: "a gap of 9.2 percentage points" between AUCs of 0.835 and 0.743.
 _GAP_WORD = re.compile(
-    r"\b(?:gap|disparity)\b(?:\s+of)?\s*[^.\d]{0,20}(\d+\.\d+)",
+    r"\b(?:gap|disparity)\b(?:\s+of)?\s*[^.\d]{0,20}(\d+\.\d+)"
+    r"(\s*(?:\\?%|percent(?:age)?(?:[- ]points?)?\b|points?\b|pp\b))?",
     re.IGNORECASE,
 )
 _EXTREMES_FRAMING = re.compile(
@@ -1694,6 +1829,15 @@ def check_stated_gap_arithmetic(a: RunArtifacts) -> list[Finding]:
     whose own cells give 0.1088. Both numbers are real and both
     subtractions are wrong, so every check that binds numerals
     individually passes them.
+
+    Two things a correct sentence does that this must allow. It
+    subtracts the unrounded values: "0.678 ... to 0.822, a gap of 14.3
+    percentage points" is 0.8215 - 0.6784, although the printed values
+    differ by 0.144. So the tolerance is the rounding of all three
+    printed numbers, not of the gap alone. And it states a gap between
+    proportions in percentage points, which is the difference times 100;
+    that scale is accepted only when the gap carries such a unit and
+    both operands lie in [0, 1].
     """
     paper = a.paper
     if paper is None:
@@ -1701,30 +1845,42 @@ def check_stated_gap_arithmetic(a: RunArtifacts) -> list[Finding]:
     out: list[Finding] = []
     seen: set = set()
     for s in _sentences(paper):
-        gaps = _GAP_WORD.findall(s)
+        gaps = [(m.group(1), bool(m.group(2))) for m in _GAP_WORD.finditer(s)]
         if not gaps or not _EXTREMES_FRAMING.search(s):
             continue
-        values = [float(v) for v in _DECIMAL.findall(s)]
-        for g in gaps:
+        printed = _DECIMAL.findall(s)
+        values = [float(v) for v in printed]
+        for g, in_points in gaps:
             gv = float(g)
-            others = [v for v in values if v != gv]
+            others = [(float(v), _half_unit(v)) for v in printed if float(v) != gv]
             if len(others) < 2:
                 continue
-            # Tolerance is the printed precision of the gap itself.
-            dec = len(g.split(".")[1])
-            tol = 0.5 * 10 ** (-dec) * 1.02 + 1e-12
-            diffs = {
-                round(abs(x - y), 10)
-                for i, x in enumerate(others)
-                for y in others[i + 1:]
-            }
-            if any(abs(d - gv) <= tol for d in diffs):
+            h_gap = _half_unit(g)
+            pairs = [
+                (x, hx, y, hy)
+                for i, (x, hx) in enumerate(others)
+                for (y, hy) in others[i + 1:]
+            ]
+            if any(
+                abs(abs(x - y) - gv) <= (h_gap + hx + hy) * 1.02 + 1e-12
+                for x, hx, y, hy in pairs
+            ):
                 continue
-            key = (g, tuple(sorted(others)))
+            if in_points and any(
+                0 <= x <= 1 and 0 <= y <= 1
+                and abs(100 * abs(x - y) - gv) <= (h_gap + 100 * (hx + hy)) * 1.02 + 1e-9
+                for x, hx, y, hy in pairs
+            ):
+                continue
+            key = (g, tuple(sorted(v for v, _ in others)))
             if key in seen:  # abstract and body print the same sentence
                 continue
             seen.add(key)
+            diffs = {round(abs(x - y), 10) for x, _, y, _ in pairs}
             plausible = sorted(diffs)[:4]
+            shown = ", ".join(f"{d:g}" for d in plausible)
+            if in_points:
+                shown += " (x100: " + ", ".join(f"{100 * d:g}" for d in plausible) + ")"
             out.append(
                 Finding(
                     code="INV_STATED_GAP_ARITHMETIC",
@@ -1732,14 +1888,14 @@ def check_stated_gap_arithmetic(a: RunArtifacts) -> list[Finding]:
                     message=(
                         f"A stated gap of {g} is not the difference of any "
                         f"pair of numbers in its own sentence "
-                        f"(differences available: "
-                        f"{', '.join(f'{d:g}' for d in plausible)}). Every "
+                        f"(differences available: {shown}). Every "
                         "number here binds to an artifact individually; the "
                         "subtraction between them does not."
                     ),
                     artifact=a.paper_name or "paper.tex",
                     evidence={
                         "stated_gap": g,
+                        "stated_in_points": in_points,
                         "values_in_sentence": values,
                         "available_differences": plausible,
                         "sentence": s.strip()[:300],
@@ -1748,6 +1904,12 @@ def check_stated_gap_arithmetic(a: RunArtifacts) -> list[Finding]:
                 )
             )
     return out
+
+
+def _half_unit(printed: str) -> float:
+    """Half a unit in the last printed place: 0.822 -> 0.0005, 14.3 -> 0.05."""
+    decimals = len(printed.split(".")[1]) if "." in printed else 0
+    return 0.5 * 10 ** (-decimals)
 
 
 _MEAN_CLUSTER = re.compile(
@@ -1907,12 +2069,17 @@ _IMPUTATION_WORDS = {
     "mean": ("mean",),
     "iterativeimputer": ("iterativeimputer", "multiple imputation", "mice", "chained"),
 }
+#: "iterative imputation" is how prose names IterativeImputer. Without it
+#: the only claim one correct sentence offered was the "median
+#: imputation" that FOLLOWED five IterativeImputer variables, and all five
+#: were reported as median-imputed.
+_IMPUTATION_WORDS["iterative"] = _IMPUTATION_WORDS["iterativeimputer"]
 
 
 #: Both orders the papers actually use: "mode-imputed" / "mode
 #: imputation", and "imputed with the mode".
 _IMPUTATION_CLAIM = re.compile(
-    r"\b(?:(mode|median|mean|IterativeImputer|multiple imputation)"
+    r"\b(?:(mode|median|mean|IterativeImputer|iterative|multiple imputation)"
     r"[- ]?(?:imputed|imputation|imputing)"
     # "imputed WITH the mode", and also "imputed missing values USING
     # IterativeImputer" -- the short gap matters, because without it the
@@ -1920,7 +2087,7 @@ _IMPUTATION_CLAIM = re.compile(
     # second one, and four variables were attributed to it.
     r"|imput(?:ed|ing)\s+(?:\w+\s+){0,3}?(?:with|using|by|via)\s+"
     r"(?:the\s+|their\s+)?"
-    r"(mode|median|mean|IterativeImputer|multiple imputation))",
+    r"(mode|median|mean|IterativeImputer|iterative|multiple imputation))",
     re.IGNORECASE,
 )
 
@@ -1931,6 +2098,30 @@ def _enclosing_sentence(text: str, pos: int) -> tuple[str, int]:
     end = text.find(".", pos)
     end = end + 1 if end != -1 else len(text)
     return text[start:end], start
+
+
+#: Where one clause of a methods sentence ends and the next begins: a
+#: semicolon, or a comma before a coordinating conjunction.
+_CLAUSE_BREAK = re.compile(r";|,\s+(?=(?:and|but|while|whereas)\b)")
+
+
+def _clause_span(sentence: str, pos: int) -> tuple[int, int]:
+    """Start and end offsets of the clause of *sentence* holding *pos*.
+
+    Breaks inside parentheses or brackets are not clause breaks: "(X1RACE,
+    X1SEX, and X1LOCALE)" is one list.
+    """
+    lo, hi = 0, len(sentence)
+    for m in _CLAUSE_BREAK.finditer(sentence):
+        prefix = sentence[: m.start()]
+        if prefix.count("(") > prefix.count(")") or prefix.count("[") > prefix.count("]"):
+            continue
+        if m.start() < pos:
+            lo = m.end()
+        else:
+            hi = m.start()
+            break
+    return lo, hi
 
 
 def check_imputation_method_mismatch(a: RunArtifacts) -> list[Finding]:
@@ -1972,9 +2163,18 @@ def check_imputation_method_mismatch(a: RunArtifacts) -> list[Finding]:
             # four spurious findings on one paper. When no claim precedes
             # the variable -- "Categorical variables (X2STUEDEXPCT, ...)
             # were imputed with the mode" -- take the first that follows.
+            #
+            # And look inside the variable's own clause first. "Continuous
+            # predictors were imputed using IterativeImputer; categorical
+            # predictors (X1RACE, X1SEX) were imputed using the mode" has
+            # a claim BEFORE X1RACE, but in the other clause; the one that
+            # names its method comes after the variables. Only a clause
+            # with no claim of its own falls back to the whole sentence.
             pos = vm.start() - sent_start
-            preceding = [m for m in claims if m.end() <= pos]
-            nearest = preceding[-1] if preceding else claims[0]
+            lo, hi = _clause_span(sent, pos)
+            pool = [m for m in claims if lo <= m.start() < hi] or claims
+            preceding = [m for m in pool if m.end() <= pos]
+            nearest = preceding[-1] if preceding else pool[0]
             claimed = (nearest.group(1) or nearest.group(2) or "").strip().lower()
             if not claimed:
                 continue
@@ -2052,6 +2252,56 @@ def _outcome_rates(a: RunArtifacts) -> set:
     return out
 
 
+_SAMPLE_COUNTS = ("original_n", "analytic_n", "n_train", "n_test")
+_SPLIT_COUNTS = ("n_train", "n_test")
+
+
+def _count_ratios(dr: dict) -> tuple[set, set]:
+    """Percentages one division away from data_report's own counts.
+
+    "The outcome itself has approximately 26% missingness" is
+    1 - 17,335 / 23,503 = 26.2%, and no field of any artifact holds 26.2:
+    the report stores the two counts, not their ratio. Every ratio of two
+    sample sizes (and its complement) is included, and for each variable
+    in missingness_summary its missing count over the file, the analytic
+    sample, and its own observed-plus-missing total.
+
+    Returned in two sets. A ratio involving n_train or n_test is a split
+    share, about 20 or 80 in nearly every run by design, so at half a
+    unit it would excuse every "20%" a spec ever planned. Replayed over
+    the archive that way, it excused three sentences whose 20% had
+    nothing to do with the split (two missingness thresholds, one
+    hypothetical "top 20%"). Split shares come back separately, to be
+    matched only at the fixed 0.05.
+    """
+    loose: set = set()
+    split: set = set()
+    named = [(k, _f(dr.get(k))) for k in _SAMPLE_COUNTS]
+    counts = [(k, v) for k, v in named if v and v > 0]
+    for kn, num in counts:
+        for kd, den in counts:
+            if 0 < num < den:
+                p = 100.0 * num / den
+                bucket = split if {kn, kd} & set(_SPLIT_COUNTS) else loose
+                bucket |= {p, 100.0 - p}
+    miss = dr.get("missingness_summary")
+    if isinstance(miss, dict):
+        bases = [_f(dr.get("original_n")), _f(dr.get("analytic_n"))]
+        for info in miss.values():
+            if not isinstance(info, dict):
+                continue
+            n_miss = _f(info.get("n_missing"))
+            if n_miss is None:
+                continue
+            n_obs = _f(info.get("n_observed", info.get("n_present")))
+            own = n_miss + n_obs if n_obs is not None else None
+            for base in (*bases, own):
+                if base and base > 0 and 0 <= n_miss <= base:
+                    p = 100.0 * n_miss / base
+                    loose |= {p, 100.0 - p}
+    return loose, split
+
+
 def check_percentage_from_spec_not_run(a: RunArtifacts) -> list[Finding]:
     """A percentage that matches the plan and nothing the run computed.
 
@@ -2078,6 +2328,12 @@ def check_percentage_from_spec_not_run(a: RunArtifacts) -> list[Finding]:
     _all_numbers(a.results, computed)
     computed |= {round(x * 100, 4) for x in list(computed) if 0 < x < 1}
     computed |= _outcome_rates(a)
+    # Ratios of the report's own counts are held to the printed precision
+    # ("approximately 26%" is 26.2%). The rest of the computed pool keeps
+    # the fixed 0.05: it holds hundreds of values, and at half a unit a
+    # whole number would find a neighbour in it almost every time.
+    ratios, split_shares = _count_ratios(a.data_report)
+    computed |= split_shares
     if not planned or not computed:
         return []
 
@@ -2093,6 +2349,9 @@ def check_percentage_from_spec_not_run(a: RunArtifacts) -> list[Finding]:
         if not any(abs(v - s) < 0.05 for s in planned):
             continue
         if any(abs(v - c) < 0.05 for c in computed):
+            continue
+        tol = _half_unit(m.group(1)) * 1.02 + 1e-9
+        if any(abs(v - r) <= tol for r in ratios):
             continue
         seen.add(v)
         ctx = re.sub(r"\s+", " ", body[max(0, m.start() - 140) : m.end() + 60])
@@ -2684,14 +2943,32 @@ def check_unbalanced_environments(a: RunArtifacts) -> list[Finding]:
     ]
 
 
+#: Environments LaTeX never typesets as text. acmart's CCSXML block is a
+#: comment environment holding XML (``<concept_id>``, ``<concept_desc>``),
+#: and it sits after ``\begin{document}`` in the template, so every ACM
+#: paper carried twelve "unescaped" underscores that are not in its text.
+_UNTYPESET_ENV = re.compile(r"(?s)\\begin\{(CCSXML|comment)\}.*?\\end\{\1\}")
+#: Display math, where ``_`` is a subscript and ``&`` an alignment point.
+_DISPLAY_MATH_ENV = re.compile(
+    r"(?s)\\begin\{(equation|align|alignat|gather|multline|flalign|eqnarray"
+    r"|displaymath|math)(\*?)\}.*?\\end\{\1\2\}"
+)
+
+
 def _prose_only(tex: str) -> str:
     """Body text with math, verbatim, comments and macro args removed."""
     body = tex.split(r"\begin{document}", 1)[-1]
     body = _VERBATIM.sub(" ", body)
     body = _COMMENT.sub(" ", body)
+    body = _UNTYPESET_ENV.sub(" ", body)
+    body = _DISPLAY_MATH_ENV.sub(" ", body)
     body = _MATH.sub(" ", body)
-    # Drop the arguments of commands where a bare special is legitimate.
-    body = re.sub(r"\\(?:url|href|path|verb|label|ref|[a-zA-Z]*cite[a-zA-Z]*)"
+    # Drop the arguments of commands where a bare special is legitimate:
+    # links, labels, citation keys, and file names (roc_curves.png is a
+    # file name to \includegraphics, not text).
+    body = re.sub(r"\\(?:url|href|path|verb|label|ref|[a-zA-Z]*cite[a-zA-Z]*"
+                  r"|includegraphics|input|include|bibliography|bibliographystyle"
+                  r"|addbibresource|graphicspath)"
                   r"\*?(?:\[[^\]]*\])*\{[^}]*\}", " ", body)
     return body
 
@@ -2743,7 +3020,7 @@ def check_alt_text_as_body(a: RunArtifacts) -> list[Finding]:
     paper = a.paper
     if paper is None:
         return []
-    if "acmart" in paper.split(r"\begin{document}", 1)[0]:
+    if _document_class(paper) == "acmart":
         return []
     hits = re.findall(r"\\Description\s*\{([^}]{0,120})", paper)
     if not hits:
