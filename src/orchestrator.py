@@ -1362,12 +1362,24 @@ class Orchestrator:
                     )
                 else:
                     cost_str += " (estimated: a rate is unverified)"
+            # The review gate's share, when it spent anything. Kept after
+            # the counts so the line still starts "Run cost: $X over N LLM
+            # calls", which the edmars live view reads.
+            review = (payload.get("by_component") or {}).get("review") or {}
+            review_str = ""
+            if review.get("n_calls"):
+                review_cost = review.get("cost_usd")
+                review_str = (
+                    "; the review gate: "
+                    + ("not priced" if review_cost is None else f"${review_cost:.4f}")
+                    + f" over {review['n_calls']} of those calls"
+                )
             self._log(
                 "Orchestrator",
                 f"Run cost: {cost_str} over {payload['n_calls']} LLM calls "
                 f"({payload['prompt_tokens']:,} in / "
                 f"{payload['completion_tokens']:,} out; "
-                f"{payload['cached_prompt_tokens']:,} cached) "
+                f"{payload['cached_prompt_tokens']:,} cached{review_str}) "
                 "-> run_cost.json",
             )
             return payload
