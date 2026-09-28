@@ -161,8 +161,9 @@ class TestLsarReviewsAreMetered:
     def test_a_review_that_raised_still_counts_what_it_spent(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """LSAR writes token_usage.json only after a review completes; a
-        scoring failure leaves the calls in its in-process log."""
+        """An LSAR before f0ac437 writes token_usage.json only after a
+        review completes; a scoring failure leaves the calls in its
+        in-process log."""
         leftover = [_call(), _call(), _call()]
 
         def run(**_kw: Any) -> Any:
@@ -177,6 +178,26 @@ class TestLsarReviewsAreMetered:
                               "token_usage.json").read_text(encoding="utf-8"))
         assert len(written["calls"]) == 3
         assert [t for t, _ in seen].count("llm.end") == 3
+
+    def test_a_review_that_raised_after_writing_its_usage_is_counted_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LSAR from f0ac437 on writes token_usage.json however the review
+        ends and empties its in-process log as it does, so the gate reads
+        the file and finds nothing left over: each call counts once."""
+        leftover: list = []
+        write = _review_writes([_call(), _call()])
+
+        def run(**kw: Any) -> Any:
+            write(**kw)
+            raise RuntimeError("scoring failed")
+
+        _install_fake_lsar(monkeypatch, run, leftover)
+        gate, seen = _gate(tmp_path)
+
+        assert gate.run_lsar(tmp_path / "paper.pdf", cycle=1) is None
+        assert len(load_usage(str(tmp_path))) == 2
+        assert [t for t, _ in seen].count("llm.end") == 2
 
     def test_an_earlier_review_s_usage_in_the_same_folder_is_not_counted(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -916,9 +916,12 @@ class ReviewGate:
     def _drain_lsar_usage(self) -> list:
         """Calls LSAR measured but never wrote out.
 
-        LSAR writes token_usage.json only when a review completes; the
-        calls of a review that raised part-way are still in its
-        in-process log. Only callable while LSAR is importable.
+        An LSAR before f0ac437 (LSAR fix/released-issues) writes
+        token_usage.json only when a review completes, so the calls of a
+        review that raised part-way are still in its in-process log. A
+        later LSAR writes the file however the review ends and empties
+        the log as it does, so this returns [] and nothing is counted
+        twice. Only callable while LSAR is importable.
         """
         try:
             from lsar.utils.llm_client import drain_usage_log  # type: ignore[import-not-found]
