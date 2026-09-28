@@ -314,7 +314,11 @@ def test_the_critic_and_the_writer_see_the_analytic_sample(tmp_path: Path) -> No
 
     ctx = orch.run()
 
-    assert ctx.current_state == PipelineState.COMPLETED, ctx.errors
+    # What this test is about is what the Critic and the Writer saw, not how
+    # the run ends: on a machine without TeX (the CI runners) the run finishes
+    # INCOMPLETE because no PDF could be made, after both agents have run.
+    assert ctx.current_state in (PipelineState.COMPLETED, PipelineState.INCOMPLETE), ctx.errors
+    assert "critic" in seen and "writer" in seen, ctx.errors
     for stage in ("critic", "writer"):
         report = seen[stage]
         assert report["class_balance"]["n"] == 17335, stage
