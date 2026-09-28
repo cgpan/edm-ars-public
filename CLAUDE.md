@@ -69,7 +69,7 @@ historical: `config.yaml` and the code are current where they differ.
 - DISCLAIMER.md, PRIVACY.md — user-facing disclaimer and data-handling notice; keep them true to the code
 - config.yaml — central configuration (providers, model IDs, paths, pipeline params)
 - .env.example — the environment variables a user may set: keys with empty values, addresses and settings commented out
-- requirements.txt (runtime), requirements-dev.txt (tests, lint, types), requirements-lsar.txt (review gate), requirements-sandbox.txt (Docker image)
+- requirements.txt (runtime), requirements-cli.txt (the `edmars` command), requirements-dev.txt (tests, lint, types; includes requirements-cli.txt), requirements-lsar.txt (review gate), requirements-sandbox.txt (Docker image), requirements.lock (exact versions the installer uses)
 - data/raw/ — dataset files (gitignored; see README "Data setup" for exact names)
 - data_registry/datasets/ — YAML variable registries (Tier 1 curated, Tier 2 auto)
 - data_registry/task_templates/ — task workflow definitions
@@ -82,7 +82,9 @@ historical: `config.yaml` and the code are current where they differ.
 - r_helpers/ — certified R scripts the psychometric helpers run
 - runs/fixtures/ — example locked research specs; runs/configs/ — configs of archived validation runs
 - scripts/ — onboarding, synthetic-DGP gates, diagnostics (verify_skill_flow.py, audit_public_paths.py, ...)
-- tests/ — pytest test suite
+- edmars/ — the `edmars` command (setup wizard, study flow, live view, results); it starts the pipeline as a child process and only reads the run folder
+- install/ — one-command installers (install.ps1, install.sh) and install/README.md
+- tests/ — pytest test suite; tests/cli/ covers the `edmars` command
 - output/ — pipeline run outputs (gitignored)
 
 ## Skill-Based Architecture
@@ -125,6 +127,7 @@ caps and context), never a bare `match()`.
 ## Key Commands
 - Install dev tools: `pip install -r requirements-dev.txt`
 - Run tests: `python -m pytest tests/ -q` (offline; about 15 minutes)
+- Run the `edmars` command's tests only: `python -m pytest tests/cli -q` (offline; under a minute)
 - Lint: `ruff check src/ tests/` (known findings remain; not yet a gate)
 - Type check: `mypy src/` (not yet clean)
 - Public-mirror audit: `python scripts/audit_public_paths.py` (must report 0 findings)

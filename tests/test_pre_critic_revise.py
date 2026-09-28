@@ -205,6 +205,9 @@ def test_the_observed_study_is_revised_not_aborted(tmp_path: Path) -> None:
               and e["data"].get("code") == "PRE_CRITIC_REVISE"]
     assert len(warned) == 1
     assert "Analyst" in warned[0]["message"] and "pcc_07" in warned[0]["message"]
+    # What an interface words the event from (the message is cut at 500).
+    assert warned[0]["checks"] == ["pcc_07"] and warned[0]["targets"] == ["Analyst"]
+    assert warned[0]["revision"] == 1 and warned[0]["max_revisions"] == 2
     assert not [e for e in events if e["type"] == "error"]
 
 
@@ -320,6 +323,12 @@ def test_confirmed_leakage_still_aborts(tmp_path: Path, question: str) -> None:
     if question == _QUESTION:
         assert ids["pcc_07"] is True
     assert not (tmp_path / "paper.tex").exists()
+    # No review ran, so the verdict has no score. The Mac study's verdict
+    # event said critic_score 1 (the report's placeholder), and console.log
+    # "critic verdict: ABORT, score 1", while summary.html said "not scored".
+    [verdict] = [e["data"] for e in _events(tmp_path) if e["type"] == "verdict"]
+    assert verdict["source"] == "pre_critic" and verdict["verdict"] == "ABORT"
+    assert verdict["critic_score"] is None
 
 
 # ---------------------------------------------------------------------------

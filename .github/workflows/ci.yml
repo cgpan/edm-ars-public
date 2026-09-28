@@ -1,0 +1,137 @@
+# Tests on every pull request and every push to main; the release workflow
+# calls this too, so nothing is published that did not pass it.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*
+      # The same pinned versions the installer gives users, plus the test
+      # tools. requirements-dev.txt may not exist on older branches.
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock -r requirements-cli.txt
+          if [ -f requirements-dev.txt ]; then
+            python -m pip install -r requirements-dev.txt
+          else
+            python -m pip install pytest
+          fi
+      - name: Run the test suite
+        run: python -m pytest -q
+
+  # The real installers, end to end, from this checkout: uv, a private
+  # Python, the locked packages, the launcher, and `edmars version`.
+  installer:
+    name: installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint install.sh
+        if: runner.os == 'Linux'
+        run: shellcheck -s sh install/install.sh
+      # A new Mac has no Homebrew libomp, and neither do the macOS runners
+      # today; keep it that way, so the installer's own OpenMP fix is tested.
+      - name: No Homebrew libomp (macOS)
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          if [ -e /opt/homebrew/opt/libomp ]; then
+            brew uninstall --ignore-dependencies libomp
+          fi
+          if [ -e /opt/homebrew/opt/libomp ]; then
+            echo "Homebrew's libomp is still there"
+            exit 1
+          fi
+          echo "No Homebrew libomp, as on a new Mac."
+      - name: Install (macOS / Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sh install/install.sh --from-local "$GITHUB_WORKSPACE" \
+            --dir "$RUNNER_TEMP/edm-ars" --bin-dir "$RUNNER_TEMP/bin" \
+            --no-modify-path --no-onboard --yes
+          "$RUNNER_TEMP/bin/edmars" version
+      # Without Homebrew's libomp (see above), XGBoost on macOS runs on the
+      # scikit-learn OpenMP library install.sh links for it. Import the
+      # three together, then train with both libraries' parallel code in one
+      # process: two OpenMP runtimes there would stop it with "OMP: Error #15".
+      - name: XGBoost, scikit-learn and SHAP load and run together
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          record="$RUNNER_TEMP/edm-ars/install.json"
+          py=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["python"])' "$record")
+          "$py" -c "import xgboost, sklearn, shap"
+          grep '"openmp_link"' "$record"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # The fix ran: install.json names the link it made.
+            grep -q '"openmp_link": "/' "$record"
+          fi
+          "$py" - <<'EOF'
+          import ctypes, sys
+          import numpy as np
+          import shap, sklearn, xgboost
+          from sklearn.cluster import KMeans
+
+          rng = np.random.default_rng(42)
+          X = rng.normal(size=(2000, 8))
+          y = (X[:, 0] + X[:, 1] > 0).astype(int)
+          KMeans(n_clusters=4, n_init=2, random_state=42).fit(X)
+          model = xgboost.XGBClassifier(n_estimators=20, max_depth=3, n_jobs=2).fit(X, y)
+          shap.TreeExplainer(model).shap_values(X[:50])
+          if sys.platform == "darwin":
+              dyld = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+              dyld._dyld_image_count.restype = ctypes.c_uint32
+              dyld._dyld_get_image_name.restype = ctypes.c_char_p
+              dyld._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+              names = [dyld._dyld_get_image_name(i) or b"" for i in range(dyld._dyld_image_count())]
+              omp = [n.decode() for n in names if n.endswith(b"/libomp.dylib")]
+              print("OpenMP libraries loaded:", omp)
+              assert len(omp) == 1, omp
+          print("xgboost", xgboost.__version__, "sklearn", sklearn.__version__, "shap", shap.__version__, "ok")
+          EOF
+          "$RUNNER_TEMP/bin/edmars" doctor --quick --plain
+      # Windows PowerShell 5.1 on purpose: it is what a new Windows user has.
+      - name: Install (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File install\install.ps1 `
+            -FromLocal "$env:GITHUB_WORKSPACE" -Dir "$env:RUNNER_TEMP\edm-ars" `
+            -BinDir "$env:RUNNER_TEMP\bin" -NoModifyPath -NoOnboard -Yes
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed with exit code $LASTEXITCODE" }
+          & "$env:RUNNER_TEMP\bin\edmars.cmd" version
+          if ($LASTEXITCODE -ne 0) { throw "edmars version failed with exit code $LASTEXITCODE" }

@@ -12,11 +12,12 @@ next — **no model decides control flow** — and a layer of checks verifies th
 output before anything is called finished.
 
 > **Version 5.** Five study types, ten certified estimators, four curated
-> datasets, 70 composable skill units, ~3,000 automated tests. A complete gated
-> paper takes 18–46 minutes. At DeepSeek's prices of 2026-09-26 it costs roughly
-> **US$0.20–0.55** in API spend outside DeepSeek's peak hours and up to twice
-> that inside them (token counts measured on archived runs, priced at those
-> rates — see [Cost](#cost)).
+> datasets, 70 composable skill units, ~3,800 automated tests. A complete gated
+> paper usually takes 20–60 minutes (occasionally about 2 hours; 10–35 minutes
+> without the automated review). At DeepSeek's prices of 2026-09-26 it costs
+> roughly **US$0.20–0.55** in API spend outside DeepSeek's peak hours and up to
+> twice that inside them (token counts measured on archived runs, priced at
+> those rates — see [Cost](#cost)).
 
 ## Disclaimer and privacy
 
@@ -185,10 +186,68 @@ failures.
 
 ## Easiest install (preview)
 
-A one-command installer and an `edmars` command (a setup wizard, a guided
-"new study" flow, a live progress view and plain-language results) are in
-development on the `feat/edmars-cli` branch. They are not on this branch yet;
-until they land, install by hand as described below.
+This branch (`feat/edmars-cli`) adds a one-command installer and the
+`edmars` command: a setup wizard, a guided "new study" flow, a live progress
+view and plain-language results, for people who have never used a terminal.
+It is a preview: it has been tested on Windows 11, not yet on macOS or Linux.
+
+**Install.** The installer needs no administrator rights, installs its own
+private Python 3.11 with the tested package versions (`requirements.lock`),
+and starts `edmars setup` at the end. See [install/README.md](install/README.md)
+for the options, the careful "download, inspect, then run" route and what goes
+where. Once a release is published on
+[GitHub Releases](https://github.com/cgpan/edm-ars-public/releases):
+
+```powershell
+irm https://github.com/cgpan/edm-ars-public/releases/latest/download/install.ps1 | iex   # Windows
+```
+```sh
+curl -LsSf https://github.com/cgpan/edm-ars-public/releases/latest/download/install.sh | sh   # macOS / Linux
+```
+
+Until then, install from a copy of this branch (once it is merged, leave out
+`-b feat/edmars-cli`):
+
+```powershell
+git clone -b feat/edmars-cli https://github.com/cgpan/edm-ars-public.git
+powershell -ExecutionPolicy Bypass -File .\edm-ars-public\install\install.ps1 -FromLocal .\edm-ars-public
+```
+```sh
+git clone -b feat/edmars-cli https://github.com/cgpan/edm-ars-public.git
+sh edm-ars-public/install/install.sh --from-local ./edm-ars-public
+```
+
+Or, in an environment set up as in [Install](#install), add the command's
+own packages and run it from the repository folder:
+`pip install -r requirements-cli.txt`, then `python -m edmars` wherever this
+section says `edmars`.
+
+**Commands.** `edmars --help` lists them; each has its own `--help`.
+
+| Command | What it does |
+|---|---|
+| `edmars setup [SECTION]` | The setup wizard: the notice to accept, AI service and key (kept in your system's credential store), literature search key, datasets, PDF tools, R, the automated reviewer. `edmars setup ai` (or `pdf`, `r`, `reviewer`, `datasets`, ...) changes one part; `--yes` with options sets up without questions. |
+| `edmars doctor` | Checks this computer and the setup and says how to fix what is missing. `--deep` also tests the keys online and compiles a test PDF; `--bundle` makes a support file with keys removed. |
+| `edmars new` | Start a study by answering a few questions, with a free feasibility check and a summary to confirm before anything is sent. |
+| `edmars run --type TYPE ...` | Start a study from options (for scripts): `--prompt` for prediction, `--example ID` or `--spec FILE` for the other types; `--yes` starts without asking. |
+| `edmars status [STUDY]` | Watch a running study (or the latest one); Ctrl+C leaves it running or stops it. |
+| `edmars runs` | List your studies and how each ended. |
+| `edmars results [STUDY]` | The result in plain words, what to check, and the files; `--open pdf\|folder\|summary`. |
+| `edmars stop` / `edmars resume [STUDY]` | Stop the running study; continue a stopped one from its last finished step, with your current settings (AI service, models, reviewer). |
+| `edmars review [STUDY]` | Run the automated reviewer (LSAR) on a finished paper. |
+| `edmars data list\|install\|import\|verify` | Datasets: download (after you accept the terms), use a file you already have, check a file. |
+| `edmars explain TERM` | A plain definition of a term in the results (AUC, SHAP, ATE, DIF, ...). |
+| `edmars privacy` / `edmars disclaimer` | The texts in [PRIVACY.md](PRIVACY.md) and [DISCLAIMER.md](DISCLAIMER.md). |
+| `edmars version` / `edmars update` / `edmars uninstall` | Version; check for a newer release; remove settings, stored keys, the automated reviewer and caches (asks about datasets and studies; lists TinyTeX, if setup installed it, for you to delete). |
+
+Every command takes `--plain` (no colour or animation; for screen readers and
+logs). `edmars status`, `results`, and `new`, `run` and `resume` while they
+watch, exit with one scheme: `0` the paper is ready (with or without issues to
+check) or the study is still running, `2` it finished but the paper is not
+ready, `3` it stopped before it finished (also when you stop it from the live
+view), `1` something went wrong, such as no matching study. Studies still run the AI-written code on your computer without a
+sandbox, exactly as described in [Disclaimer and privacy](#disclaimer-and-privacy);
+`edmars` asks you to accept that notice before the first study.
 
 ---
 
@@ -201,7 +260,7 @@ until they land, install by hand as described below.
 | **LaTeX** with `pdflatex`, `bibtex` and `biber` on `PATH` | the PDF | Conference papers (the default, `writer.venue_format: conference`) use the `acmart` class with BibTeX; journal manuscripts (`writer.venue_format: journal`) use `apa7` with `biblatex-apa` and `biber`. See below. |
 | **R 4.4 or newer** with `jsonlite`, `lavaan`, `mirt` and `CDM` | psychometric studies only | `MASS` ships with R. See below. |
 | **About 16 GB of RAM** | HSLS:09 studies | The 2 GB HSLS:09 CSV takes about 6.6 GB of memory once loaded. |
-| **About 3 GB of free disk**, plus LaTeX | everything | Python packages about 1.2 GB; HSLS:09 is a 0.3 GB download that unzips to 2 GB. |
+| **About 3 GB of free disk**, plus LaTeX | everything | Python packages about 1.2 GB; HSLS:09 is a 0.3 GB download that becomes a 2 GB file. |
 | [LSAR](https://github.com/cgpan/LSAR-public) | the optional review gate | See [The review gate](#the-review-gate-optional). |
 | Docker | nothing by default | An experimental sandbox; see [Install](#install). |
 
@@ -283,26 +342,36 @@ anything.
 
 | Dataset | Save it as | Format |
 |---|---|---|
-| HSLS:09 public-use student file (2017 release) | `data/raw/hsls_17_student_pets_sr_v1_0.csv` | CSV with **value labels** |
+| HSLS:09 public-use student file (2017 release) | `data/raw/hsls_17_student_pets_sr_v1_0.csv` | CSV with **value labels**, made from the NCES download (below) |
 | ELS:2002 public-use base-year to third follow-up student file | `data/raw/els_2002/els_02_12_byf3pststu_v1_0.csv` | CSV with numeric codes |
 | ASSISTments 2009–10 skill-builder data | `data/raw/assistments_0910/skill_builder_0910.csv` | CSV, 525,534 rows |
 | ELS:2002 × HSLS:09 cross-cohort panel | `data/raw/did_els_hsls_panel/panel.csv` | built by a script, below |
 
 **HSLS:09** comes from NCES as a direct download:
 <https://nces.ed.gov/EDAT/Data/Zip/HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip>
-(about 297 MB; the CSV inside is about 2 GB). Take
-`hsls_17_student_pets_sr_v1_0.csv` out of the zip and put it in `data/raw/`.
-EDM-ARS needs this **labelled CSV**, whose cells hold text such as `Male`,
-`Yes` or `Unit non-response`. The SPSS, Stata and R versions of the download,
-or a CSV of numeric codes, will not work: the variable registry and the
-prompts assume the labels.
+(about 297 MB). The CSV inside it, `hsls_17_student_pets_sr_v1_0.csv`
+(about 0.9 GB), stores **numeric codes**: `X1SEX` is `1` or `2`. EDM-ARS
+needs the **labelled CSV** (about 2 GB), whose cells hold text such as
+`Male`, `Yes` or `Unit non-response`: the variable registry and the prompts
+assume the labels. Do not unzip the CSV and use it as it is, and do not use
+the SPSS, Stata or R versions of the download.
+
+EDM-ARS makes the labelled CSV from the zip itself, with a code-to-label
+table it ships (`edmars/data/hsls09_public.labels.json.gz`: column, code and
+label only). The conversion is checked: the zip must be the known release
+(SHA-256 `770b2e64…`) and the converted file must match the labelled file
+EDM-ARS was built on (SHA-256 `b4400425…`), or nothing is written. With the
+`edmars` command, `edmars data install hsls09_public` downloads the zip and
+converts it; `edmars data import hsls09_public <the zip>` converts a zip you
+downloaded yourself. From a source checkout, download the zip and convert it
+into `data/raw/` (about a minute, no network):
 
 macOS / Linux:
 
 ```bash
 mkdir -p data/raw
 curl -L -o hsls.zip https://nces.ed.gov/EDAT/Data/Zip/HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip
-unzip -j hsls.zip '*hsls_17_student_pets_sr_v1_0.csv' -d data/raw/
+python -m edmars.relabel hsls.zip data/raw/hsls_17_student_pets_sr_v1_0.csv
 rm hsls.zip
 ```
 
@@ -312,10 +381,12 @@ Windows (PowerShell):
 New-Item -ItemType Directory -Force data\raw | Out-Null
 $ProgressPreference = 'SilentlyContinue'    # makes the download much faster
 Invoke-WebRequest https://nces.ed.gov/EDAT/Data/Zip/HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip -OutFile hsls.zip
-Expand-Archive hsls.zip -DestinationPath hsls_zip
-Get-ChildItem hsls_zip -Recurse -Filter hsls_17_student_pets_sr_v1_0.csv | Move-Item -Destination data\raw\
-Remove-Item hsls_zip -Recurse; Remove-Item hsls.zip
+python -m edmars.relabel hsls.zip data\raw\hsls_17_student_pets_sr_v1_0.csv
+Remove-Item hsls.zip
 ```
+
+If NCES ever replaces the zip, the conversion stops with a message instead
+of writing a file it cannot check; please report it.
 
 **ELS:2002.** Export the public-use BY–F3 student file as CSV from NCES
 (<https://nces.ed.gov/surveys/els2002/>, via the EDAT data tool) and save it
@@ -585,7 +656,9 @@ templates/              LaTeX templates (ACM sigconf, APA 7 journal)
 r_helpers/              certified R scripts for psychometrics
 runs/                   example research specs (fixtures/) and run configs (configs/)
 scripts/                onboarding, synthetic-DGP gates, diagnostics
-tests/                  ~3,000 tests
+edmars/                 the `edmars` command: setup wizard, new-study flow, live view, results
+install/                one-command installers (install.ps1, install.sh) and their README
+tests/                  ~3,800 tests (tests/cli/ covers the `edmars` command)
 ```
 
 `SPEC.md` is the original design specification; where it and `config.yaml`
@@ -597,9 +670,10 @@ are current. `CLAUDE.md` records the working rules the project holds itself to.
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt
+pip install -r requirements-dev.txt              # also installs requirements-cli.txt
 python -m pytest tests/ -q                       # full suite, offline, about 15 minutes
 python -m pytest tests/ -q -k "not integration"  # skip integration-marked tests
+python -m pytest tests/cli -q                    # the edmars command only, under a minute
 ruff check src/ tests/                           # lint (reports known findings; not yet a gate)
 mypy src/                                        # type check (not yet clean)
 ```

@@ -76,11 +76,15 @@ _ALL_R_PACKAGES = ("jsonlite", "lavaan", "mirt", "CDM", "MASS")
 
 #: Where each dataset comes from, for the missing-data message.
 _DATA_SOURCES: dict[str, str] = {
+    # The NCES zip holds the numeric-code CSV; the labelled one the
+    # pipeline needs is made from it (edmars.relabel, checked by SHA-256).
     "hsls09_public": (
-        "Download the HSLS:09 public-use student file (CSV, labelled "
-        "values; about 297 MB) from https://nces.ed.gov/EDAT/Data/Zip/"
-        "HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip, take "
-        "hsls_17_student_pets_sr_v1_0.csv out of the zip"
+        "Download the HSLS:09 public-use zip (about 297 MB) from "
+        "https://nces.ed.gov/EDAT/Data/Zip/"
+        "HSLS_2017_PETS_SR_v1_0_CSV_Datasets.zip, convert the numeric-code "
+        "CSV in it to the labelled CSV EDM-ARS needs (python -m "
+        "edmars.relabel <the zip> <output .csv>, or edmars data install "
+        "hsls09_public)"
     ),
     "els_2002": (
         "Download the ELS:2002 public-use BY-F3 student file as CSV from "
@@ -144,12 +148,20 @@ def llm_stages(config: dict) -> list[str]:
     return stages
 
 
-#: Set by the edmars app for every study it starts (edmars/runner.py).
+#: Set by the edmars app for every study it starts, and for its pre-start
+#: check (edmars/runner.py).
 EDMARS_RUN_ID_ENV = "EDMARS_RUN_ID"
+
+#: How an edmars user repairs the reviewer. In an installed copy the
+#: environment is made by uv and has no pip, so the Mac test's console.log
+#: advised "python -m pip install -r .../requirements.txt", which fails
+#: there ("No module named pip"), while the edmars screen said `edmars
+#: setup reviewer`.
+EDMARS_LSAR_FIX = "Run `edmars setup reviewer`."
 
 
 def started_by_edmars() -> bool:
-    """True inside a study the edmars app started."""
+    """True inside a study the edmars app started, or its pre-start check."""
     return bool(os.environ.get(EDMARS_RUN_ID_ENV, "").strip())
 
 
@@ -183,7 +195,7 @@ def lsar_install_fix(root: str) -> str:
     that works whether that Python has pip or was built by uv.
     """
     if started_by_edmars():
-        return "Run `edmars setup reviewer`."
+        return EDMARS_LSAR_FIX
     requirements = _quoted(os.path.join(root, "requirements.txt"))
     return (
         "Install LSAR's requirements into the Python that runs EDM-ARS: "
@@ -481,7 +493,7 @@ def _r_install_fix(rscript: str, packages: list[str]) -> str:
 def _check_lsar(config: dict) -> list[Finding]:
     rg = config.get("review_gate") or {}
     root = str(rg.get("lsar_project_path") or "")
-    fix = (
+    fix = EDMARS_LSAR_FIX if started_by_edmars() else (
         "Clone https://github.com/cgpan/LSAR-public next to this "
         "repository (or anywhere, then set LSAR_HOME to its folder) and "
         "install its requirements, or set review_gate.enabled: false."

@@ -30,6 +30,15 @@ def test_progress_lines_for_the_events_a_user_waits_on() -> None:
     assert _progress_line({"type": "warning", "data": {
         "code": "NO_PDF", "message": "LaTeX produced no paper.pdf"}}) \
         == "  warning [NO_PDF]: LaTeX produced no paper.pdf"
+    # The Critic's verdict has a score; the automatic checks' has none, even
+    # in a record written with the old placeholder 1 (the Mac test's
+    # console.log said "critic verdict: ABORT, score 1").
+    assert _progress_line({"type": "verdict", "data": {"verdict": "PASS", "critic_score": 8}}) \
+        == "  critic verdict: PASS, score 8"
+    for score in (None, 1):
+        assert _progress_line({"type": "verdict", "data": {
+            "verdict": "ABORT", "critic_score": score, "source": "pre_critic"}}) \
+            == "  automatic pre-review check: ABORT"
     # Chatty events stay in pipeline.log / events.jsonl only.
     for etype in ("log", "agent.note", "llm.start", "llm.end", "lit.progress", "metric"):
         assert _progress_line({"type": etype, "plain": "x", "data": {}}) is None

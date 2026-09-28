@@ -1,10 +1,15 @@
 # Development tools: the test suite, lint and type checks.
 # Install on top of the runtime requirements:
 #   pip install -r requirements.txt -r requirements-dev.txt
+# The `edmars` command's own packages come in too: tests/cli imports them.
+-r requirements-cli.txt
 pytest>=7.4
 ruff>=0.5
 mypy>=1.8
 types-PyYAML          # type stubs so `mypy src/` can check yaml calls
 types-requests        # type stubs so `mypy src/` can check requests calls
+# The shellcheck the CI lint step gets from Ubuntu 24.04, so the test of
+# install/install.sh (tests/cli/test_installer.py) runs everywhere and agrees with it.
+shellcheck-py==0.9.0.6
 # Only for generate_tier2.py when the input is an SPSS file (.sav/.zsav).
 pyreadstat>=1.2
