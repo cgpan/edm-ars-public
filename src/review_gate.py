@@ -47,6 +47,15 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
 
+#: finish_reason (OpenAI-compatible) / stop_reason (Anthropic) of a reply
+#: the provider cut off at the token limit.
+_TRUNCATION_REASONS = frozenset({"length", "max_tokens"})
+
+
+def _is_truncation(finish_reason: Any) -> bool:
+    return str(finish_reason or "").strip().lower() in _TRUNCATION_REASONS
+
+
 # ---------------------------------------------------------------------------
 # Dimension → EDM-ARS agent mapping (for suggested_focus_areas)
 # ---------------------------------------------------------------------------
@@ -386,6 +395,14 @@ class ReviewGate:
         }
         self.revision_model: str = rg_cfg.get("revision_model", "claude-sonnet-4-6")
         self.revision_max_tokens: int = rg_cfg.get("revision_max_tokens", 16000)
+        #: The budget for the one retry of a reply cut off at the limit.
+        self.revision_retry_max_tokens: int = int(
+            rg_cfg.get("revision_retry_max_tokens", 2 * self.revision_max_tokens)
+        )
+        #: How the last revision reply ended (see _call_revision_llm).
+        self._last_reply: dict[str, Any] = {}
+        #: Where the gate keeps this cycle's raw revision replies.
+        self._revision_dir: Optional[Path] = None
 
         # Build the reviser's LLM client through the same code path as the
         # agents (src/agents/llm_client.py): same base-URL precedence, same
@@ -1198,10 +1215,20 @@ class ReviewGate:
         wait is logged before it starts; a failure that remains is logged
         with its code (KEY_REJECTED, NO_CREDIT, MODEL_GONE, ...) and kept
         in ``revision_failures`` instead of vanishing into a bare None.
-        """
-        from src.agents.llm_client import call_with_retries
-        from src.errors import ProviderError
 
+        A reply the provider cut off at the token limit (finish_reason
+        ``length``, stop_reason ``max_tokens``) is asked for once more
+        with ``revision_retry_max_tokens``. Each raw reply is saved in the
+        cycle's folder (``revision_raw.txt``, ``revision_raw_retry.txt``)
+        when the gate set one, and ``self._last_reply`` says how the reply
+        ended, for the extraction that follows.
+        """
+        self._last_reply = {
+            "finish_reason": None,
+            "truncated": False,
+            "retried": False,
+            "max_tokens": self.revision_max_tokens,
+        }
         if self._llm_client is None:
             self._log(
                 "LLM revision skipped: "
@@ -1209,33 +1236,96 @@ class ReviewGate:
             )
             return None
 
-        def _attempt() -> str:
+        first = self._revision_call(prompt, self.revision_max_tokens, "revision_raw.txt")
+        if first is None:
+            return None
+        text, finish = first
+        self._last_reply.update(finish_reason=finish, truncated=_is_truncation(finish))
+        if not self._last_reply["truncated"]:
+            return text
+        retry_budget = self.revision_retry_max_tokens
+        if retry_budget <= self.revision_max_tokens:
+            self._log(
+                f"The revision reply was cut off at {self.revision_max_tokens} "
+                f"tokens (finish_reason={finish}); no larger budget is "
+                "configured (review_gate.revision_retry_max_tokens)."
+            )
+            return text
+        self._log(
+            f"The revision reply was cut off at {self.revision_max_tokens} "
+            f"tokens (finish_reason={finish}); asking once more with "
+            f"{retry_budget}."
+        )
+        second = self._revision_call(prompt, retry_budget, "revision_raw_retry.txt")
+        self._last_reply["retried"] = True
+        if second is None:
+            # The retry failed outright; the cut-off first reply is still
+            # what there is, and extraction knows it is incomplete.
+            return text
+        text, finish = second
+        self._last_reply.update(
+            finish_reason=finish,
+            truncated=_is_truncation(finish),
+            max_tokens=retry_budget,
+        )
+        if self._last_reply["truncated"]:
+            self._log(
+                f"The retried revision reply was cut off too, at {retry_budget} "
+                "tokens."
+            )
+        return text
+
+    def _revision_call(
+        self, prompt: str, max_tokens: int, raw_name: str
+    ) -> Optional[tuple[str, Optional[str]]]:
+        """One revision request: ``(text, finish_reason)``, None on failure."""
+        from src.agents.llm_client import call_with_retries
+        from src.errors import ProviderError
+
+        def _attempt() -> tuple[str, Optional[str]]:
             if self._llm_provider in ("deepseek", "openai"):
-                response = self._llm_client.chat.completions.create(
-                    model=self._llm_model,
-                    max_tokens=self.revision_max_tokens,
-                    temperature=0.3,
-                    messages=[
+                kwargs: dict[str, Any] = {
+                    "model": self._llm_model,
+                    "temperature": 0.3,
+                    "messages": [
                         {"role": "system", "content": self._REVISION_SYSTEM_TEXT},
                         {"role": "user", "content": prompt},
                     ],
-                )
+                }
+                if self._llm_provider == "deepseek":
+                    # As every agent call does (BaseAgent.call_llm):
+                    # DeepSeek-V4 thinks by default, and its reasoning is
+                    # billed as output and counted against max_tokens, so
+                    # a thinking reviser can spend the reply budget before
+                    # it writes the manuscript back.
+                    kwargs["max_tokens"] = max_tokens
+                    kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+                else:
+                    # The GPT-5 family rejects max_tokens (BaseAgent uses
+                    # the same spelling for the same reason).
+                    kwargs["max_completion_tokens"] = max_tokens
+                response = self._llm_client.chat.completions.create(**kwargs)
                 self._meter_revision_response(response)
-                return response.choices[0].message.content or ""
+                choice = response.choices[0]
+                return (
+                    choice.message.content or "",
+                    getattr(choice, "finish_reason", None),
+                )
             with self._llm_client.messages.stream(
                 model=self._llm_model,
-                max_tokens=self.revision_max_tokens,
+                max_tokens=max_tokens,
                 temperature=0.3,
                 system=self._REVISION_SYSTEM_TEXT,
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 final = stream.get_final_message()
             self._meter_revision_response(final)
-            return "".join(
+            text = "".join(
                 getattr(block, "text", "") or ""
                 for block in getattr(final, "content", None) or []
                 if getattr(block, "type", None) == "text"
             )
+            return text, getattr(final, "stop_reason", None)
 
         self._event(
             "llm.start",
@@ -1245,25 +1335,59 @@ class ReviewGate:
             provider=self._llm_provider,
         )
         try:
-            text = call_with_retries(
+            text, finish = call_with_retries(
                 _attempt,
                 provider_cfg=self._llm_provider_cfg,
                 model=self._llm_model,
                 settings=self._llm_settings,
                 on_wait=lambda _s, _a, _r, message: self._log(message),
             )
-            self._announce_spent("The paper revision call finished")
-            return text
-        except ProviderError as exc:
-            self.revision_failures.append({"code": exc.code, "message": str(exc)})
-            self._log(f"LLM revision call failed [{exc.code}]: {exc}")
-            return None
-        except Exception as exc:
-            self.revision_failures.append(
-                {"code": "UNKNOWN", "message": f"{type(exc).__name__}: {exc}"}
+        except Exception as exc:  # noqa: BLE001 - classified below
+            code = exc.code if isinstance(exc, ProviderError) else "UNKNOWN"
+            message = (
+                str(exc) if isinstance(exc, ProviderError)
+                else f"{type(exc).__name__}: {exc}"
             )
-            self._log(f"LLM revision call failed: {exc}")
+            self.revision_failures.append({"code": code, "message": message})
+            self._log(
+                f"LLM revision call failed [{code}]: {exc}"
+                if isinstance(exc, ProviderError)
+                else f"LLM revision call failed: {exc}"
+            )
+            # Close the llm.start above so a live view stops waiting.
+            self._event(
+                "llm.end",
+                agent="ReviewGate",
+                model=self._llm_model,
+                provider=self._llm_provider,
+                ok=False,
+                error_code=code,
+                error_class=type(exc).__name__,
+                cost_usd=None,
+                component=REVIEW_COMPONENT,
+            )
             return None
+        self._save_revision_raw(raw_name, text, finish, max_tokens)
+        self._announce_spent("The paper revision call finished")
+        return text, finish
+
+    def _save_revision_raw(
+        self, name: str, text: str, finish: Optional[str], max_tokens: int
+    ) -> None:
+        """Keep the reviser's reply exactly as it came, for diagnosis."""
+        folder = getattr(self, "_revision_dir", None)
+        if folder is None:
+            return
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_text(text, encoding="utf-8")
+            self._log(
+                f"Revision reply saved to {folder.name}/{name} "
+                f"({len(text)} chars, finish_reason={finish}, "
+                f"max_tokens={max_tokens})"
+            )
+        except OSError:
+            pass
 
     # -- budget arithmetic ---------------------------------------------
 
@@ -2160,12 +2284,18 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 except OSError:
                     pass
 
-                revised_tex = self.revise_from_review(
-                    paper_tex=current_tex,
-                    report_json=report_json,
-                    diagnosis=diagnosis,
-                    lint_report=self._last_lint,
+                self._revision_dir = (
+                    self.output_dir / "lsar_review" / f"cycle_{cycle}"
                 )
+                try:
+                    revised_tex = self.revise_from_review(
+                        paper_tex=current_tex,
+                        report_json=report_json,
+                        diagnosis=diagnosis,
+                        lint_report=self._last_lint,
+                    )
+                finally:
+                    self._revision_dir = None
 
                 # Arc P4 guards. revise_from_review returns the ORIGINAL
                 # string on LLM failure, and the old code wrote it back
