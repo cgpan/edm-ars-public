@@ -208,6 +208,10 @@ class RunState:
     #: The review share when the latest process started: a resumed gate's
     #: ``gate.cost`` running total starts again at zero.
     review_base: tuple[int, float] = (0, 0.0)
+    #: The review gate's progress in the current gate run, from its log
+    #: lines (see :func:`_gate_log`): reviews started and finished, the
+    #: most there can be, and what became of the paper revision.
+    gate_progress: dict[str, Any] | None = None
     last_seq: int = 0
     last_plain: str = ""
     alive: bool | None = None
@@ -633,6 +637,11 @@ def cost_line(state: RunState) -> str:
     elif state.review_calls is not None:
         if state.review_cost_usd:
             calls += f", including US${state.review_cost_usd:.3f} for the automated peer review"
+        progress = state.gate_progress or {}
+        if progress.get("running") and state.stage("REVIEWING").status == "running" \
+                and not state.finished:
+            # LSAR's calls are counted when its review ends.
+            calls += "; the review under way is not yet counted"
     lead = "Cost" if state.finished else "Cost so far"
     unanswered = state.calls_cut_off + state.calls_failed
     cost = state.cost_usd
@@ -851,6 +860,180 @@ def _gate_cost(state: RunState, data: Mapping[str, Any]) -> None:
         state.cost_unpriced = True
 
 
+# The review gate's log lines (src/review_gate.py), read for its
+# progress: which review is running and what became of the revision.
+_RE_GATE_CYCLE = re.compile(r"^--- Review gate cycle (\d+)/(\d+) ---")
+_RE_REVIEW_RUN = re.compile(r"^Running LSAR review \(cycle (\d+)")
+_RE_REVIEW_DONE = re.compile(r"^LSAR review complete \(cycle (\d+)\): overall_score=(\S+)")
+_RE_REVIEW_FAILED = re.compile(r"^LSAR pipeline failed \(cycle (\d+)\)")
+_RE_MEDIAN = re.compile(r"^Borderline score .*\((\d+) total reviews\)")
+_RE_CYCLE_VERDICT = re.compile(r"^Review gate (PASSED|FAILED) \(cycle (\d+)\)")
+_RE_REVISION_START = re.compile(r"^Calling LLM for (?:whole-document paper|section-scoped) revision")
+#: A revision that left paper.tex as it was: the model's reply could not
+#: be used, the call failed, or the safety guards discarded it.
+_REVISION_FAILED = (
+    "Could not extract LaTeX from LLM response",
+    "Could not extract any revised section",
+    "No revised section survived",
+    "LLM revision call failed",
+    "LLM revision skipped",
+    "Revision was a no-op",
+    "Revision REJECTED",
+)
+#: Pipelines before fix/r3-gate said so after a failed revision, and then
+#: paid for reviews of the unchanged paper.
+_REREVIEWS_UNCHANGED = "re-reviews the unchanged manuscript"
+#: fix/r3-gate's line (and GATE_REVISION_FAILED warning) when it ends the
+#: gate after a failed revision: "The review gate could not revise the
+#: paper after cycle 1 (...). The gate ends with cycle 1's score; no
+#: further review of the unchanged paper was paid for."
+_GATE_REVISION_STOP = "The review gate could not revise the paper"
+GATE_REVISION_FAILED_CODE = "GATE_REVISION_FAILED"
+#: The gate ended without another cycle.
+_GATE_ENDS = (
+    "Honesty blockers cannot be fixed",
+    "Cannot prepare PDF; skipping review gate",
+    "LSAR returned no result; skipping review gate",
+    "paper.tex not found; cannot revise",
+)
+
+
+def _gate_log(state: RunState, message: str) -> None:
+    """Follow the review gate's progress from one of its log lines.
+
+    ``gate_progress`` keeps: ``started`` / ``finished`` / ``failed``
+    reviews in this gate run, ``running`` (a review under way), ``cycle``
+    and ``max_cycles``, ``before_cycle`` (reviews started in earlier
+    cycles), ``cycle_reviews`` (this cycle's review count once it is
+    known: 1, or the median sampling's total), ``revision`` (None,
+    "running", "failed" or "done") and ``more`` (False once no further
+    review will run). A review sample's folder number (102 = cycle 1's
+    second review) is the pipeline's; the count here is the user's.
+    """
+    msg = " ".join(message.split())
+    if not msg:
+        return
+    p = state.gate_progress if isinstance(state.gate_progress, dict) else {}
+    p = {"started": 0, "finished": 0, "failed": 0, "running": False, "cycle": 0,
+         "max_cycles": None, "before_cycle": 0, "cycle_reviews": None,
+         "revision": None, "more": None, **p}
+    m = _RE_GATE_CYCLE.match(msg)
+    if m:
+        cycle = int(m.group(1))
+        if cycle != p["cycle"]:
+            p.update(cycle=cycle, before_cycle=p["started"], cycle_reviews=None)
+        p["max_cycles"] = int(m.group(2))
+        state.gate_progress = p
+        return
+    m = _RE_REVIEW_RUN.match(msg)
+    if m:
+        p["started"] += 1
+        p["running"] = True
+        p["more"] = None  # a review after a failed revision: the gate went on
+        state.gate_progress = p
+        return
+    m = _RE_REVIEW_DONE.match(msg)
+    if m:
+        p["finished"] += 1
+        p["running"] = False
+        score = _num(m.group(2))
+        tail = f", score {fmt_score(score)}" if score is not None else ""
+        _add_recent(state, f"LSAR review {p['started']} finished{tail}")
+        state.gate_progress = p
+        return
+    if _RE_REVIEW_FAILED.match(msg):
+        p["failed"] += 1
+        p["running"] = False
+        _add_recent(state, f"LSAR review {p['started']} did not finish")
+        state.gate_progress = p
+        return
+    m = _RE_MEDIAN.match(msg)
+    if m:
+        # The first score was close to the benchmark: more reviews, and
+        # the gate uses their median.
+        total = int(m.group(1))
+        p["cycle_reviews"] = total
+        more = total - 1
+        _add_recent(state, f"Close to the benchmark: {more} more review{'s' if more != 1 else ''}, "
+                           "and the middle score counts")
+        state.gate_progress = p
+        return
+    m = _RE_CYCLE_VERDICT.match(msg)
+    if m:
+        p["cycle_reviews"] = p["started"] - p["before_cycle"]
+        if m.group(1) == "PASSED" or (p["max_cycles"] and p["cycle"] >= p["max_cycles"]):
+            p["more"] = False
+        state.gate_progress = p
+        return
+    if _RE_REVISION_START.match(msg):
+        p["revision"] = "running"
+        state.gate_progress = p
+        return
+    if msg.startswith("Revised paper.tex written"):
+        p["revision"] = "done"
+        state.gate_progress = p
+        return
+    if msg.startswith(_REVISION_FAILED) or msg.startswith(_GATE_REVISION_STOP):
+        # A failed revision leaves the paper as it was. From fix/r3-gate
+        # the gate then stops, and says so: another review of the same
+        # paper is paid for and tells nothing new (the round-3 Mac
+        # study's second cycle reviewed the unchanged paper three times,
+        # and its lower median became the final score). Older pipelines
+        # say that they review it again, in a line after the failure.
+        said = gate_revision_words(p) if p["revision"] == "failed" else None
+        p["revision"] = "failed"
+        if msg.startswith(_GATE_REVISION_STOP):
+            p["more"] = False
+        elif _REREVIEWS_UNCHANGED in msg:
+            p["more"] = True
+        elif said is None:
+            p["more"] = False
+        line = gate_revision_words(p)
+        if line != said:
+            if said is not None:
+                state.notices = [n for n in state.notices if n != said]
+                state.recent = [r for r in state.recent if r != said]
+            state.notices.append(line)
+            _add_recent(state, line)
+        state.gate_progress = p
+        return
+    if msg.startswith(_GATE_ENDS):
+        p["more"] = False
+        state.gate_progress = p
+
+
+def gate_revision_words(progress: Mapping[str, Any]) -> str:
+    """What a failed paper revision means for the rest of the review."""
+    if progress.get("more") is True:
+        return ("The paper revision failed, so the paper is unchanged; this version "
+                "of EDM-ARS reviews the unchanged paper again, at a cost")
+    return ("The paper revision failed, so the paper is unchanged: no further paid "
+            "reviews; the review ends with the scores it has")
+
+
+def gate_reviews_up_to(state: RunState) -> int | None:
+    """The most reviews the current gate run can still add up to.
+
+    Each cycle has one review, or ``median_samples`` when its first score
+    is close to the benchmark; finished cycles count what they had, the
+    rest the most they can have. Once no further review will run, the
+    reviews started. None before the gate has said anything.
+    """
+    p = state.gate_progress
+    if not isinstance(p, dict):
+        return None
+    started = int(p.get("started") or 0)
+    if p.get("more") is False:
+        return started
+    samples = max(_int(state.metrics.get("gate_median_samples")) or 3, 1)
+    cycles = _int(p.get("max_cycles")) or _int(state.metrics.get("gate_max_cycles")) or 2
+    cycle = max(_int(p.get("cycle")) or 1, 1)
+    this_cycle = _int(p.get("cycle_reviews"))
+    before = int(p.get("before_cycle") or 0)
+    up_to = before + (this_cycle if this_cycle is not None else samples) + samples * max(cycles - cycle, 0)
+    return max(up_to, started)
+
+
 def _apply(state: RunState, ev: dict[str, Any]) -> None:
     etype = str(ev.get("type") or "")
     seq = ev.get("seq")
@@ -873,6 +1056,8 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
     cycle = _int(ev.get("cycle"))
     if etype == "verdict" and data.get("source") == "pre_critic":
         plain = _pre_critic_verdict_words(state, data, plain)
+    if etype == "warning" and data.get("code") == GATE_REVISION_FAILED_CODE:
+        plain = None  # its cycle numbers and reason are the gate's; said below in plain words
 
     if plain and etype not in _QUIET_TYPES:
         _add_recent(state, plain)
@@ -906,6 +1091,7 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
         _stage_start(state, stage, ts, cycle)
         if stage == "REVIEWING":
             state.lsar_enabled = True
+            state.gate_progress = None  # a (resumed) gate starts from its first review
     elif etype == "stage.end" and stage:
         _stage_end(state, stage, ts, data.get("outcome"))
     elif etype == "llm.start":
@@ -937,6 +1123,9 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
                 state.review_cost_usd = round((state.review_cost_usd or 0.0) + cost, 6)
     elif etype == "gate.cost":
         _gate_cost(state, data)
+    elif etype == "log":
+        if ev.get("agent") == "ReviewGate":
+            _gate_log(state, str(data.get("message") or ""))
     elif etype == "llm.wait":
         state.llm_wait = {
             "seconds": _num(data.get("seconds")),
@@ -1007,6 +1196,12 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
             msg = outcome_removed_words()
             state.notices.append(msg)
             state.outcome_removed = True
+        elif data.get("code") == GATE_REVISION_FAILED_CODE:
+            # The gate's own log line has usually said it already; this
+            # adds the line only when it has not.
+            _gate_log(state, _GATE_REVISION_STOP)
+            state.warnings.append(gate_revision_words(state.gate_progress or {}))
+            msg = None
         if msg:
             state.warnings.append(str(msg))
             _add_recent(state, str(msg))
@@ -1281,6 +1476,10 @@ def parse_log_line(line: str) -> list[dict[str, Any]]:
         return [make("log", plain="Turning the paper into a PDF with LaTeX")]
     if msg.startswith("Running OutlineAgent"):
         return [make("log", plain="Planning the paper's outline")]
+    if agent == "ReviewGate":
+        # The review gate's progress (fold's _gate_log reads it), as the
+        # event stream carries it: a "log" event with the message.
+        return [make("log", message=msg)]
     return [make("heartbeat")]
 
 
@@ -1945,6 +2144,9 @@ def _enrich(state: RunState, run_dir: Path, files: _FileCache, *, tail: bool) ->
     rg = as_dict(config.get("review_gate"))
     if rg.get("enabled"):
         state.lsar_enabled = True
+    for key, name in (("gate_max_cycles", "max_cycles"), ("gate_median_samples", "median_samples")):
+        if _int(rg.get(name)) is not None:
+            state.metrics[key] = _int(rg.get(name))
     max_cycles = _int((config.get("pipeline") or {}).get("max_revision_cycles"))
     if max_cycles is not None:
         state.max_rounds = max_cycles + 1
@@ -2256,6 +2458,8 @@ def _stage_details(state: RunState) -> None:
                 detail = "no PDF (LaTeX not installed)"
             else:
                 detail = "no PDF"
+        elif st.key == "REVIEWING" and st.status == "running" and state.gate_progress:
+            detail = gate_step_detail(state)
         elif st.key == "REVIEWING":
             if m.get("gate_ran") is False and m.get("gate_skip_reason"):
                 detail = "did not run"
@@ -2279,6 +2483,37 @@ def _stage_details(state: RunState) -> None:
             else:
                 detail = "no problems found"
         st.detail = detail
+
+
+def gate_step_detail(state: RunState) -> str:
+    """The review step's row while the gate runs: "review 2 of up to 6",
+    "revising the paper", or that a failed revision ends the reviews."""
+    p = state.gate_progress if isinstance(state.gate_progress, dict) else {}
+    started = int(p.get("started") or 0)
+    if p.get("revision") == "failed" and p.get("more") is False and not p.get("running"):
+        return "revision failed · no further reviews"
+    if p.get("revision") == "running":
+        return "revising the paper"
+    if not started:
+        return ""
+    up_to = gate_reviews_up_to(state)
+    text = f"review {started}" + (f" of up to {up_to}" if up_to else "")
+    return text if p.get("running") else f"{text} done"
+
+
+def gate_now_text(state: RunState, base: str) -> str:
+    """What the review gate is doing, for the "Now" line."""
+    p = state.gate_progress if isinstance(state.gate_progress, dict) else {}
+    started = int(p.get("started") or 0)
+    if p.get("revision") == "failed" and not p.get("running"):
+        return gate_revision_words(p) + "."
+    if p.get("revision") == "running":
+        return "Revising the paper from the reviewer's comments, before it is reviewed again."
+    if p.get("running") and started:
+        up_to = gate_reviews_up_to(state)
+        which = f"review {started} of up to {up_to}" if up_to else f"review {started}"
+        return f"{base} This is {which}."
+    return base
 
 
 def minority_share(balance: Any) -> float | None:
@@ -2337,6 +2572,8 @@ def describe_now(state: RunState, now: datetime | None = None) -> str:
         by_checks = entry.get("now_checks") if isinstance(entry, dict) else None
         base = str(by_checks or "The automatic checks sent the work back; "
                    "the affected steps are being redone.")
+    if st.key == "REVIEWING" and state.gate_progress:
+        base = gate_now_text(state, base)
     if state.llm_wait and state.llm_wait.get("seconds"):
         secs = int(state.llm_wait["seconds"] or 0)
         return (f"The AI service asked us to slow down; waiting {secs} s before "
@@ -2477,6 +2714,7 @@ __all__ = [
     "cost_is_lower_bound",
     "cost_line",
     "cost_parts",
+    "gate_reviews_up_to",
     "reviews_not_counted",
     "StageState",
     "StateReader",
