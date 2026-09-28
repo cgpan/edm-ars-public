@@ -443,7 +443,8 @@ def review_usages(
     folder: ``calls`` (one row per call: ``model``, ``provider``,
     ``stage``, ``prompt_tokens``, ``completion_tokens``,
     ``cached_prompt_tokens`` and, from the LSAR that stamps them,
-    ``timestamp``) beside per-review totals and ``by_model``. A payload
+    ``timestamp`` (UTC, with its offset) and ``reasoning_tokens``) beside
+    per-review totals and ``by_model``. A payload
     with totals but no ``calls`` is split evenly over each model's
     ``n_calls``, so the call count and the cost both come out right.
 
@@ -472,6 +473,7 @@ def review_usages(
                 "prompt": _count(call.get("prompt_tokens")),
                 "completion": _count(call.get("completion_tokens")),
                 "cached": _count(call.get("cached_prompt_tokens")),
+                "reasoning": _count(call.get("reasoning_tokens")),
                 "timestamp": call.get("timestamp"),
             })
     else:
@@ -505,6 +507,7 @@ def review_usages(
                     "prompt": prompt // n + (prompt % n if first else 0),
                     "completion": completion // n + (completion % n if first else 0),
                     "cached": cached // n + (cached % n if first else 0),
+                    "reasoning": 0,
                     "timestamp": None,
                 })
 
@@ -517,6 +520,7 @@ def review_usages(
             prompt_tokens=row["prompt"],
             completion_tokens=row["completion"],
             cached_prompt_tokens=min(row["cached"], row["prompt"]),
+            reasoning_tokens=row["reasoning"],
             stage=stage,
             component=REVIEW_COMPONENT,
         )

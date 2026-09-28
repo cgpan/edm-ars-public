@@ -111,6 +111,17 @@ class TestReviewUsages:
         assert [r.time_source for r in rows] == [None, None]
         assert summarize(rows, TOD).cost_usd == PEAK + OFF_PEAK
 
+    def test_the_rows_lsar_now_writes_are_read_as_they_are(self) -> None:
+        """LSAR fix/released-issues (f6bc00c, f0ac437): each row carries an
+        aware UTC timestamp, its stage, reasoning tokens and an outcome."""
+        payload = _lsar_payload(1)
+        payload["calls"][0].update(timestamp="2026-09-28T07:30:00+00:00",
+                                   reasoning_tokens=1234, outcome="truncated")
+        [row] = review_usages(payload, pricing=TOD)
+        assert row.time_source is None and row.reasoning_tokens == 1234
+        # A refused answer was still billed: it is priced like any other.
+        assert summarize([row], TOD).cost_usd == PEAK
+
     def test_a_window_across_a_peak_boundary_is_charged_peak_and_estimated(self) -> None:
         rows = review_usages(_lsar_payload(), started="2026-09-28T09:55:00",
                              ended="2026-09-28T10:05:00", pricing=TOD)
