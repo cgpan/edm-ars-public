@@ -2234,6 +2234,7 @@ class Orchestrator:
             self.ctx.current_state = PipelineState.VERIFYING
             return
         self._log("Orchestrator", "Starting REVIEWING stage (LSAR quality gate)")
+        gate: Optional[ReviewGate] = None
         try:
             gate = ReviewGate(
                 config=self.config,
@@ -2306,6 +2307,8 @@ class Orchestrator:
                 plain="The review gate could not run",
                 reason=self.ctx.review_gate_result["skip_reason"],
             )
+
+        self._keep_gate_usage(gate)
 
         # The gate records a verdict; VERIFYING is what decides whether
         # the run is releasable. Proceeding unconditionally here is fine
@@ -3129,6 +3132,33 @@ class Orchestrator:
         log_path = os.path.join(self.ctx.output_dir, "pipeline.log")
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"{entry['timestamp']} [{agent}] {message}\n")
+
+    def _keep_gate_usage(self, gate: Any) -> None:
+        """Copy the review gate's metered calls into ``ctx.log``.
+
+        The gate writes each call to token_usage.jsonl as it happens; the
+        checkpoint copy is the second record every agent call already has
+        (see ``cost.load_usage_from_checkpoint``), so a lost or truncated
+        usage file no longer drops the review's share of the cost.
+        Never raises.
+        """
+        for usage in list(getattr(gate, "usage_records", None) or []):
+            try:
+                self.ctx.log.append(
+                    {
+                        "timestamp": usage.timestamp,
+                        "agent": usage.agent,
+                        "tokens_used": usage.total_tokens,
+                        "prompt_tokens": usage.prompt_tokens,
+                        "completion_tokens": usage.completion_tokens,
+                        "cached_prompt_tokens": usage.cached_prompt_tokens,
+                        "model": usage.model,
+                        "component": usage.component,
+                        "time_source": usage.time_source,
+                    }
+                )
+            except Exception:  # noqa: BLE001 - accounting is never fatal
+                continue
 
     def _check_cost(self) -> None:
         """Compare measured spend against the run budget (K1).

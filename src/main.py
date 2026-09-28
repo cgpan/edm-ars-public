@@ -1594,7 +1594,7 @@ def _progress_line(record: dict) -> str | None:
             + (" (paper will be marked UNVERIFIED)" if data.get("unverified") else "")
         )
     if etype in ("llm.wait", "compile.end", "gate.cycle", "gate.review",
-                 "gate.skipped", "verify.end"):
+                 "gate.skipped", "gate.cost", "verify.end"):
         return f"  {plain}" if plain else None
     return None
 

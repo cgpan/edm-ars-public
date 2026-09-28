@@ -21,9 +21,30 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from src.cost import (
+    REVIEW_COMPONENT,
+    TokenUsage,
+    cost_usd,
+    extract_usage,
+    load_pricing,
+    load_review_usage,
+    rate_is_unverified,
+    rate_period,
+    record_usage,
+    review_usages,
+    write_review_window,
+)
+
+
+def _utc_now_iso() -> str:
+    """Naive-UTC ISO time, the form ``BaseAgent._meter`` stamps calls with."""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +372,18 @@ class ReviewGate:
                 )
         # Arc P4: most recent manuscript lint, fed to the reviser.
         self._last_lint: Any = None
+        # Metering. Every LLM call the gate pays for (each LSAR review's
+        # calls, each revision call) goes to the run's token_usage.jsonl
+        # as it happens, as component "review", and is announced as an
+        # llm.end event so a live view's cost moves during the gate.
+        #: The rows recorded, for the orchestrator's checkpoint copy.
+        self.usage_records: list[TokenUsage] = []
+        #: One entry per LSAR review: folder, window, calls, cost.
+        self.review_costs: list[dict] = []
+        self._pricing: Optional[dict] = None
+        self._spent: dict[str, Any] = {
+            "usd": 0.0, "calls": 0, "unpriced": 0, "estimated": False,
+        }
         self.revision_model: str = rg_cfg.get("revision_model", "claude-sonnet-4-6")
         self.revision_max_tokens: int = rg_cfg.get("revision_max_tokens", 16000)
 
@@ -719,12 +752,21 @@ class ReviewGate:
             pipeline = LSARPipeline(config_path=config_path)
             self._log(f"Running LSAR review (cycle {cycle}, venue={self.venue})")
 
-            report_md, report_json = pipeline.run(
-                pdf_path=Path(pdf_path),
-                venue=self.venue,
-                force=True,
-                output_dir=cycle_dir,
-            )
+            started = _utc_now_iso()
+            started_epoch = time.time()
+            try:
+                report_md, report_json = pipeline.run(
+                    pdf_path=Path(pdf_path),
+                    venue=self.venue,
+                    force=True,
+                    output_dir=cycle_dir,
+                )
+            finally:
+                # Metered whether or not the review finished: a review
+                # that raised part-way still paid for its calls.
+                self._meter_review(
+                    cycle_dir, started, _utc_now_iso(), started_epoch
+                )
 
             # Persist LSAR outputs alongside EDM-ARS artefacts
             (cycle_dir / "lsar_report.md").write_text(
@@ -767,6 +809,176 @@ class ReviewGate:
             _detach_lsar_log_file(lsar_log_file)
             if added_to_path and lsar_root in sys.path:
                 sys.path.remove(lsar_root)
+
+    # ------------------------------------------------------------------
+    # 2a. Metering: the gate's reviews and revisions are part of the run
+    # ------------------------------------------------------------------
+
+    def _gate_pricing(self) -> dict:
+        if self._pricing is None:
+            try:
+                self._pricing = load_pricing(self.config)
+            except Exception:  # noqa: BLE001 - unpriced is a valid outcome
+                self._pricing = {}
+        return self._pricing
+
+    def _record_calls(self, usages: list[TokenUsage], cycle: Optional[int] = None) -> Optional[float]:
+        """Write *usages* to the run's token_usage.jsonl and announce each.
+
+        Each call becomes an ``llm.end`` event, the one a live view
+        already adds to its running cost. Returns the priced cost of
+        these calls, None when none of them could be priced. Never raises.
+        """
+        pricing = self._gate_pricing()
+        batch: Optional[float] = None
+        for usage in usages:
+            try:
+                usage.component = REVIEW_COMPONENT
+                record_usage(str(self.output_dir), usage)
+                self.usage_records.append(usage)
+                cost = cost_usd(usage, pricing)
+                estimated = False
+                self._spent["calls"] += 1
+                if cost is None:
+                    self._spent["unpriced"] += 1
+                else:
+                    rates = pricing.get(usage.model)
+                    estimated = rate_is_unverified(rates) or (
+                        rate_period(usage, rates) == "untimed"
+                    )
+                    batch = (batch or 0.0) + cost
+                    self._spent["usd"] += cost
+                    self._spent["estimated"] = self._spent["estimated"] or estimated
+                self._event(
+                    "llm.end",
+                    cycle=cycle,
+                    agent=usage.agent,
+                    model=usage.model,
+                    provider=usage.provider,
+                    ok=True,
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    cached_tokens=usage.cached_prompt_tokens,
+                    cost_usd=cost,
+                    cost_estimated=estimated,
+                    component=REVIEW_COMPONENT,
+                )
+            except Exception:  # noqa: BLE001 - metering is never fatal
+                continue
+        return batch
+
+    def _announce_spent(self, what: str, cycle: Optional[int] = None) -> None:
+        """A ``gate.cost`` event with the gate's running total."""
+        spent = self._spent
+        total = round(float(spent["usd"]), 6)
+        approx = spent["estimated"] or spent["unpriced"]
+        self._event(
+            "gate.cost",
+            cycle=cycle,
+            plain=(
+                f"{what}; the review gate has cost "
+                f"{'about ' if approx else ''}US${total:.2f} so far "
+                f"({spent['calls']} AI calls)"
+            ),
+            cost_usd=total,
+            n_calls=spent["calls"],
+            unpriced_calls=spent["unpriced"],
+            cost_estimated=bool(spent["estimated"]),
+        )
+
+    def _drain_lsar_usage(self) -> list:
+        """Calls LSAR measured but never wrote out.
+
+        LSAR writes token_usage.json only when a review completes; the
+        calls of a review that raised part-way are still in its
+        in-process log. Only callable while LSAR is importable.
+        """
+        try:
+            from lsar.utils.llm_client import drain_usage_log  # type: ignore[import-not-found]
+
+            calls = drain_usage_log()
+            return [c for c in calls if isinstance(c, dict)] if isinstance(calls, list) else []
+        except Exception:  # noqa: BLE001 - an older LSAR, or none
+            return []
+
+    def _meter_review(
+        self, review_dir: Path, started: str, ended: str, started_epoch: float
+    ) -> None:
+        """Meter one LSAR review. Never raises.
+
+        Reads the ``token_usage.json`` LSAR wrote into *review_dir* during
+        this review (one left by an earlier review of the same folder is
+        ignored), or the calls a failed review left in LSAR's log, and
+        records them as component "review". Untimed calls are priced from
+        the review's window, saved beside them as review_window.json.
+        """
+        try:
+            write_review_window(review_dir, started, ended)
+            usage_path = review_dir / "token_usage.json"
+            usages: list[TokenUsage] = []
+            fresh = (
+                usage_path.exists()
+                and usage_path.stat().st_mtime >= started_epoch - 1.0
+            )
+            if fresh:
+                usages = load_review_usage(review_dir, self._gate_pricing())
+            leftover = self._drain_lsar_usage()
+            if leftover:
+                # A review that raised: keep what it spent beside its other
+                # artefacts too, so the folder accounts for itself.
+                payload = {"calls": leftover, "note": (
+                    "Written by the EDM-ARS review gate: LSAR raised before "
+                    "writing its own usage for this review."
+                )}
+                if not fresh:
+                    try:
+                        usage_path.write_text(
+                            json.dumps(payload, indent=2), encoding="utf-8"
+                        )
+                    except OSError:
+                        pass
+                usages += review_usages(
+                    payload, started=started, ended=ended,
+                    pricing=self._gate_pricing(),
+                )
+            cycle = self._review_cycle_number(review_dir)
+            cost = self._record_calls(usages, cycle=cycle)
+            self.review_costs.append({
+                "review_dir": review_dir.name,
+                "started_utc": started,
+                "ended_utc": ended,
+                "n_calls": len(usages),
+                "cost_usd": None if cost is None else round(cost, 6),
+                "time_sources": sorted({u.time_source or "call" for u in usages}),
+            })
+            self._announce_spent(
+                f"LSAR review {review_dir.name} used {len(usages)} AI calls",
+                cycle=cycle,
+            )
+        except Exception:  # noqa: BLE001 - metering is never fatal
+            pass
+
+    @staticmethod
+    def _review_cycle_number(review_dir: Path) -> Optional[int]:
+        """cycle_1 -> 1; a median sample's cycle_102 -> 1."""
+        m = re.fullmatch(r"cycle_(\d+)", review_dir.name)
+        if not m:
+            return None
+        n = int(m.group(1))
+        return n // 100 if n >= 100 else n
+
+    def _meter_revision_response(self, response: Any) -> Optional[TokenUsage]:
+        """Record one revision call's measured usage. Never raises."""
+        try:
+            usage = extract_usage(
+                response, "ReviewGate", self._llm_model, self._llm_provider
+            )
+            usage.timestamp = _utc_now_iso()
+            usage.stage = "REVIEWING"
+            self._record_calls([usage])
+            return usage
+        except Exception:  # noqa: BLE001
+            return None
 
     # ------------------------------------------------------------------
     # 3. Evaluate pass/fail gate
@@ -1008,6 +1220,7 @@ class ReviewGate:
                         {"role": "user", "content": prompt},
                     ],
                 )
+                self._meter_revision_response(response)
                 return response.choices[0].message.content or ""
             with self._llm_client.messages.stream(
                 model=self._llm_model,
@@ -1016,16 +1229,31 @@ class ReviewGate:
                 system=self._REVISION_SYSTEM_TEXT,
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
-                return stream.get_final_text()
+                final = stream.get_final_message()
+            self._meter_revision_response(final)
+            return "".join(
+                getattr(block, "text", "") or ""
+                for block in getattr(final, "content", None) or []
+                if getattr(block, "type", None) == "text"
+            )
 
+        self._event(
+            "llm.start",
+            agent="ReviewGate",
+            plain=f"Waiting for {self._llm_model} to revise the paper",
+            model=self._llm_model,
+            provider=self._llm_provider,
+        )
         try:
-            return call_with_retries(
+            text = call_with_retries(
                 _attempt,
                 provider_cfg=self._llm_provider_cfg,
                 model=self._llm_model,
                 settings=self._llm_settings,
                 on_wait=lambda _s, _a, _r, message: self._log(message),
             )
+            self._announce_spent("The paper revision call finished")
+            return text
         except ProviderError as exc:
             self.revision_failures.append({"code": exc.code, "message": str(exc)})
             self._log(f"LLM revision call failed [{exc.code}]: {exc}")
@@ -2044,6 +2272,16 @@ Overall: {diagnosis.get('overall_score', '?')}/10
                 self, "revision_unavailable_reason", None
             ),
             "revision_failures": list(getattr(self, "revision_failures", []) or []),
+            # What the gate itself spent: every LSAR review's calls and the
+            # revision calls, also in token_usage.jsonl / run_cost.json as
+            # component "review".
+            "cost": {
+                "cost_usd": round(float(self._spent["usd"]), 6),
+                "n_calls": self._spent["calls"],
+                "unpriced_calls": self._spent["unpriced"],
+                "estimated": bool(self._spent["estimated"]),
+                "reviews": list(self.review_costs),
+            },
             # False when paper.tex was revised after the review whose
             # score is final_score, i.e. the delivered manuscript was
             # never scored; None when no review ran.
