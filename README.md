@@ -545,10 +545,16 @@ records prompt, completion and cached-token counts separately in
 `token_usage.jsonl`, and `run_cost.json` prices each call at the rate for the
 hour it was made. **A model with no configured rate reports `null`, never
 `$0`** — and because raw counts are stored, changing a rate re-prices
-historical runs without re-running them. `run_cost.json` leaves out the review
-gate's own calls (LSAR records them in `lsar_review/cycle_*/token_usage.json`)
-and any call cut off by a stop or a crash, which reports no usage but may still
-be billed.
+historical runs without re-running them. The review gate's calls, LSAR's
+reviews and the gate's paper revisions, are in both files as component
+`review`: `by_component` in `run_cost.json` splits the run into `pipeline` and
+`review`, and `pipeline_cost_usd` and `review_cost_usd` repeat the two
+subtotals. LSAR records each review's calls in
+`lsar_review/cycle_*/token_usage.json`; a call without its own time is priced
+from the review's start and end (`review_window.json` beside it), or at the
+peak rate, as an estimate, when that window crosses the start or end of the
+peak hours. A call cut off by a stop or a crash reports no usage, so it is not
+counted, although it may still be billed.
 
 Rates change. Check them against your provider's price list before quoting a
 figure, and update `verified_on` in `config.yaml` when you do. A rate marked
