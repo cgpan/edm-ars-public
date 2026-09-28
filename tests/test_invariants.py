@@ -1482,6 +1482,83 @@ def test_a_percentage_derivable_from_the_outcome_csvs_is_not_flagged(tmp_path):
     assert "INV_PERCENTAGE_FROM_SPEC_NOT_RUN" not in _codes(run)
 
 
+#: The round-3 Mac run's sample counts, from its data_report.json.
+_R3_DATA_REPORT = {
+    "original_n": 23503,
+    "analytic_n": 17335,
+    "n_train": 13773,
+    "n_test": 3562,
+    "class_balance": {"class_0": 3319, "class_1": 10454},
+    "missingness_summary": {
+        "X1STUEDEXPCT": {"pct_missing": 27.4, "imputation_method": "IterativeImputer"},
+        "X1PAREDU": {"pct_missing": 24.2, "imputation_method": "IterativeImputer"},
+        "X1RACE": {"pct_missing": 4.3, "imputation_method": "mode"},
+        "X1SEX": {"pct_missing": 0.02, "imputation_method": "mode"},
+    },
+}
+
+
+def test_a_percentage_derivable_from_the_sample_counts_is_not_flagged(tmp_path):
+    """Round-3 Mac paper: "approximately 26% missingness" is 1 - 17,335/23,503.
+
+    The spec guessed the same figure before the run, which is why the
+    check looked at it; the run's own counts give 26.2%, which prints as
+    26 at the precision the sentence uses.
+    """
+    run = _run(
+        tmp_path,
+        research_spec__json={
+            "potential_limitations": [
+                "X4EVRATNDCLG has approximately 26% missingness; complete-case "
+                "analysis on the outcome may introduce bias"
+            ]
+        },
+        data_report__json=_R3_DATA_REPORT,
+        results__json={"best_metric_value": 0.801488285622901},
+        paper__tex=(
+            r"\begin{document} However, the college enrollment outcome itself "
+            r"has approximately 26\% missingness, which may be non-random (MNAR); "
+            r"complete-case analysis may bias estimates. \end{document}"
+        ),
+    )
+    assert "INV_PERCENTAGE_FROM_SPEC_NOT_RUN" not in _codes(run)
+
+
+def test_a_count_ratio_is_held_to_the_printed_precision(tmp_path):
+    """26.2 derives from the counts; 26.8 and 25 do not, and stay flagged."""
+    for printed, fires in (("26.2", False), ("26.8", True), ("25", True)):
+        run = _run(
+            tmp_path,
+            research_spec__json={"note": f"expect about {printed}% missing outcome"},
+            data_report__json=_R3_DATA_REPORT,
+            paper__tex=(
+                r"\begin{document} The outcome has " + printed
+                + r"\% missingness. \end{document}"
+            ),
+        )
+        assert ("INV_PERCENTAGE_FROM_SPEC_NOT_RUN" in _codes(run)) is fires, printed
+
+
+def test_a_split_share_does_not_excuse_a_planned_whole_number(tmp_path):
+    """n_test / analytic_n is about 20% in every run; "20%" is not therefore derived.
+
+    Here the test share is 4,786 / 23,503 = 20.36% (an archived run's
+    counts), which prints as 20 at whole-number precision. A spec that
+    planned "about 20% non-completers" and a paper that prints it are
+    still flagged.
+    """
+    run = _run(
+        tmp_path,
+        research_spec__json={"note": "we expect about 20% non-completers"},
+        data_report__json={
+            "original_n": 23503, "analytic_n": 23503,
+            "n_train": 18717, "n_test": 4786,
+        },
+        paper__tex=r"\begin{document} About 20\% of students did not complete. \end{document}",
+    )
+    assert "INV_PERCENTAGE_FROM_SPEC_NOT_RUN" in _codes(run)
+
+
 # ---------------------------------------------------------------------------
 # INV_CLASS_BALANCE_WRONG_SAMPLE
 # ---------------------------------------------------------------------------

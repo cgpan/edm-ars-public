@@ -2221,6 +2221,56 @@ def _outcome_rates(a: RunArtifacts) -> set:
     return out
 
 
+_SAMPLE_COUNTS = ("original_n", "analytic_n", "n_train", "n_test")
+_SPLIT_COUNTS = ("n_train", "n_test")
+
+
+def _count_ratios(dr: dict) -> tuple[set, set]:
+    """Percentages one division away from data_report's own counts.
+
+    "The outcome itself has approximately 26% missingness" is
+    1 - 17,335 / 23,503 = 26.2%, and no field of any artifact holds 26.2:
+    the report stores the two counts, not their ratio. Every ratio of two
+    sample sizes (and its complement) is included, and for each variable
+    in missingness_summary its missing count over the file, the analytic
+    sample, and its own observed-plus-missing total.
+
+    Returned in two sets. A ratio involving n_train or n_test is a split
+    share, about 20 or 80 in nearly every run by design, so at half a
+    unit it would excuse every "20%" a spec ever planned. Replayed over
+    the archive that way, it excused three sentences whose 20% had
+    nothing to do with the split (two missingness thresholds, one
+    hypothetical "top 20%"). Split shares come back separately, to be
+    matched only at the fixed 0.05.
+    """
+    loose: set = set()
+    split: set = set()
+    named = [(k, _f(dr.get(k))) for k in _SAMPLE_COUNTS]
+    counts = [(k, v) for k, v in named if v and v > 0]
+    for kn, num in counts:
+        for kd, den in counts:
+            if 0 < num < den:
+                p = 100.0 * num / den
+                bucket = split if {kn, kd} & set(_SPLIT_COUNTS) else loose
+                bucket |= {p, 100.0 - p}
+    miss = dr.get("missingness_summary")
+    if isinstance(miss, dict):
+        bases = [_f(dr.get("original_n")), _f(dr.get("analytic_n"))]
+        for info in miss.values():
+            if not isinstance(info, dict):
+                continue
+            n_miss = _f(info.get("n_missing"))
+            if n_miss is None:
+                continue
+            n_obs = _f(info.get("n_observed", info.get("n_present")))
+            own = n_miss + n_obs if n_obs is not None else None
+            for base in (*bases, own):
+                if base and base > 0 and 0 <= n_miss <= base:
+                    p = 100.0 * n_miss / base
+                    loose |= {p, 100.0 - p}
+    return loose, split
+
+
 def check_percentage_from_spec_not_run(a: RunArtifacts) -> list[Finding]:
     """A percentage that matches the plan and nothing the run computed.
 
@@ -2247,6 +2297,12 @@ def check_percentage_from_spec_not_run(a: RunArtifacts) -> list[Finding]:
     _all_numbers(a.results, computed)
     computed |= {round(x * 100, 4) for x in list(computed) if 0 < x < 1}
     computed |= _outcome_rates(a)
+    # Ratios of the report's own counts are held to the printed precision
+    # ("approximately 26%" is 26.2%). The rest of the computed pool keeps
+    # the fixed 0.05: it holds hundreds of values, and at half a unit a
+    # whole number would find a neighbour in it almost every time.
+    ratios, split_shares = _count_ratios(a.data_report)
+    computed |= split_shares
     if not planned or not computed:
         return []
 
@@ -2262,6 +2318,9 @@ def check_percentage_from_spec_not_run(a: RunArtifacts) -> list[Finding]:
         if not any(abs(v - s) < 0.05 for s in planned):
             continue
         if any(abs(v - c) < 0.05 for c in computed):
+            continue
+        tol = _half_unit(m.group(1)) * 1.02 + 1e-9
+        if any(abs(v - r) <= tol for r in ratios):
             continue
         seen.add(v)
         ctx = re.sub(r"\s+", " ", body[max(0, m.start() - 140) : m.end() + 60])
