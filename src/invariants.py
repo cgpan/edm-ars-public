@@ -2033,6 +2033,30 @@ def _enclosing_sentence(text: str, pos: int) -> tuple[str, int]:
     return text[start:end], start
 
 
+#: Where one clause of a methods sentence ends and the next begins: a
+#: semicolon, or a comma before a coordinating conjunction.
+_CLAUSE_BREAK = re.compile(r";|,\s+(?=(?:and|but|while|whereas)\b)")
+
+
+def _clause_span(sentence: str, pos: int) -> tuple[int, int]:
+    """Start and end offsets of the clause of *sentence* holding *pos*.
+
+    Breaks inside parentheses or brackets are not clause breaks: "(X1RACE,
+    X1SEX, and X1LOCALE)" is one list.
+    """
+    lo, hi = 0, len(sentence)
+    for m in _CLAUSE_BREAK.finditer(sentence):
+        prefix = sentence[: m.start()]
+        if prefix.count("(") > prefix.count(")") or prefix.count("[") > prefix.count("]"):
+            continue
+        if m.start() < pos:
+            lo = m.end()
+        else:
+            hi = m.start()
+            break
+    return lo, hi
+
+
 def check_imputation_method_mismatch(a: RunArtifacts) -> list[Finding]:
     """The paper names an imputation method the data report contradicts.
 
@@ -2072,9 +2096,18 @@ def check_imputation_method_mismatch(a: RunArtifacts) -> list[Finding]:
             # four spurious findings on one paper. When no claim precedes
             # the variable -- "Categorical variables (X2STUEDEXPCT, ...)
             # were imputed with the mode" -- take the first that follows.
+            #
+            # And look inside the variable's own clause first. "Continuous
+            # predictors were imputed using IterativeImputer; categorical
+            # predictors (X1RACE, X1SEX) were imputed using the mode" has
+            # a claim BEFORE X1RACE, but in the other clause; the one that
+            # names its method comes after the variables. Only a clause
+            # with no claim of its own falls back to the whole sentence.
             pos = vm.start() - sent_start
-            preceding = [m for m in claims if m.end() <= pos]
-            nearest = preceding[-1] if preceding else claims[0]
+            lo, hi = _clause_span(sent, pos)
+            pool = [m for m in claims if lo <= m.start() < hi] or claims
+            preceding = [m for m in pool if m.end() <= pos]
+            nearest = preceding[-1] if preceding else pool[0]
             claimed = (nearest.group(1) or nearest.group(2) or "").strip().lower()
             if not claimed:
                 continue

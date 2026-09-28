@@ -1171,6 +1171,69 @@ def test_a_two_clause_methods_sentence_attributes_by_clause(tmp_path):
     assert "INV_IMPUTATION_METHOD_MISMATCH" not in _codes(run)
 
 
+_R3_IMPUTATION_SENTENCE = (
+    r"\begin{document} Two predictors exceeded the 20\% missingness threshold. "
+    r"Continuous predictors were imputed using IterativeImputer; categorical "
+    r"predictors (X1RACE, X1SEX) were imputed using the mode. \end{document}"
+)
+
+
+def test_a_variable_takes_the_method_of_its_own_clause(tmp_path):
+    """Round-3 Mac paper: two major findings on a correct sentence.
+
+    The claim that precedes X1RACE ("imputed using IterativeImputer")
+    belongs to the clause before the semicolon; the variables' own
+    clause names the mode, which is what data_report recorded.
+    """
+    run = _run(
+        tmp_path,
+        data_report__json={
+            "missingness_summary": {
+                "X1RACE": {"pct_missing": 4.3, "imputation_method": "mode"},
+                "X1SEX": {"pct_missing": 0.02, "imputation_method": "mode"},
+                "X1SES": {"pct_missing": 8.8, "imputation_method": "IterativeImputer"},
+            }
+        },
+        paper__tex=_R3_IMPUTATION_SENTENCE,
+    )
+    assert "INV_IMPUTATION_METHOD_MISMATCH" not in _codes(run)
+
+
+def test_the_clause_method_is_still_held_against_the_data_report(tmp_path):
+    """Same sentence, but the data report says X1RACE was not mode-imputed."""
+    run = _run(
+        tmp_path,
+        data_report__json={
+            "missingness_summary": {
+                "X1RACE": {"pct_missing": 4.3, "imputation_method": "IterativeImputer"},
+                "X1SEX": {"pct_missing": 0.02, "imputation_method": "mode"},
+            }
+        },
+        paper__tex=_R3_IMPUTATION_SENTENCE,
+    )
+    hits = _by_code(run, "INV_IMPUTATION_METHOD_MISMATCH")
+    assert [(h.evidence["variable"], h.evidence["claimed"]) for h in hits] == [
+        ("X1RACE", "mode")
+    ]
+
+
+def test_a_comma_and_clause_is_a_clause_too(tmp_path):
+    run = _run(
+        tmp_path,
+        data_report__json={
+            "missingness_summary": {
+                "X1RACE": {"pct_missing": 4.3, "imputation_method": "mode"},
+            }
+        },
+        paper__tex=(
+            r"\begin{document} Continuous predictors were imputed using "
+            r"IterativeImputer, and categorical predictors (X1RACE, X1SEX, and "
+            r"X1LOCALE) were imputed using the mode. \end{document}"
+        ),
+    )
+    assert "INV_IMPUTATION_METHOD_MISMATCH" not in _codes(run)
+
+
 # ---------------------------------------------------------------------------
 # a paper that says nothing passes every other check in this module
 # ---------------------------------------------------------------------------
