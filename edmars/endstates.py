@@ -1054,9 +1054,12 @@ def _ready(run_dir: Path, state: RunState, status: dict[str, Any] | None,
             key = "issues_one" if n == 1 else "issues_many"
         label = fill(labels.get(key, "Ready, with {n} issues to check"), n=n)
         headline = "Your paper is written, but the final checks found problems to fix before sharing it."
+        # The result screen and summary.html both put this after the
+        # "Please check" list it describes.
         why = ("The final checks compare the paper with the study's own numbers, "
-               "figures and citations. Each item below is something the paper states "
-               "that its own results do not support, or a part that is missing.")
+               "figures and citations. Each item in the list above is something the "
+               "paper states that its own results do not support, or a part that is "
+               "missing.")
     elif code == "GATE_FAILED":
         label = str(labels.get("gate_failed", "Ready, below the review benchmark"))
         headline = "Your paper is written; the automated reviewer scored it below the benchmark."

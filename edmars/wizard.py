@@ -2061,6 +2061,9 @@ class _Wizard:
         from edmars import lsar
 
         if self._lsar_ready():
+            older = lsar.outdated(self.s)
+            if older:
+                return self._update_lsar(older, consent=consent)
             self.ok("LSAR is already installed.")
             return True
         repo = str(getattr(lsar, "LSAR_REPO", "cgpan/LSAR-public"))
@@ -2091,6 +2094,37 @@ class _Wizard:
             self.set("lsar.ref", ref)
         self.save()
         self.ok(f"LSAR is installed in {home}.")
+        return True
+
+    def _update_lsar(self, older: str, *, consent: bool | None) -> bool:
+        """Bring a working but older LSAR to the version this EDM-ARS pins.
+
+        The one already installed keeps working whatever happens here, so
+        the reviewer stays on (True) even when the update is declined or
+        fails, for example without a network: a warning, never an error.
+        """
+        from edmars import lsar
+
+        ref = str(getattr(lsar, "LSAR_REF", "") or "")
+        if consent is None:
+            consent = self.yes(f"LSAR is installed, but it is an older version ({older[:12]}) than the one this "
+                               f"EDM-ARS was tested with ({ref[:12]}). Update it now? It is free apart from a "
+                               "small download from GitHub, and takes a few minutes.", default=True)
+        if not consent:
+            self.info("LSAR was not updated; the version you have stays in use. Update it any time with "
+                      "`edmars setup reviewer`.")
+            return True
+        self.info("Updating LSAR (this takes a few minutes)\u2026")
+        try:
+            home = Path(lsar.update(self.s))
+        except Exception as exc:  # noqa: BLE001
+            why = _doctor.redact(str(exc))
+            again = "" if "edmars setup reviewer" in why else " Try again later with `edmars setup reviewer`."
+            self.warn(f"LSAR could not be updated, so the version you have stays in use: {why}{again}")
+            return True
+        self.set("lsar.home", str(home))
+        self.save()
+        self.ok(f"LSAR is updated to version {ref[:12]} in {home}.")
         return True
 
     def _s9_noninteractive(self) -> None:

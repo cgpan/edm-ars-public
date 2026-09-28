@@ -338,8 +338,12 @@
     # skipped). The command reinstalls them when the settings record an
     # LSAR install, checks that LSAR loads, and says whether setup was
     # already done; being the new edmars, it finds the settings where every
-    # other command does. Returns setup (none, partial or done) and reviewer
-    # (none, ok, repaired or failed); both are '' when it could not answer.
+    # other command does. Being the new edmars, its LSAR_REF (edmars\lsar.py)
+    # is also the LSAR this release was tested with: an LSAR set up by an
+    # earlier release is updated to it first, and kept in use when that
+    # cannot be done (no network, a study running). Returns setup (none,
+    # partial or done) and reviewer (none, ok, repaired, updated, outdated or
+    # failed); both are '' when it could not answer.
     function Invoke-AfterInstall([string]$Launcher, [string]$StateFile) {
         $state = @{ setup = ''; reviewer = '' }
         if (Test-Path -LiteralPath $StateFile) { Remove-Item -LiteralPath $StateFile -Force }
@@ -364,6 +368,21 @@
             }
         }
         return $state
+    }
+
+    # The installer's last lines, when the automated reviewer needs the user
+    # ($State is the reviewer state from Invoke-AfterInstall). Last, so they
+    # are not scrolled away.
+    function Write-ReviewerNote([string]$State, [string]$RunCmd) {
+        if ($State -eq 'failed') {
+            Say ''
+            Warn "The automated reviewer (LSAR) needs repair: run '$RunCmd setup reviewer'."
+            Say '    Until then every automated review is skipped. The reason is given above.'
+        } elseif ($State -eq 'outdated') {
+            Say ''
+            Warn "The automated reviewer (LSAR) is an older version and could not be updated: run '$RunCmd setup reviewer' to update it (free apart from a small download)."
+            Say '    Until then reviews use the older version. The reason is given above.'
+        }
     }
 
     # Copy a checkout without git history, caches, raw data, run outputs or
@@ -651,11 +670,12 @@
         Say (Get-PathPlanLine (Get-RawUserPath) $bin ([bool]$NoModifyPath))
         if ($previous) {
             Say "  8. Check the edmars command, and put the automated reviewer's (LSAR's) Python"
-            Say '     packages into the new environment if it is set up. Your settings, keys,'
+            Say '     packages into the new environment if it is set up (first updating LSAR'
+            Say '     from GitHub if this release was tested with a newer one). Your settings,'
             if ($NoOnboard) {
-                Say '     datasets and studies are kept.'
+                Say '     keys, datasets and studies are kept.'
             } else {
-                Say '     datasets and studies are kept; the setup wizard starts only if setup'
+                Say '     keys, datasets and studies are kept; the setup wizard starts only if setup'
                 Say '     was not finished.'
             }
         } elseif ($NoOnboard) {
@@ -1078,12 +1098,7 @@
         Say ''
         Say "To use EDM-ARS, type:  $runCmd"
         if ($pathModified) { Say '(Other terminal windows that were already open need to be reopened first.)' }
-        if ($after.reviewer -eq 'failed') {
-            # Last, so it is not scrolled away: every review is skipped until then.
-            Say ''
-            Warn "The automated reviewer (LSAR) needs repair: run '$runCmd setup reviewer'."
-            Say '    Until then every automated review is skipped. The reason is given above.'
-        }
+        Write-ReviewerNote $after.reviewer $runCmd
     } finally {
         if ($pushed) { Pop-Location }
         foreach ($name in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], 'Process') }

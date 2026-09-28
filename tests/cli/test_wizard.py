@@ -813,6 +813,67 @@ def test_noninteractive_reviewer_installs_with_a_deepseek_key(fx: Fakes, monkeyp
     assert fx.lsar.install_calls == 1
 
 
+OLDER_LSAR = "e974bb2c" + "0" * 32
+
+
+def _older_lsar_set_up(fx: Fakes) -> None:
+    """An LSAR the previous release installed: it loads, so no check fails."""
+    fx.lsar.installed = True
+    fx.lsar.older = OLDER_LSAR
+    fx.write_settings(**acknowledged(lsar={"enabled": True, "auto_review": True,
+                                           "home": str(fx.lsar.home), "ref": OLDER_LSAR}))
+
+
+def test_noninteractive_reviewer_updates_an_older_lsar(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
+    # It said "LSAR is already installed" and kept the older version.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", GOOD_KEY)
+    _older_lsar_set_up(fx)
+    assert run("reviewer", non_interactive=True, options={"lsar_action": "auto"}) == 0
+    assert fx.lsar.update_calls == 1 and fx.lsar.install_calls == 0
+    saved = fx.saved()["lsar"]
+    assert saved["home"] == str(fx.lsar.home.with_name(fx.lsar.home.name + "-updated"))
+    assert saved["enabled"] is True and saved["auto_review"] is True
+    flat = " ".join(fx.ui.output.split())
+    assert "already installed" not in flat
+    assert f"LSAR is updated to version {fx.lsar.LSAR_REF[:12]}" in flat
+
+
+def test_an_lsar_update_that_fails_keeps_the_older_reviewer_on(
+    fx: Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Offline, say: the older LSAR still works, so this is a warning, not
+    # an error, and the reviewer is not switched off.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", GOOD_KEY)
+    _older_lsar_set_up(fx)
+    fx.lsar.update_error = RuntimeError("Could not reach github.com.")
+    assert run("reviewer", non_interactive=True, options={"lsar_action": "auto"}) == 0
+    saved = fx.saved()["lsar"]
+    assert saved["home"] == str(fx.lsar.home) and saved["ref"] == OLDER_LSAR
+    assert saved["enabled"] is True and saved["auto_review"] is True
+    flat = " ".join(fx.ui.output.split())
+    assert "LSAR could not be updated, so the version you have stays in use" in flat
+    assert "Could not reach github.com." in flat and "`edmars setup reviewer`" in flat
+
+
+def test_reviewer_asks_before_updating_an_older_lsar(fx: Fakes) -> None:
+    _older_lsar_set_up(fx)
+    fx.secrets.store["DEEPSEEK_API_KEY"] = GOOD_KEY
+    fx.ui.script = ["manual", False]
+    assert run("reviewer") == 0
+    question = prompt_messages(fx)[-1]
+    assert OLDER_LSAR[:12] in question and fx.lsar.LSAR_REF[:12] in question
+    assert "free apart from a small download" in question
+    assert fx.lsar.update_calls == 0
+    saved = fx.saved()["lsar"]
+    assert saved["home"] == str(fx.lsar.home) and saved["enabled"] is True
+    assert saved["auto_review"] is False
+    assert "the version you have stays in use" in " ".join(fx.ui.output.split())
+
+    fx.ui.script = ["auto", DEFAULT]
+    assert run("reviewer") == 0
+    assert fx.lsar.update_calls == 1
+
+
 def test_noninteractive_dataset_download(fx: Fakes, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", GOOD_KEY)
     assert run(non_interactive=True, options={"accept_disclosure": True, "dataset_action": "download"}) == 0

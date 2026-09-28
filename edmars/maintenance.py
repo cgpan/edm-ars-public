@@ -143,31 +143,57 @@ def after_install(state_file: str | os.PathLike[str] | None = None) -> int:
     set it up". Being the new ``edmars`` itself, it finds the settings
     exactly where every other command does.
 
+    A new release can also pin a newer LSAR than the one installed: the
+    settings keep the commit the previous release installed, and nothing
+    else ever replaced it. Being the new version, this command's
+    ``lsar.LSAR_REF`` is the new pin, so when the installed commit differs
+    it first runs the same update as ``edmars setup reviewer``. When that
+    fails (no network, or a study still running), the old LSAR is made
+    ready in the new environment instead and keeps reviewing.
+
     Writes ``setup=<none|partial|done>`` and ``reviewer=<none|ok|repaired|
-    failed>`` lines to ``state_file``. Returns 0, or 1 when the reviewer
-    needs ``edmars setup reviewer``.
+    updated|outdated|failed>`` lines to ``state_file``; ``outdated`` is an
+    older LSAR that works but could not be updated. Returns 0, or 1 when
+    the reviewer needs ``edmars setup reviewer`` before it can review.
     """
     from edmars import lsar, ui
     from edmars import settings as settings_mod
 
+    def reason(exc: Exception) -> str:
+        return str(exc) if isinstance(exc, lsar.LsarInstallError) else f"{type(exc).__name__}: {exc}"
+
     state = setup_state()
     settings = settings_mod.load()
     reviewer = "none"
-    if settings_mod.get(settings, "lsar.home"):
+    older = lsar.outdated(settings) if settings_mod.get(settings, "lsar.home") else None
+    if older:
+        ui.info(f"The automated reviewer (LSAR) is set up with an older version ({older[:12]}) than "
+                f"this release was tested with ({lsar.LSAR_REF[:12]}): updating it (a small download "
+                "from GitHub) and checking that it loads...")
+        try:
+            lsar.update(settings)
+        except Exception as exc:  # noqa: BLE001 - the old version is still in place
+            ui.warn(f"The automated reviewer could not be updated: {reason(exc)} "
+                    "The version you have is kept.")
+        else:
+            reviewer = "updated"
+            ui.ok("The automated reviewer is updated and ready.")
+    if reviewer == "none" and settings_mod.get(settings, "lsar.home"):
         ui.info("The automated reviewer (LSAR) is set up: installing its Python packages "
                 "into the new environment and checking that it loads...")
         try:
             plan = lsar.reinstall_requirements(settings)
         except Exception as exc:  # noqa: BLE001 - the installer must get its answer
             reviewer = "failed"
-            why = str(exc) if isinstance(exc, lsar.LsarInstallError) else f"{type(exc).__name__}: {exc}"
-            ui.warn(f"The automated reviewer could not be made ready: {why} "
+            ui.warn(f"The automated reviewer could not be made ready: {reason(exc)} "
                     "Repair it with `edmars setup reviewer`; until then its reviews are skipped.")
         else:
-            reviewer = "repaired" if plan.to_install else "ok"
             again = len(plan.to_install)
+            reviewer = "outdated" if older else ("repaired" if again else "ok")
             ui.ok("The automated reviewer is ready"
-                  + (f" ({again} of its packages installed again)." if again else "."))
+                  + (f" ({again} of its packages installed again)" if again else "")
+                  + (", in the older version; update it later with `edmars setup reviewer`."
+                     if older else "."))
     if state_file is not None:
         Path(state_file).write_text(f"setup={state}\nreviewer={reviewer}\n", encoding="utf-8")
     return 1 if reviewer == "failed" else 0

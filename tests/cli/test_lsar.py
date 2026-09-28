@@ -627,6 +627,246 @@ def test_after_install_without_a_reviewer_only_reports_setup(
     assert _state(state) == {"setup": "partial", "reviewer": "none"}
 
 
+# ---------------------------------------------------------------------------
+# an LSAR installed by an earlier release: doctor, `edmars setup reviewer`
+# and the installer's last step bring it to LSAR_REF
+# ---------------------------------------------------------------------------
+
+#: The commit the previous release pinned; its install still loads, so
+#: nothing failed and nothing ever said the reviewer was behind.
+OLDER = "e974bb2c" + "0" * 32
+OLDER_MESSAGE = ("The automated reviewer is an older version; run `edmars setup reviewer` to "
+                 "update it (free apart from a small download).")
+
+
+def _older_install(monkeypatch: pytest.MonkeyPatch, real_run: Any, *,
+                   enabled: bool = True) -> tuple[dict[str, Any], Path, FakePip]:
+    """Settings and an LSAR folder as the previous release left them."""
+    from edmars import settings as settings_mod
+
+    settings_dict = _load_settings()
+    pip = FakePip(real_run)
+    monkeypatch.setattr(proc, "run", pip)
+    old = lsar.install(settings_dict, ref=OLDER,
+                       session=serve_bytes(_targz(_tree("VALUE = 'old'\n"), commit=OLDER)))
+    assert old == lsar.home_for_ref(OLDER) != lsar.home_for_ref()
+    settings_dict["lsar"].update(enabled=enabled, auto_review=enabled)
+    settings_dict["setup_progress"]["last_completed_screen"] = "S11"
+    settings_mod.save(settings_dict)
+    _all_packages_present(monkeypatch)
+    return settings_dict, old, pip
+
+
+def _serve_download(monkeypatch: pytest.MonkeyPatch, session: FakeSession) -> None:
+    """Every LSAR download, including the ones made without a session, from ``session``."""
+    from edmars import fetch
+
+    real = fetch.download_file
+    monkeypatch.setattr(fetch, "download_file",
+                        lambda url, dest, **kw: real(url, dest, **{**kw, "session": session}))
+    monkeypatch.setattr(fetch, "_sleep", lambda seconds: None)
+
+
+def _offline() -> FakeSession:
+    import requests
+
+    return FakeSession(lambda u, h, p: requests.exceptions.ConnectionError("no network (fake)"))
+
+
+def test_doctor_warns_that_an_lsar_from_an_earlier_release_is_older(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any
+) -> None:
+    # The settings said LSAR-public-e974bb2... was ready, beside a pin of
+    # 96a3d4a: the reviewer stayed on the version whose related-work
+    # summaries came back empty, and doctor never said so.
+    from edmars import doctor
+
+    settings_dict, old, _ = _older_install(monkeypatch, real_run)
+    assert lsar.outdated(settings_dict) == OLDER
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-" + "doctor" * 4)
+    found = {c.name: c for c in doctor.check_lsar(settings_dict)}
+    assert found["Automated reviewer (LSAR)"].status == "ok"
+    version = found["LSAR version"]
+    assert version.status == "warn"
+    assert version.detail.startswith(OLDER_MESSAGE)
+    assert OLDER[:12] in version.detail and lsar.LSAR_REF[:12] in version.detail
+
+    # Still named beside a reviewer that is not ready: setup reviewer fixes both.
+    monkeypatch.setattr(lsar.importlib.util, "find_spec",
+                        lambda name, *a: None if name == "tenacity" else object())
+    statuses = {c.name: c.status for c in lsar.checks(settings_dict)}
+    assert statuses["Automated reviewer (LSAR)"] == "fail"
+    assert statuses["LSAR version"] == "warn"
+
+
+def test_no_version_warning_for_the_pinned_lsar_or_someone_elses_checkout(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any, tmp_path: Path
+) -> None:
+    settings_dict = _installed_and_on(monkeypatch, real_run)
+    assert lsar.outdated(settings_dict) is None
+    assert "LSAR version" not in [c.name for c in lsar.checks(settings_dict)]
+
+    # A short id of the pinned commit is the same commit.
+    settings_dict["lsar"]["ref"] = lsar.LSAR_REF[:7]
+    (lsar.home_for_ref() / lsar.INSTALL_RECORD).unlink()
+    assert lsar.outdated(settings_dict) is None
+
+    # An LSAR folder EDM-ARS did not make is its owner's to update.
+    own = _home(tmp_path)
+    settings_dict["lsar"].update(home=str(own), ref=OLDER)
+    assert lsar.outdated(settings_dict) is None
+    assert "LSAR version" not in [c.name for c in lsar.checks(settings_dict)]
+
+
+def test_update_installs_the_pin_and_removes_the_older_copy_once_the_new_one_loads(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any
+) -> None:
+    from edmars import settings as settings_mod
+
+    settings_dict, old, pip = _older_install(monkeypatch, real_run)
+    session = serve_bytes(_targz(_tree("VALUE = 'new'\n")))
+    steps: list[str] = []
+
+    home = lsar.update(settings_dict, session=session, on_step=steps.append)
+
+    assert home == lsar.home_for_ref()
+    assert session.calls[0]["url"] == lsar.archive_url(lsar.LSAR_REF)
+    assert (home / "lsar" / "pipeline.py").read_text(encoding="utf-8") == "VALUE = 'new'\n"
+    assert not old.exists()
+    saved = settings_mod.load()["lsar"]
+    assert saved["home"] == str(home) and saved["ref"] == lsar.LSAR_REF
+    assert saved["enabled"] is True and saved["auto_review"] is True
+    assert pip.installed[-1] == [f"{FAKE_DIST}>=1.0"]  # the new copy's packages
+    assert steps[-1] == "Checking that LSAR loads"
+    assert lsar.outdated(settings_dict) is None
+    assert "LSAR version" not in [c.name for c in lsar.checks(settings_dict)]
+    kept = sorted(p.name for p in lsar.lsar_root().iterdir() if not p.name.startswith("."))
+    assert kept == [home.name]
+
+
+@pytest.mark.parametrize("case", ["offline", "another commit", "does not load"])
+def test_a_failed_update_leaves_the_older_lsar_installed_and_in_use(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any, case: str
+) -> None:
+    from edmars import settings as settings_mod
+
+    settings_dict, old, _ = _older_install(monkeypatch, real_run)
+    before = settings_mod.load()["lsar"]
+    session = {
+        "offline": _offline,
+        "another commit": lambda: serve_bytes(_targz(_tree(), commit="f" * 40)),
+        "does not load": lambda: serve_bytes(_targz(_tree("import edmars_no_such_module_xyz\n"))),
+    }[case]()
+    monkeypatch.setattr(lsar.fetch, "_sleep", lambda seconds: None)
+    with pytest.raises(lsar.LsarInstallError):
+        lsar.update(settings_dict, session=session)
+    assert (old / "lsar" / "pipeline.py").read_text(encoding="utf-8") == "VALUE = 'old'\n"
+    assert settings_mod.load()["lsar"] == before
+    assert settings_dict["lsar"]["home"] == str(old)
+    assert not lsar.home_for_ref().exists()
+    assert lsar.outdated(settings_dict) == OLDER
+
+
+def test_update_waits_for_a_running_study(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any, tmp_path: Path
+) -> None:
+    # A running study's review gate reads the old folder by its full path.
+    from edmars import runner
+
+    settings_dict, old, _ = _older_install(monkeypatch, real_run)
+    monkeypatch.setattr(runner, "active_run", lambda: tmp_path / "running-study")
+    session = serve_bytes(_targz(_tree()))
+    with pytest.raises(lsar.LsarInstallError, match="A study is running .*after the study finishes"):
+        lsar.update(settings_dict, session=session)
+    assert session.calls == []
+    assert old.is_dir() and settings_dict["lsar"]["home"] == str(old)
+
+
+def test_setup_reviewer_yes_auto_updates_an_older_lsar(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any
+) -> None:
+    # `edmars setup reviewer --yes --lsar-action auto` asked checks(), saw
+    # nothing failing, and said "LSAR is already installed".
+    from typer.testing import CliRunner
+
+    from edmars import settings as settings_mod
+    from edmars.cli import app
+
+    _, old, _ = _older_install(monkeypatch, real_run)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-" + "setup" * 5)
+    session = serve_bytes(_targz(_tree("VALUE = 'new'\n")))
+    _serve_download(monkeypatch, session)
+
+    result = CliRunner().invoke(app, ["setup", "reviewer", "--yes", "--lsar-action", "auto"])
+
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "already installed" not in flat
+    assert f"LSAR is updated to version {lsar.LSAR_REF[:12]}" in flat
+    assert [c["url"] for c in session.calls] == [lsar.archive_url(lsar.LSAR_REF)]
+    saved = settings_mod.load()["lsar"]
+    assert saved["home"] == str(lsar.home_for_ref()) and saved["ref"] == lsar.LSAR_REF
+    assert saved["enabled"] is True and saved["auto_review"] is True
+    assert not old.exists()
+
+    # Run again: now it is the pinned version, and nothing is downloaded.
+    again = CliRunner().invoke(app, ["setup", "reviewer", "--yes", "--lsar-action", "auto"])
+    assert again.exit_code == 0, again.output
+    assert "already installed" in again.output and len(session.calls) == 1
+
+
+def test_after_install_updates_an_older_lsar_to_the_new_releases_pin(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The installer's last step runs the NEW edmars, so lsar.LSAR_REF is
+    # the pin of the release being installed.
+    from edmars import maintenance
+    from edmars import settings as settings_mod
+
+    _, old, _ = _older_install(monkeypatch, real_run)
+    session = serve_bytes(_targz(_tree("VALUE = 'new'\n")))
+    _serve_download(monkeypatch, session)
+    state = tmp_path / "state.txt"
+
+    assert maintenance.after_install(state) == 0
+
+    assert _state(state) == {"setup": "done", "reviewer": "updated"}
+    assert [c["url"] for c in session.calls] == [lsar.archive_url(lsar.LSAR_REF)]
+    assert settings_mod.load()["lsar"]["home"] == str(lsar.home_for_ref())
+    assert not old.exists()
+    out = " ".join(capsys.readouterr().out.split())
+    assert f"older version ({OLDER[:12]})" in out
+    assert "The automated reviewer is updated and ready." in out
+
+
+def test_after_install_keeps_an_older_lsar_it_cannot_update_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, real_run: Any, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from edmars import maintenance
+    from edmars import settings as settings_mod
+
+    _, old, pip = _older_install(monkeypatch, real_run)
+    _serve_download(monkeypatch, _offline())
+    pip.installed.clear()
+    state = tmp_path / "state.txt"
+
+    assert maintenance.after_install(state) == 0
+
+    assert _state(state) == {"setup": "done", "reviewer": "outdated"}
+    assert settings_mod.load()["lsar"]["home"] == str(old)
+    assert (old / "lsar" / "pipeline.py").read_text(encoding="utf-8") == "VALUE = 'old'\n"
+    assert not lsar.home_for_ref().exists()
+    # The older copy's packages went into the new environment instead.
+    assert pip.installed == [[f"{FAKE_DIST}>=1.0"]]
+    said = capsys.readouterr()
+    flat = " ".join((said.out + said.err).split())
+    assert "The automated reviewer could not be updated:" in flat and "no network (fake)" in flat
+    assert "The version you have is kept." in flat
+    assert "in the older version; update it later with `edmars setup reviewer`." in flat
+
+
 def test_after_install_is_a_hidden_command(tmp_path: Path) -> None:
     from typer.testing import CliRunner
 

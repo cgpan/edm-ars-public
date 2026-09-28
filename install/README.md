@@ -148,6 +148,12 @@ last step the new `edmars` command reinstalls the automated reviewer's
 (LSAR's) Python packages into it when your settings record an LSAR install,
 and checks that LSAR loads; if that fails, the installer ends with "The
 automated reviewer (LSAR) needs repair: run 'edmars setup reviewer'". When
+the new release was tested with a newer LSAR than the one you have, it first
+updates LSAR (a small download from GitHub, which it checks is exactly that
+version) and removes the old copy once the new one loads. Without a network,
+or while a study is running, it keeps the LSAR you have instead and ends
+with "The automated reviewer (LSAR) is an older version and could not be
+updated", naming `edmars setup reviewer`, which updates it the same way. When
 setup was already finished, it says so instead of starting the setup wizard
 again. `install.json` records the version it replaced as `previous_version`
 (null for a first install) and `install_kind`: `new`, `update` or

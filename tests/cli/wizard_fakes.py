@@ -607,6 +607,11 @@ class FakeLsar:
         self.install_calls = 0
         self.commit = "0123abc4567def"
         self.deep_calls: list[bool] = []
+        #: The commit of an install older than LSAR_REF; None = up to date.
+        self.older: str | None = None
+        self.update_calls = 0
+        #: Raised by update(), as the real one raises on a failed download.
+        self.update_error: Exception | None = None
 
     def checks(self, settings: dict[str, Any], *, deep: bool = False) -> list[Check]:
         self.deep_calls.append(deep)
@@ -625,6 +630,20 @@ class FakeLsar:
 
     def verify(self, home: Path) -> list[str]:
         return []
+
+    def outdated(self, settings: dict[str, Any]) -> str | None:
+        return self.older
+
+    def update(self, settings: dict[str, Any], *, allow_changes: bool = False,
+               session: Any | None = None, on_step: Callable[[str], None] | None = None) -> Path:
+        self.update_calls += 1
+        if self.update_error is not None:
+            raise self.update_error
+        self.older = None
+        new_home = self.home.with_name(self.home.name + "-updated")
+        new_home.mkdir(parents=True, exist_ok=True)
+        settings.setdefault("lsar", {}).update({"home": str(new_home), "ref": self.commit})
+        return new_home
 
     def benchmark_for(self, home: Path, venue: str | None) -> float | None:
         """Like the real one: the venue's p25 in the reviewer's calibration file."""
@@ -747,7 +766,7 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Fakes:
                                                              "docker_info", "xgboost_checks",
                                                              "miktex_autoinstall", "set_miktex_autoinstall")),
         "lsar": _module("lsar", fakes.lsar, ("LSAR_REPO", "LSAR_REF", "checks", "install", "verify",
-                                                    "benchmark_for")),
+                                                    "outdated", "update", "benchmark_for")),
         "runner": _module("runner", fakes.runner, ("latest_run",)),
         "cli": _module("cli", fakes.cli, ("app",)),
     }

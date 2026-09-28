@@ -102,7 +102,7 @@ sent, and to whom* above applies. In addition:
 |---|---|---|
 | **The AI service you choose, and Semantic Scholar** | Your API key, to confirm it works: a request that lists the service's models (for DeepSeek, a second one reads your account balance), or one small Semantic Scholar search | When `edmars setup` checks a key, and in `edmars doctor --deep` |
 | **NCES** (nces.ed.gov) | Ordinary download requests (your IP address) | Only when you accept a dataset's terms and download it (`edmars setup`, `edmars data install`) |
-| **GitHub and the Python Package Index** | Ordinary download requests | Only when you approve installing the automated reviewer (LSAR) |
+| **GitHub and the Python Package Index** | Ordinary download requests | Only when you approve installing or updating the automated reviewer (LSAR), and while the installer runs when the automated reviewer is set up and the new release was tested with a newer version of it |
 | **yihui.org, GitHub and CTAN mirrors** | Ordinary download requests | Only when you approve installing TinyTeX |
 | **Posit Package Manager** (packagemanager.posit.co) | Ordinary download requests | Only when you approve installing R packages |
 | **GitHub** (api.github.com) | An ordinary request for the latest release number | Only when you run `edmars update` |
