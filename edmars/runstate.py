@@ -195,6 +195,23 @@ class RunState:
     #: is in run_cost.json, which counts answered calls.
     calls_cut_off: int = 0
     calls_failed: int = 0
+    #: The automated peer review's (the LSAR review gate's) share of
+    #: ``llm_calls`` and ``cost_usd``, as the pipeline reports it: the
+    #: gate's ``llm.end`` events (``component: "review"``) and ``gate.cost``
+    #: running totals while it runs, the review rows of token_usage.jsonl,
+    #: then run_cost.json's ``by_component.review``. None: nothing
+    #: reported, so the figures do not include the reviews. Pipelines
+    #: before fix/r3-gate never counted them: the round-3 Mac study showed
+    #: US$0.30 while its six reviews took the bill to US$0.57.
+    review_calls: int | None = None
+    review_cost_usd: float | None = None
+    #: The review share when the latest process started: a resumed gate's
+    #: ``gate.cost`` running total starts again at zero.
+    review_base: tuple[int, float] = (0, 0.0)
+    #: The review gate's progress in the current gate run, from its log
+    #: lines (see :func:`_gate_log`): reviews started and finished, the
+    #: most there can be, and what became of the paper revision.
+    gate_progress: dict[str, Any] | None = None
     last_seq: int = 0
     last_plain: str = ""
     alive: bool | None = None
@@ -336,8 +353,16 @@ def fmt_duration(seconds: float | None) -> str:
 # ---------------------------------------------------------------------------
 
 #: Event types whose ``plain`` text is not "recent news": too frequent,
-#: or (stage boundaries) already shown as the step rows themselves.
-_QUIET_TYPES = frozenset({"llm.start", "llm.end", "heartbeat", "agent.note", "stage.start", "stage.end"})
+#: or (stage boundaries) already shown as the step rows themselves. The
+#: review gate's running cost (``gate.cost``) is in the cost line, and each
+#: finished review has its own recent line (from the gate's log, with its
+#: score), so the event's text would say the same review twice.
+_QUIET_TYPES = frozenset({"llm.start", "llm.end", "heartbeat", "agent.note", "stage.start", "stage.end",
+                          "gate.cost"})
+
+#: The ``component`` of the review gate's calls in ``llm.end`` events,
+#: token_usage.jsonl rows and run_cost.json (src/cost.py REVIEW_COMPONENT).
+REVIEW_COMPONENT = "review"
 
 
 def _add_recent(state: RunState, line: str | None) -> None:
@@ -565,19 +590,59 @@ def _cut_off_open_call(state: RunState) -> None:
         state.waiting_agent = None
 
 
+def reviews_not_counted(state: RunState) -> str | None:
+    """Whether the cost leaves out the automated peer review, and why.
+
+    "running": the review gate is running and has reported no cost yet
+    (its first review is under way, or the pipeline does not meter it);
+    "ended": the gate reviewed the paper and no review cost was ever
+    reported, as with every pipeline before fix/r3-gate; None when the
+    reviews are counted or none ran.
+    """
+    if state.review_calls is not None:
+        return None
+    if state.stage("REVIEWING").status == "running" and not state.finished:
+        return "running"
+    gate = state.gate if isinstance(state.gate, dict) else {}
+    ran = gate.get("ran") is True or state.metrics.get("gate_ran") is True \
+        or state.metrics.get("gate_score") is not None
+    return "ended" if ran else None
+
+
 def cost_is_lower_bound(state: RunState) -> bool:
     """True when some AI call's cost is not in the figure: a model with no
-    price, or a call that ended without an answer."""
-    return bool(state.cost_unpriced or state.calls_cut_off or state.calls_failed)
+    price, a call that ended without an answer, or a finished review gate
+    whose reviews were never counted."""
+    return bool(state.cost_unpriced or state.calls_cut_off or state.calls_failed) \
+        or reviews_not_counted(state) == "ended"
 
 
 def cost_line(state: RunState) -> str:
     """The cost as every screen shows it (live view, result screen,
-    summary.html), so the figures and their "at least" always agree."""
+    summary.html), so the figures and their "at least" always agree.
+
+    The automated peer review's share is named once the pipeline reports
+    it ("including US$0.204 for the automated peer review"); until then
+    the line says the reviews are not counted, while the gate runs
+    ("reviews not yet counted") and after it.
+    """
     n = state.llm_calls
     calls = f"{n} AI call{'s' if n != 1 else ''}"
     if state.calls_cut_off:
         calls += f", {state.calls_cut_off} cut off when the study was stopped"
+    missing = reviews_not_counted(state)
+    if missing == "running":
+        calls += "; reviews not yet counted"
+    elif missing == "ended":
+        calls += "; the automated peer reviews are not counted"
+    elif state.review_calls is not None:
+        if state.review_cost_usd:
+            calls += f", including US${state.review_cost_usd:.3f} for the automated peer review"
+        progress = state.gate_progress or {}
+        if progress.get("running") and state.stage("REVIEWING").status == "running" \
+                and not state.finished:
+            # LSAR's calls are counted when its review ends.
+            calls += "; the review under way is not yet counted"
     lead = "Cost" if state.finished else "Cost so far"
     unanswered = state.calls_cut_off + state.calls_failed
     cost = state.cost_usd
@@ -595,9 +660,64 @@ def cost_line(state: RunState) -> str:
     return f"{lead}: {amount} ({calls})"
 
 
+#: run_cost.json's per-component subtotals: ``by_component`` (src/cost.py
+#: from fix/r3-gate) or ``components``.
+_COMPONENT_KEYS = ("by_component", "components")
+
+
+def cost_parts(cost_file: Any) -> dict[str, Any] | None:
+    """run_cost.json in either shape: the run's calls and cost, and the
+    review gate's share of them.
+
+    Files written before the review gate was metered carry only the run's
+    ``n_calls`` and ``cost_usd``, which leave LSAR's reviews out: their
+    ``review`` is None. Newer files add a subtotal per component
+    (``by_component``: ``pipeline`` and ``review``, each with ``n_calls``,
+    ``cost_usd`` and ``cost_status``) and ``review_cost_usd``, and their
+    top-level figures are the whole run's. A file whose top-level count
+    equals the pipeline subtotal's while the review made calls counts the
+    pipeline alone; the two subtotals are added up then.
+    """
+    if not isinstance(cost_file, dict):
+        return None
+    n = _int(cost_file.get("n_calls"))
+    cost = _num(cost_file.get("cost_usd"))
+    out: dict[str, Any] = {"n_calls": n, "cost_usd": cost, "review": None}
+    blocks: dict[str, Any] = next(
+        (cost_file[k] for k in _COMPONENT_KEYS if isinstance(cost_file.get(k), dict)), {})
+    review = blocks.get("review") if isinstance(blocks.get("review"), dict) else None
+    pipeline = blocks.get("pipeline") if isinstance(blocks.get("pipeline"), dict) else None
+    if review is None:
+        if "review_cost_usd" not in cost_file:
+            return out
+        review = {"cost_usd": cost_file.get("review_cost_usd")}
+    r_calls = _int(review.get("n_calls"))
+    r_cost = _num(review.get("cost_usd"))
+    if r_cost is None:
+        r_cost = _num(cost_file.get("review_cost_usd"))
+    p_calls = _int(pipeline.get("n_calls")) if pipeline else None
+    if r_calls and p_calls is not None and n == p_calls:
+        n = p_calls + r_calls
+        p_cost = _num(pipeline.get("cost_usd")) if pipeline else None
+        if p_cost is not None or r_cost is not None:
+            cost = round((p_cost or 0.0) + (r_cost or 0.0), 6)
+        out.update(n_calls=n, cost_usd=cost)
+    status = str(review.get("cost_status") or "")
+    unpriced = bool(_int(review.get("unpriced_calls"))) or status in ("partial", "unpriced") \
+        or (bool(r_calls) and r_cost is None)
+    out["review"] = {"n_calls": r_calls, "cost_usd": r_cost, "unpriced": unpriced}
+    return out
+
+
 #: Shown with the cost when a call was cut off by the stop.
 CUT_OFF_NOTE = ("An AI call that was cut off when the study was stopped may still be "
                 "billed by the AI service, so the real cost can be a little higher.")
+
+#: Shown with the cost of a finished study whose automated peer review
+#: ran but was never counted (a pipeline from before fix/r3-gate).
+REVIEWS_NOT_COUNTED_NOTE = (
+    "The pipeline that ran this study did not count the automated peer review's AI "
+    "calls, so the real cost is higher; your AI service's usage page shows what it billed.")
 
 #: The order in which the pipeline's REVISING cascade re-runs agents; a
 #: revision starts at the earliest one named.
@@ -715,6 +835,206 @@ def _pre_critic_verdict_words(state: RunState, data: Mapping[str, Any], plain: s
     return str(title or "Automatic checks stopped the study")
 
 
+def _gate_cost(state: RunState, data: Mapping[str, Any]) -> None:
+    """A ``gate.cost`` event: the review gate's running total in this
+    process (``cost_usd``, ``n_calls``, ``unpriced_calls``).
+
+    The gate also sends an ``llm.end`` per call, already counted; the
+    total only adds what those did not (a pipeline that sends totals
+    alone), so nothing is counted twice.
+    """
+    base_calls, base_cost = state.review_base
+    calls = _int(data.get("n_calls"))
+    cost = _num(data.get("cost_usd"))
+    counted_calls = state.review_calls or 0
+    if calls is not None:
+        if base_calls + calls > counted_calls:
+            state.llm_calls += base_calls + calls - counted_calls
+            state.review_calls = base_calls + calls
+        elif state.review_calls is None:
+            state.review_calls = counted_calls  # reported: nothing spent yet
+    if cost is not None and base_cost + cost > (state.review_cost_usd or 0.0) + 1e-9:
+        extra = base_cost + cost - (state.review_cost_usd or 0.0)
+        state.cost_usd = round((state.cost_usd or 0.0) + extra, 6)
+        state.review_cost_usd = round(base_cost + cost, 6)
+    if _int(data.get("unpriced_calls")):
+        state.cost_unpriced = True
+
+
+# The review gate's log lines (src/review_gate.py), read for its
+# progress: which review is running and what became of the revision.
+_RE_GATE_CYCLE = re.compile(r"^--- Review gate cycle (\d+)/(\d+) ---")
+_RE_REVIEW_RUN = re.compile(r"^Running LSAR review \(cycle (\d+)")
+_RE_REVIEW_DONE = re.compile(r"^LSAR review complete \(cycle (\d+)\): overall_score=(\S+)")
+_RE_REVIEW_FAILED = re.compile(r"^LSAR pipeline failed \(cycle (\d+)\)")
+_RE_MEDIAN = re.compile(r"^Borderline score .*\((\d+) total reviews\)")
+_RE_CYCLE_VERDICT = re.compile(r"^Review gate (PASSED|FAILED) \(cycle (\d+)\)")
+_RE_REVISION_START = re.compile(r"^Calling LLM for (?:whole-document paper|section-scoped) revision")
+#: A revision that left paper.tex as it was: the model's reply could not
+#: be used, the call failed, or the safety guards discarded it.
+_REVISION_FAILED = (
+    "Could not extract LaTeX from LLM response",
+    "Could not extract any revised section",
+    "No revised section survived",
+    "LLM revision call failed",
+    "LLM revision skipped",
+    "Revision was a no-op",
+    "Revision REJECTED",
+)
+#: Pipelines before fix/r3-gate said so after a failed revision, and then
+#: paid for reviews of the unchanged paper.
+_REREVIEWS_UNCHANGED = "re-reviews the unchanged manuscript"
+#: fix/r3-gate's line (and GATE_REVISION_FAILED warning) when it ends the
+#: gate after a failed revision: "The review gate could not revise the
+#: paper after cycle 1 (...). The gate ends with cycle 1's score; no
+#: further review of the unchanged paper was paid for."
+_GATE_REVISION_STOP = "The review gate could not revise the paper"
+GATE_REVISION_FAILED_CODE = "GATE_REVISION_FAILED"
+#: The gate ended without another cycle.
+_GATE_ENDS = (
+    "Honesty blockers cannot be fixed",
+    "Cannot prepare PDF; skipping review gate",
+    "LSAR returned no result; skipping review gate",
+    "paper.tex not found; cannot revise",
+)
+
+
+def _gate_log(state: RunState, message: str) -> None:
+    """Follow the review gate's progress from one of its log lines.
+
+    ``gate_progress`` keeps: ``started`` / ``finished`` / ``failed``
+    reviews in this gate run, ``running`` (a review under way), ``cycle``
+    and ``max_cycles``, ``before_cycle`` (reviews started in earlier
+    cycles), ``cycle_reviews`` (this cycle's review count once it is
+    known: 1, or the median sampling's total), ``revision`` (None,
+    "running", "failed" or "done") and ``more`` (False once no further
+    review will run). A review sample's folder number (102 = cycle 1's
+    second review) is the pipeline's; the count here is the user's.
+    """
+    msg = " ".join(message.split())
+    if not msg:
+        return
+    p = state.gate_progress if isinstance(state.gate_progress, dict) else {}
+    p = {"started": 0, "finished": 0, "failed": 0, "running": False, "cycle": 0,
+         "max_cycles": None, "before_cycle": 0, "cycle_reviews": None,
+         "revision": None, "more": None, **p}
+    m = _RE_GATE_CYCLE.match(msg)
+    if m:
+        cycle = int(m.group(1))
+        if cycle != p["cycle"]:
+            p.update(cycle=cycle, before_cycle=p["started"], cycle_reviews=None)
+        p["max_cycles"] = int(m.group(2))
+        state.gate_progress = p
+        return
+    m = _RE_REVIEW_RUN.match(msg)
+    if m:
+        p["started"] += 1
+        p["running"] = True
+        p["more"] = None  # a review after a failed revision: the gate went on
+        state.gate_progress = p
+        return
+    m = _RE_REVIEW_DONE.match(msg)
+    if m:
+        p["finished"] += 1
+        p["running"] = False
+        score = _num(m.group(2))
+        tail = f", score {fmt_score(score)}" if score is not None else ""
+        _add_recent(state, f"LSAR review {p['started']} finished{tail}")
+        state.gate_progress = p
+        return
+    if _RE_REVIEW_FAILED.match(msg):
+        p["failed"] += 1
+        p["running"] = False
+        _add_recent(state, f"LSAR review {p['started']} did not finish")
+        state.gate_progress = p
+        return
+    m = _RE_MEDIAN.match(msg)
+    if m:
+        # The first score was close to the benchmark: more reviews, and
+        # the gate uses their median.
+        total = int(m.group(1))
+        p["cycle_reviews"] = total
+        more = total - 1
+        _add_recent(state, f"Close to the benchmark: {more} more review{'s' if more != 1 else ''}, "
+                           "and the middle score counts")
+        state.gate_progress = p
+        return
+    m = _RE_CYCLE_VERDICT.match(msg)
+    if m:
+        p["cycle_reviews"] = p["started"] - p["before_cycle"]
+        if m.group(1) == "PASSED" or (p["max_cycles"] and p["cycle"] >= p["max_cycles"]):
+            p["more"] = False
+        state.gate_progress = p
+        return
+    if _RE_REVISION_START.match(msg):
+        p["revision"] = "running"
+        state.gate_progress = p
+        return
+    if msg.startswith("Revised paper.tex written"):
+        p["revision"] = "done"
+        state.gate_progress = p
+        return
+    if msg.startswith(_REVISION_FAILED) or msg.startswith(_GATE_REVISION_STOP):
+        # A failed revision leaves the paper as it was. From fix/r3-gate
+        # the gate then stops, and says so: another review of the same
+        # paper is paid for and tells nothing new (the round-3 Mac
+        # study's second cycle reviewed the unchanged paper three times,
+        # and its lower median became the final score). Older pipelines
+        # say that they review it again, in a line after the failure.
+        said = gate_revision_words(p) if p["revision"] == "failed" else None
+        p["revision"] = "failed"
+        if msg.startswith(_GATE_REVISION_STOP):
+            p["more"] = False
+        elif _REREVIEWS_UNCHANGED in msg:
+            p["more"] = True
+        elif said is None:
+            p["more"] = False
+        line = gate_revision_words(p)
+        if line != said:
+            if said is not None:
+                state.notices = [n for n in state.notices if n != said]
+                state.recent = [r for r in state.recent if r != said]
+            state.notices.append(line)
+            _add_recent(state, line)
+        state.gate_progress = p
+        return
+    if msg.startswith(_GATE_ENDS):
+        p["more"] = False
+        state.gate_progress = p
+
+
+def gate_revision_words(progress: Mapping[str, Any]) -> str:
+    """What a failed paper revision means for the rest of the review."""
+    if progress.get("more") is True:
+        return ("The paper revision failed, so the paper is unchanged; this version "
+                "of EDM-ARS reviews the unchanged paper again, at a cost")
+    return ("The paper revision failed, so the paper is unchanged: no further paid "
+            "reviews; the review ends with the scores it has")
+
+
+def gate_reviews_up_to(state: RunState) -> int | None:
+    """The most reviews the current gate run can still add up to.
+
+    Each cycle has one review, or ``median_samples`` when its first score
+    is close to the benchmark; finished cycles count what they had, the
+    rest the most they can have. Once no further review will run, the
+    reviews started. None before the gate has said anything.
+    """
+    p = state.gate_progress
+    if not isinstance(p, dict):
+        return None
+    started = int(p.get("started") or 0)
+    if p.get("more") is False:
+        return started
+    samples = max(_int(state.metrics.get("gate_median_samples")) or 3, 1)
+    cycles = _int(p.get("max_cycles")) or _int(state.metrics.get("gate_max_cycles")) or 2
+    cycle = max(_int(p.get("cycle")) or 1, 1)
+    this_cycle = _int(p.get("cycle_reviews"))
+    before = int(p.get("before_cycle") or 0)
+    up_to = before + (this_cycle if this_cycle is not None else samples) + samples * max(cycles - cycle, 0)
+    return max(up_to, started)
+
+
 def _apply(state: RunState, ev: dict[str, Any]) -> None:
     etype = str(ev.get("type") or "")
     seq = ev.get("seq")
@@ -737,6 +1057,8 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
     cycle = _int(ev.get("cycle"))
     if etype == "verdict" and data.get("source") == "pre_critic":
         plain = _pre_critic_verdict_words(state, data, plain)
+    if etype == "warning" and data.get("code") == GATE_REVISION_FAILED_CODE:
+        plain = None  # its cycle numbers and reason are the gate's; said below in plain words
 
     if plain and etype not in _QUIET_TYPES:
         _add_recent(state, plain)
@@ -753,6 +1075,7 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
                 # interrupted at the last thing it wrote.
                 _stage_end(state, st.key, last_seen, "interrupted")
         state.run_started_at = ts or state.run_started_at
+        state.review_base = (state.review_calls or 0, state.review_cost_usd or 0.0)
         state.finished = False
         state.final_state = None
         state.exit_code = None
@@ -769,6 +1092,7 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
         _stage_start(state, stage, ts, cycle)
         if stage == "REVIEWING":
             state.lsar_enabled = True
+            state.gate_progress = None  # a (resumed) gate starts from its first review
     elif etype == "stage.end" and stage:
         _stage_end(state, stage, ts, data.get("outcome"))
     elif etype == "llm.start":
@@ -792,6 +1116,17 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
             state.cost_unpriced = True
         if cost is not None:
             state.cost_usd = round((state.cost_usd or 0.0) + cost, 6)
+        if data.get("component") == REVIEW_COMPONENT:
+            # One of the review gate's calls: an LSAR review's or the
+            # paper revision's (fix/r3-gate meters both).
+            state.review_calls = (state.review_calls or 0) + 1
+            if cost is not None:
+                state.review_cost_usd = round((state.review_cost_usd or 0.0) + cost, 6)
+    elif etype == "gate.cost":
+        _gate_cost(state, data)
+    elif etype == "log":
+        if ev.get("agent") == "ReviewGate":
+            _gate_log(state, str(data.get("message") or ""))
     elif etype == "llm.wait":
         state.llm_wait = {
             "seconds": _num(data.get("seconds")),
@@ -862,6 +1197,12 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
             msg = outcome_removed_words()
             state.notices.append(msg)
             state.outcome_removed = True
+        elif data.get("code") == GATE_REVISION_FAILED_CODE:
+            # The gate's own log line has usually said it already; this
+            # adds the line only when it has not.
+            _gate_log(state, _GATE_REVISION_STOP)
+            state.warnings.append(gate_revision_words(state.gate_progress or {}))
+            msg = None
         if msg:
             state.warnings.append(str(msg))
             _add_recent(state, str(msg))
@@ -1136,6 +1477,10 @@ def parse_log_line(line: str) -> list[dict[str, Any]]:
         return [make("log", plain="Turning the paper into a PDF with LaTeX")]
     if msg.startswith("Running OutlineAgent"):
         return [make("log", plain="Planning the paper's outline")]
+    if agent == "ReviewGate":
+        # The review gate's progress (fold's _gate_log reads it), as the
+        # event stream carries it: a "log" event with the message.
+        return [make("log", message=msg)]
     return [make("heartbeat")]
 
 
@@ -1232,6 +1577,7 @@ def usage_events(rows: Iterable[dict[str, Any]], pricing: dict[str, Any]) -> lis
                 "completion_tokens": row.get("completion_tokens"),
                 "cached_tokens": row.get("cached_prompt_tokens"),
                 "cost_usd": usage_cost(row, pricing),
+                "component": row.get("component"),
             },
         })
     return out
@@ -1313,24 +1659,107 @@ def _metric_label(metric: str) -> str:
     return m
 
 
+#: Primary metrics for which a smaller value is better, and those for
+#: which a larger one is. A metric in neither set is not compared: the
+#: analysis's own ``best_model`` is shown, as before.
+_LOWER_IS_BETTER = frozenset({"rmse", "mae", "mse", "mape", "log_loss", "logloss",
+                              "brier", "brier_score", "cross_entropy"})
+_HIGHER_IS_BETTER = frozenset({"auc", "accuracy", "balanced_accuracy", "f1", "f2", "precision",
+                               "recall", "r2", "pr_auc", "average_precision", "kappa", "mcc"})
+
+
+def _metric_key(name: str) -> str:
+    """A metric or column name reduced for comparison: "AUC-ROC" and
+    "test_auc" -> "auc", "R²" -> "r2"."""
+    key = name.strip().lower().replace("-", "_").replace(" ", "_").replace("²", "2")
+    if key.startswith("test_"):
+        key = key[len("test_"):]
+    return {"auc_roc": "auc", "roc_auc": "auc", "auroc": "auc", "r_squared": "r2"}.get(key, key)
+
+
+def _row_metric(row: Any, key: str) -> float | None:
+    """One model's value of the metric ``key`` (a :func:`_metric_key`)."""
+    if not isinstance(row, dict):
+        return None
+    for name, value in row.items():
+        if isinstance(name, str) and _metric_key(name) == key and _num(value) is not None:
+            return _num(value)
+    return None
+
+
+def _model_row(all_models: dict[str, Any], name: Any) -> dict[str, Any] | None:
+    """``all_models``' row for ``name``, matched without regard to case."""
+    if not isinstance(name, str):
+        return None
+    row = all_models.get(name)
+    if isinstance(row, dict):
+        return row
+    for other, candidate in all_models.items():
+        if isinstance(other, str) and other.lower() == name.lower() and isinstance(candidate, dict):
+            return candidate
+    return None
+
+
+def best_by_metric(all_models: dict[str, Any], metric: str) -> tuple[list[str], float] | None:
+    """(models with the best value of ``metric``, that value) among
+    ``all_models``, respecting the metric's direction (the highest AUC,
+    the lowest RMSE). None when the metric's direction is unknown or no
+    model reports it. Ties keep ``all_models``' order."""
+    key = _metric_key(metric)
+    if key in _LOWER_IS_BETTER:
+        better = min
+    elif key in _HIGHER_IS_BETTER:
+        better = max
+    else:
+        return None
+    values: dict[str, float] = {}
+    for name, row in all_models.items():
+        found = _row_metric(row, key) if isinstance(name, str) else None
+        if found is not None:
+            values[name] = found
+    if not values:
+        return None
+    best = better(values.values())
+    return [name for name, v in values.items() if v == best], best
+
+
 def prediction_metrics(results: dict[str, Any]) -> dict[str, Any]:
+    """The prediction study's main result, from results.json's metrics.
+
+    ``best_model`` is the model with the best primary metric in
+    ``all_models``, not results.json's ``best_model`` field: that field
+    is the analysis's claim, and the round-3 Mac study's claim named a
+    model its own numbers did not put first (the paper repeated it, and
+    so did the result screen). When the claim names another model, it is
+    kept as ``claimed_best_model`` (with its value, when known) so the
+    screens can show both. A metric whose direction is unknown, or
+    results without per-model values, fall back to the claim.
+    """
     out: dict[str, Any] = {}
-    best = results.get("best_model")
+    claimed = results.get("best_model")
+    claimed = str(claimed) if isinstance(claimed, str) and claimed.strip() else None
     metric = results.get("primary_metric")
     value = results.get("best_metric_value")
     all_models = as_dict(results.get("all_models"))
-    if best:
-        out["best_model"] = str(best)
     if metric:
         out["primary_metric"] = _metric_label(str(metric))
-    row = all_models.get(best) if isinstance(best, str) else None
-    if not isinstance(row, dict) and isinstance(best, str):
-        for name, candidate in all_models.items():
-            if isinstance(name, str) and name.lower() == best.lower() and isinstance(candidate, dict):
-                row = candidate
-                break
+    best = claimed
+    measured = best_by_metric(all_models, str(metric)) if metric else None
+    if measured is not None:
+        leaders, top = measured
+        if claimed is None or claimed.lower() not in {name.lower() for name in leaders}:
+            best = leaders[0]
+            if claimed is not None:
+                out["claimed_best_model"] = claimed
+                claimed_value = _row_metric(_model_row(all_models, claimed), _metric_key(str(metric)))
+                if claimed_value is not None:
+                    out["claimed_metric_value"] = claimed_value
+        value = top  # the metric as measured, not best_metric_value
+    if best:
+        out["best_model"] = best
+    row = _model_row(all_models, best)
     if value is None and isinstance(row, dict) and metric:
-        value = row.get(str(metric).lower())
+        value = _row_metric(row, _metric_key(str(metric)))
     if _num(value) is not None:
         out["best_metric_value"] = _num(value)
     if isinstance(row, dict) and metric:
@@ -1428,12 +1857,17 @@ def psychometric_metrics(results: dict[str, Any]) -> dict[str, Any]:
 def key_result(metrics: dict[str, Any], task_type: str) -> str | None:
     """One short line with the study's main number, or None if unknown."""
     if metrics.get("best_model"):
-        text = f"Best: {metrics['best_model']}"
-        if metrics.get("primary_metric") and metrics.get("best_metric_value") is not None:
-            text += f", {metrics['primary_metric']} {fmt_num(metrics['best_metric_value'])}"
+        claimed = metrics.get("claimed_best_model")
+        metric = metrics.get("primary_metric")
+        text = f"Best by {metric}: {metrics['best_model']}" if claimed and metric \
+            else f"Best: {metrics['best_model']}"
+        if metric and metrics.get("best_metric_value") is not None:
+            text += f", {metric} {fmt_num(metrics['best_metric_value'])}"
             ci = metrics.get("best_ci")
             if isinstance(ci, list) and len(ci) == 2:
                 text += f" {fmt_ci(ci[0], ci[1])}"
+        if claimed:
+            text += f" (the analysis named {claimed})"
         return text
     if metrics.get("estimate") is not None:
         if metrics.get("estimate_kind") == "policy_gain":
@@ -1483,6 +1917,9 @@ class StateReader:
         self._usage_calls = 0
         self._usage_cost: float | None = None
         self._usage_unpriced = False
+        #: The review gate's rows (component "review") among them.
+        self._review_calls = 0
+        self._review_cost: float | None = None
 
     def refresh(self) -> RunState:
         run_dir = self.run_dir
@@ -1515,6 +1952,10 @@ class StateReader:
                         self._usage_unpriced = True
                     else:
                         self._usage_cost = (self._usage_cost or 0.0) + cost
+                    if ev["data"].get("component") == REVIEW_COMPONENT:
+                        self._review_calls += 1
+                        if cost is not None:
+                            self._review_cost = (self._review_cost or 0.0) + cost
             logged = base.metrics.get("log_cost_total")
             if isinstance(logged, dict) and int(logged.get("n") or 0) >= self._usage_calls:
                 base.llm_calls = int(logged.get("n") or 0)
@@ -1525,6 +1966,10 @@ class StateReader:
                 base.llm_calls = self._usage_calls
                 base.cost_usd = round(self._usage_cost, 6) if self._usage_cost is not None else None
             base.cost_unpriced = self._usage_unpriced
+            if self._review_calls:
+                # Both totals above include these rows.
+                base.review_calls = self._review_calls
+                base.review_cost_usd = round(self._review_cost, 6) if self._review_cost is not None else None
         base.source = mode
         base.run_dir = str(run_dir)
         self._base = base
@@ -1700,6 +2145,9 @@ def _enrich(state: RunState, run_dir: Path, files: _FileCache, *, tail: bool) ->
     rg = as_dict(config.get("review_gate"))
     if rg.get("enabled"):
         state.lsar_enabled = True
+    for key, name in (("gate_max_cycles", "max_cycles"), ("gate_median_samples", "median_samples")):
+        if _int(rg.get(name)) is not None:
+            state.metrics[key] = _int(rg.get(name))
     max_cycles = _int((config.get("pipeline") or {}).get("max_revision_cycles"))
     if max_cycles is not None:
         state.max_rounds = max_cycles + 1
@@ -1836,18 +2284,24 @@ def _enrich(state: RunState, run_dir: Path, files: _FileCache, *, tail: bool) ->
     cost_file = files.load(run_dir / "run_cost.json")
     run_started_ts = state.started.timestamp() if state.started else None
     cost_mtime = _mtime(run_dir / "run_cost.json")
-    if isinstance(cost_file, dict) and (
+    parts = cost_parts(cost_file)
+    if parts is not None and (
         run_started_ts is None or (cost_mtime is not None and cost_mtime >= run_started_ts - 1)
     ):
-        n = _int(cost_file.get("n_calls"))
+        n = parts["n_calls"]
         # run_cost.json counts answered calls only; the calls that ended
         # without an answer stay counted on top, with an unknown cost.
         unanswered = state.calls_cut_off + state.calls_failed
         if n is not None and n >= state.llm_calls - unanswered:
             state.llm_calls = n + unanswered
-            cost = _num(cost_file.get("cost_usd"))
-            if cost is not None:
-                state.cost_usd = cost
+            if parts["cost_usd"] is not None:
+                state.cost_usd = parts["cost_usd"]
+            review = parts["review"]
+            if review is not None:
+                state.review_calls = review["n_calls"] if review["n_calls"] is not None else 0
+                state.review_cost_usd = review["cost_usd"]
+                if review["unpriced"]:
+                    state.cost_unpriced = True
 
     if state.updated is None:
         for name in ("pipeline.log", "events.jsonl", "runner.json"):
@@ -2005,6 +2459,8 @@ def _stage_details(state: RunState) -> None:
                 detail = "no PDF (LaTeX not installed)"
             else:
                 detail = "no PDF"
+        elif st.key == "REVIEWING" and st.status == "running" and state.gate_progress:
+            detail = gate_step_detail(state)
         elif st.key == "REVIEWING":
             if m.get("gate_ran") is False and m.get("gate_skip_reason"):
                 detail = "did not run"
@@ -2028,6 +2484,37 @@ def _stage_details(state: RunState) -> None:
             else:
                 detail = "no problems found"
         st.detail = detail
+
+
+def gate_step_detail(state: RunState) -> str:
+    """The review step's row while the gate runs: "review 2 of up to 6",
+    "revising the paper", or that a failed revision ends the reviews."""
+    p = state.gate_progress if isinstance(state.gate_progress, dict) else {}
+    started = int(p.get("started") or 0)
+    if p.get("revision") == "failed" and p.get("more") is False and not p.get("running"):
+        return "revision failed · no further reviews"
+    if p.get("revision") == "running":
+        return "revising the paper"
+    if not started:
+        return ""
+    up_to = gate_reviews_up_to(state)
+    text = f"review {started}" + (f" of up to {up_to}" if up_to else "")
+    return text if p.get("running") else f"{text} done"
+
+
+def gate_now_text(state: RunState, base: str) -> str:
+    """What the review gate is doing, for the "Now" line."""
+    p = state.gate_progress if isinstance(state.gate_progress, dict) else {}
+    started = int(p.get("started") or 0)
+    if p.get("revision") == "failed" and not p.get("running"):
+        return gate_revision_words(p) + "."
+    if p.get("revision") == "running":
+        return "Revising the paper from the reviewer's comments, before it is reviewed again."
+    if p.get("running") and started:
+        up_to = gate_reviews_up_to(state)
+        which = f"review {started} of up to {up_to}" if up_to else f"review {started}"
+        return f"{base} This is {which}."
+    return base
 
 
 def minority_share(balance: Any) -> float | None:
@@ -2086,6 +2573,8 @@ def describe_now(state: RunState, now: datetime | None = None) -> str:
         by_checks = entry.get("now_checks") if isinstance(entry, dict) else None
         base = str(by_checks or "The automatic checks sent the work back; "
                    "the affected steps are being redone.")
+    if st.key == "REVIEWING" and state.gate_progress:
+        base = gate_now_text(state, base)
     if state.llm_wait and state.llm_wait.get("seconds"):
         secs = int(state.llm_wait["seconds"] or 0)
         return (f"The AI service asked us to slow down; waiting {secs} s before "
@@ -2220,10 +2709,14 @@ __all__ = [
     "EXPERIMENTAL_NOTE",
     "EXPERIMENTAL_WHY",
     "CUT_OFF_NOTE",
+    "REVIEWS_NOT_COUNTED_NOTE",
     "RunState",
     "as_dict",
     "cost_is_lower_bound",
     "cost_line",
+    "cost_parts",
+    "gate_reviews_up_to",
+    "reviews_not_counted",
     "StageState",
     "StateReader",
     "STAGE_ORDER",

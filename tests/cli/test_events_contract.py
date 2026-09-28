@@ -122,3 +122,42 @@ def test_a_study_over_its_spending_warning_says_so_once(tmp_path: Path, monkeypa
     shown = [_progress_line(r) for r in records if (r.get("data") or {}).get("code") == "COST_OVER_BUDGET"]
     assert len(shown) == 1 and shown[0] and "COST_OVER_BUDGET" in shown[0]
     assert "exceeds budget" in (run / "pipeline.log").read_text(encoding="utf-8")
+
+
+def test_the_review_gate_seen_through_the_real_sink(tmp_path: Path) -> None:
+    """The review gate's side of the stream as fix/r3-gate writes it: its
+    log lines mirrored as "log" events (agent ReviewGate), an llm.end per
+    metered call with component "review", and a gate.cost running total
+    after each review. The CLI follows the reviews and counts their cost."""
+    from edmars.runstate import cost_line
+
+    run = tmp_path / "run"
+    sink = EventSink(str(run))
+    _emit_prefix(sink)
+    sink.emit("stage.end", stage="ENGINEERING", outcome="ok")
+    sink.emit("stage.start", stage=PipelineState.REVIEWING, cycle=0)
+
+    def gate_log(message: str) -> None:
+        sink.emit("log", stage=PipelineState.REVIEWING, agent="ReviewGate", message=message)
+
+    gate_log("--- Review gate cycle 1/2 ---")
+    sink.emit("gate.cycle", stage="REVIEWING", cycle=1, plain="Review gate: cycle 1 of 2", max_cycles=2)
+    gate_log("Running LSAR review (cycle 1, venue=EDM)")
+    state = load_state(run)
+    assert "reviews not yet counted" in cost_line(state)
+    assert {s.key: s.detail for s in state.stages}["REVIEWING"] == "review 1 of up to 6"
+    for _ in range(7):
+        sink.emit("llm.end", stage="REVIEWING", cycle=1, agent="LSAR", model="deepseek-v4-flash",
+                  provider="deepseek", ok=True, prompt_tokens=20000, completion_tokens=1500,
+                  cached_tokens=0, cost_usd=0.005, cost_estimated=False, component="review")
+    sink.emit("gate.cost", stage="REVIEWING", cycle=1,
+              plain="Review 1 of cycle 1 used 7 AI calls; the review gate has cost US$0.04 so far "
+                    "(7 AI calls)",
+              cost_usd=0.035, n_calls=7, unpriced_calls=0, cost_estimated=False)
+    gate_log("LSAR review complete (cycle 1): overall_score=3.1")
+    state = load_state(run)
+    assert state.llm_calls == 8 and state.review_calls == 7
+    assert cost_line(state) == ("Cost so far: US$0.037 (8 AI calls, including US$0.035 for the "
+                                "automated peer review)")
+    assert "LSAR review 1 finished, score 3.1" in state.recent
+    assert not any("used 7 AI calls" in line for line in state.recent)

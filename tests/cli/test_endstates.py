@@ -762,3 +762,50 @@ def test_other_stops_carry_no_review_details(run_home: Path) -> None:
                                            "resumable": True}))
     out = classify(run)
     assert out.details == [] and out.note == ""
+
+
+# The round-3 Mac study: the review gate scored the paper below the
+# benchmark AND the final checks found a serious problem (the paper named
+# the wrong models in its main comparison). run_status.json's reason_code
+# is GATE_FAILED, which outranks critical findings in the pipeline's
+# order, and the label said only "Ready, below the review benchmark".
+MAC_R3_GATE = {"enabled": True, "ran": True, "skip_reason": None, "passed": False, "score": 5.1,
+               "threshold": 6.3, "advisory": False, "venue": "EDM"}
+MAC_R3_FINDINGS = [("INV_COMPARATOR_MISNAMED", "critical"), ("INV_HANDTYPED_CROSSREF", "major"),
+                   ("INV_PROSE_NUMERAL_UNBOUND", "major")]
+
+
+def test_a_failed_review_with_a_serious_finding_names_both(run_home: Path) -> None:
+    run = _ready_run(run_home, invariants=invariants_file(MAC_R3_FINDINGS),
+                     status=v2_status(reason_code="GATE_FAILED", gate=MAC_R3_GATE,
+                                      counts={"critical": 1, "major": 2, "minor": 0}))
+    out = classify(run)
+    assert out.kind == "ready_with_issues"
+    assert out.label == "Ready, below the review benchmark — 1 serious issue to check"
+    assert out.headline == ("Your paper is written; the automated reviewer scored it below the "
+                            "benchmark. The final checks also found 1 serious problem to fix "
+                            "before sharing it.")
+    assert out.findings[0]["code"] == "INV_COMPARATOR_MISNAMED"
+    assert out.findings[0]["severity"] == "critical"
+
+
+@pytest.mark.parametrize("reason_code, status_extra, label", [
+    ("CRITIC_UNVERIFIED", {"critic_unverified": True},
+     "Ready, with unresolved concerns — 2 serious issues to check"),
+    ("GATE_NOT_RUN", {"gate": {"enabled": True, "ran": False, "skip_reason": "no_pdf",
+                               "passed": None, "score": None, "threshold": None,
+                               "advisory": None, "venue": "EDM"}},
+     "Ready, not reviewed — 2 serious issues to check"),
+    # A record that says CLEAN beside critical findings is never plain "Ready".
+    ("CLEAN", {}, "Ready, with 2 serious issues to check"),
+])
+def test_serious_findings_are_added_to_any_other_label(
+        run_home: Path, reason_code: str, status_extra: dict, label: str) -> None:
+    run = _ready_run(run_home,
+                     invariants=invariants_file([("INV_COMPARATOR_MISNAMED", "critical"),
+                                                 ("INV_MANUSCRIPT_EMPTY", "critical")]),
+                     status=v2_status(reason_code=reason_code, counts={"critical": 2},
+                                      **status_extra))
+    out = classify(run)
+    assert out.label == label
+    assert out.kind == "ready_with_issues"
