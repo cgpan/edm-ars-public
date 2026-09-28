@@ -464,6 +464,79 @@ def test_a_claim_contradicted_among_the_single_models_still_says_so(run_home: Pa
         "the analysis named XGBoost (AUC 0.78) as its best model — check the paper's claim.")
 
 
+#: The six final checks that fired falsely on the round-3 Mac paper.
+R3_FALSE_FINDINGS = ("INV_COMPARATOR_MISNAMED", "INV_IMPUTATION_METHOD_MISMATCH",
+                     "INV_STATED_GAP_ARITHMETIC", "INV_PERCENTAGE_FROM_SPEC_NOT_RUN",
+                     "INV_UNESCAPED_LATEX_SPECIAL", "INV_SCAFFOLDING_LEAKED")
+
+
+def test_the_round_3_paper_screen_lists_its_real_findings_and_not_the_false_ones(
+        run_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # The round-3 Mac study as far as its evidence rebuilds it (the
+    # sentences in tests/test_invariants.py), checked by the real final
+    # checks rather than a hand-written invariants.json. Its result screen
+    # listed six findings that were false; two were real and still are.
+    import copy
+    import json
+
+    from src.invariants import findings_to_json, run_invariants
+    from tests.cli._run_support import write_json
+    from tests.test_invariants import (
+        _ACM_FRONT_MATTER,
+        _R3_DATA_REPORT,
+        _R3_IMPUTATION_SENTENCE,
+        _R3_RACE_GAP,
+        _R3_RESULTS,
+        _R3_SES_GAP,
+        _R3_TABLE_THEN_COMPARISON,
+    )
+
+    def body(fragment: str) -> str:
+        return fragment.replace(r"\begin{document}", "").replace(r"\end{document}", "")
+
+    # The rebuilt sentences are far shorter than the paper; a neutral
+    # paragraph brings the body over the empty-manuscript floor, as the
+    # real paper was.
+    filler = "We describe the students, the questions and the models in the sections below. " * 40
+    paper = (
+        _ACM_FRONT_MATTER + r"\Description{ROC curves.}" * 6 + "\n" + filler + "\n"
+        + "\nXGBoost achieved the best discrimination (AUC $= 0.801$, 95\\% clustered CI "
+          "[0.781, 0.820]) and outperformed logistic regression by a small but statistically "
+          "detectable margin (AUC difference $= 0.013$, 95\\% CI [0.006, 0.021]).\n\n"
+        + body(_R3_IMPUTATION_SENTENCE) + "\n\n" + body(_R3_TABLE_THEN_COMPARISON) + "\n\n"
+        + _R3_RACE_GAP + "\n\n" + _R3_SES_GAP + "\n\n"
+        + r"However, the college enrollment outcome itself has approximately 26\% missingness, "
+          r"which may be non-random (MNAR); complete-case analysis may bias estimates."
+        + "\n\\end{document}\n"
+    )
+    found = copy.deepcopy(_R3_RESULTS)
+    found.update({key: R3_RESULTS[key] for key in (
+        "primary_metric", "best_metric_value", "best_model_scope", "best_overall_model",
+        "best_overall_metric_value")})
+    found["all_models"] = {**found["all_models"], **R3_RESULTS["all_models"]}
+    run = _ready(run_home, results=found, invariants=None, status=None,
+                 data_report=dict(R3_DATA_REPORT, **_R3_DATA_REPORT),
+                 extra={"paper.tex": paper, "roc_curves.png": "png", "research_spec.json": json.dumps(
+                     {"potential_limitations": ["X4EVRATNDCLG has approximately 26% missingness"]})})
+    checks = {"enabled": True, **findings_to_json(run_invariants(str(run)))}
+    write_json(run / "invariants.json", checks)
+    write_json(run / "run_status.json", v2_status(
+        reason_code="ADVISORY_FINDINGS", counts=checks["counts"], invariant_codes=checks["codes"]))
+
+    _, out = _show(run, capsys)
+    flat = " ".join(out.split())
+    for code in R3_FALSE_FINDINGS:
+        assert code not in checks["codes"], code
+        assert f"[{code}]" not in flat, code
+    assert checks["codes"] == ["INV_CLASS_BALANCE_WRONG_SAMPLE", "INV_SUPERLATIVE_CONTRADICTED"]
+    assert "[INV_CLASS_BALANCE_WRONG_SAMPLE]" in flat
+    assert "[INV_SUPERLATIVE_CONTRADICTED]" in flat
+    assert R3_KEY_RESULT in flat
+    html_text = (run / "summary.html").read_text(encoding="utf-8")
+    for code in R3_FALSE_FINDINGS:
+        assert code not in html_text, code
+
+
 def test_a_serious_finding_is_listed_before_the_scores_under_a_review_label(
         run_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # The round-3 Mac study: "Ready, below the review benchmark", with a
