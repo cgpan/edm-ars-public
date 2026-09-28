@@ -282,14 +282,16 @@ class TestOutlineRolePreserved:
         assert prompt_data.get("model_config_key") == "writer"
 
     def test_temperature_and_max_tokens_preserved(self) -> None:
-        """V1 had temperature=0.5, max_tokens=4096. Slim draft preserves
-        both — non-trivial because they affect LLM response shape."""
+        """V1 had temperature=0.5, max_tokens=4096, and the slim draft
+        preserved both. max_tokens is now 8192: on the owner's Mac (round
+        3) 4096 cut the outline off mid-string at 17,064 characters and the
+        Writer fell back to the v1 template (tests/test_outline_retry.py)."""
         config: dict[str, Any] = {
             "paths": {"agent_prompts": str(PROMPTS_DIR) + "/"},
         }
         prompt_data = load_prompt("outline_agent", config)
         assert prompt_data.get("temperature") == 0.5
-        assert prompt_data.get("max_tokens") == 4096
+        assert prompt_data.get("max_tokens") == 8192
 
     def test_role_statement_preserved(self, slim_outline_prompt: str) -> None:
         """The slim prompt's role block must identify the agent as

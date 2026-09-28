@@ -22,6 +22,7 @@ path is exactly what produced the fabrications above.
 """
 from __future__ import annotations
 
+import html
 import math
 import re
 import statistics
@@ -177,6 +178,56 @@ def classify_entry(paper: dict) -> tuple[str, str, str]:
     return "misc", "note", venue
 
 
+# --- field text ------------------------------------------------------------
+#
+# Round 3 on the owner's Mac: references.bib carried "Arthritis Research &
+# Therapy", "... Crime Conflict & World Order" and "... using Data Mining &
+# Machine Learning Approaches", most of them from OpenAlex records. A bare
+# & is an alignment tab to LaTeX: the reference list printed "Data Mining
+# Machine Learning" with the ampersand gone, and paper.log counted errors.
+# Metadata is text, and every LaTeX special in it is escaped here, once.
+
+#: HTML entities that metadata services leave in titles and venue names.
+_HTML_ENTITY = re.compile(r"&(?:amp|lt|gt|quot|apos|#\d+|#[xX][0-9a-fA-F]+);")
+#: A ``$`` that is not already ``\$``.
+_DOLLAR = re.compile(r"(?<!\\)\$")
+#: What makes a ``$...$`` span mathematics rather than two prices:
+#: a command, a sub/superscript, a group, or a short symbol (``$k$``).
+_MATHY = re.compile(r"[\\^_{]|^\s*[A-Za-z]{1,3}\s*$")
+#: Characters escaped outside mathematics, when not already escaped.
+_TEXT_SPECIALS = re.compile(r"(?<!\\)([&%#_$])")
+
+
+def _escape_text(text: str) -> str:
+    return _TEXT_SPECIALS.sub(r"\\\1", text)
+
+
+def latex_escape_field(value: Any) -> str:
+    """BibTeX field text with LaTeX's specials escaped, exactly once.
+
+    ``&``, ``%``, ``#``, ``_`` and ``$`` become ``\\&`` etc.; an
+    already-escaped one is left as it is, so running this twice changes
+    nothing. HTML entities (``&amp;``) are decoded first. A ``$...$`` pair
+    that holds mathematics (``$k$-means``, ``$\\ell_1$``), as arXiv titles
+    often do, is kept verbatim; dollars that do not pair up into
+    mathematics are escaped like any other special.
+    """
+    text = _HTML_ENTITY.sub(lambda m: html.unescape(m.group(0)), str(value or ""))
+    dollars = [m.start() for m in _DOLLAR.finditer(text)]
+    out: list[str] = []
+    pos = 0
+    if len(dollars) % 2 == 0:
+        for open_at, close_at in zip(dollars[0::2], dollars[1::2]):
+            inner = text[open_at + 1:close_at]
+            if not inner.strip() or not _MATHY.search(inner):
+                continue
+            out.append(_escape_text(text[pos:open_at]))
+            out.append(text[open_at:close_at + 1])
+            pos = close_at + 1
+    out.append(_escape_text(text[pos:]))
+    return "".join(out)
+
+
 def build_bib_entry(paper: dict) -> str:
     """Render ONE BibTeX entry from a retrieved paper record.
 
@@ -191,11 +242,14 @@ def build_bib_entry(paper: dict) -> str:
     there is no DOI — never synthesised.
     """
     key = sanitize_key(str(paper.get("paperId") or "unknown"))
-    title = paper.get("title") or "Unknown Title"
+    title = latex_escape_field(paper.get("title") or "Unknown Title")
     year = paper.get("year") or ""
-    authors = paper.get("authors") or []
+    authors = [latex_escape_field(a) for a in (paper.get("authors") or [])]
     author_str = " and ".join(authors) if authors else "Unknown Author"
     entry_type, venue_key, venue_val = classify_entry(paper)
+    # The DOI and URL stay raw: they are printed through \url-like
+    # commands that want the characters themselves.
+    venue_val = latex_escape_field(venue_val)
 
     lines = [
         f"@{entry_type}{{{key},",

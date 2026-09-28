@@ -1,7 +1,10 @@
 agent_name: "OutlineAgent"
 model_config_key: "writer"
 temperature: 0.5
-max_tokens: 4096
+# 4096 cut the round-3 outline off mid-string at 17,064 characters.
+# A truncated or unparseable answer gets one retry at max(16000,
+# 2 x this); see OutlineAgent._request_outline.
+max_tokens: 8192
 system_prompt: |
   You are the OutlineAgent for EDM-ARS.
 

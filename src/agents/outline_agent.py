@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
 from typing import Any
 
 from src.agents.base import BaseAgent, load_prompt, parse_llm_json
@@ -77,8 +76,7 @@ class OutlineAgent(BaseAgent):
             triggers=triggers,
         )
 
-        llm_response = self.call_llm(user_message, max_tokens=self.max_tokens)
-        outline = parse_llm_json(llm_response)
+        outline = self._request_outline(user_message)
 
         # Persist to output directory
         outline_path = os.path.join(self.ctx.output_dir, "paper_outline.json")
@@ -86,6 +84,56 @@ class OutlineAgent(BaseAgent):
             json.dump(outline, f, indent=2)
 
         return outline
+
+    #: The budget of the one retry, at least; twice the first budget when
+    #: that is larger.
+    RETRY_MAX_TOKENS = 16000
+
+    def _request_outline(self, user_message: str) -> dict:
+        """Ask for the outline; once more, with twice the room, if the
+        answer was cut off or is not valid JSON.
+
+        Round 3 on the owner's Mac: the outline answer stopped at 17,064
+        characters, about the 4,096 tokens the stage was given, and
+        ``json.loads`` said "Unterminated string starting at: line 109".
+        The Writer then fell back to the v1 template without an outline.
+        A second failure still raises, and the orchestrator falls back as
+        before.
+        """
+        first_budget = self.max_tokens
+        response = self.call_llm(user_message, max_tokens=first_budget)
+        cut_off = getattr(self, "last_finish_reason", None) == "length"
+        try:
+            return parse_llm_json(response)
+        except ValueError as exc:  # json.JSONDecodeError is a ValueError
+            problem = exc
+
+        retry_budget = max(self.RETRY_MAX_TOKENS, 2 * first_budget)
+        if cut_off:
+            what = (
+                f"was cut off at the {first_budget}-token limit before the "
+                "JSON closed"
+            )
+        else:
+            what = f"was not valid JSON ({problem})"
+        self._note(
+            f"The outline answer {what}; asking once more with "
+            f"max_tokens={retry_budget}."
+        )
+        retry_message = (
+            f"{user_message}\n\n"
+            f"Your previous answer {what}. Output the complete outline JSON "
+            "again, in one ```json block, and keep each field brief."
+        )
+        response = self.call_llm(retry_message, max_tokens=retry_budget)
+        try:
+            return parse_llm_json(response)
+        except ValueError as exc:
+            if getattr(self, "last_finish_reason", None) == "length":
+                raise ValueError(
+                    f"outline answer cut off again at max_tokens={retry_budget}: {exc}"
+                ) from exc
+            raise
 
     # ------------------------------------------------------------------
     # Emphasis trigger detection
