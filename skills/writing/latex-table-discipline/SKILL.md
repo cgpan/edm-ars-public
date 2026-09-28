@@ -84,9 +84,12 @@ XGBoost & 0.82 & 0.76 & 0.74 & 0.71 & 0.72 \\
 - The `%` after `{` and after `\end{tabular}` suppresses spurious
   whitespace.
 - `\resizebox` comes from `graphicx`, already loaded by the template.
-- If using `threeparttable`, wrap the entire
-  `\begin{threeparttable}...\end{threeparttable}` block (not just the
-  tabular) inside `\resizebox`.
+- A resized table with notes: `\resizebox` goes INSIDE the
+  `threeparttable`, around the `tabular` only, and `tablenotes` comes
+  after the `\resizebox`'s closing brace (example under "Table notes").
+  NEVER put `tablenotes` inside the `\resizebox` argument: LaTeX cannot
+  set a list there, the table is lost with its label, and the text
+  prints "Table ??".
 
 ## CRITICAL: narrow tables (fewer than 5 columns) MUST NOT use `\resizebox`
 
@@ -122,6 +125,32 @@ data & data & data \\
 \end{table}
 ```
 
+A wide (5+ column) table with notes resizes the `tabular` only:
+
+```latex
+\begin{table}[h]
+\caption{Your caption.}
+\label{tab:label}
+\begin{threeparttable}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lrrrrr}
+\toprule
+Model & AUC & Acc. & Prec. & Recall & F1\tnote{*} \\
+\midrule
+XGBoost & 0.82 & 0.76 & 0.74 & 0.71 & 0.72 \\
+\bottomrule
+\end{tabular}%
+}
+\begin{tablenotes}
+\footnotesize
+\item[*] Your note text here.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+```
+
+- `tablenotes` is always inside `threeparttable` and never inside a
+  `\resizebox` (or `\scalebox`) argument.
 - Use `\tnote{*}` (or `\tnote{\dag}`) in table cells to place the marker.
 - Use `\item[*]` inside `tablenotes` for the note text.
 - `threeparttable` is already loaded in the template — do NOT add
@@ -135,10 +164,8 @@ NEVER place a footnote as `\noindent{\small ...}` after `\end{table}`.
 not commands that take arguments. The declaration must be **inside** the
 group it scopes:
 
-- CORRECT: `{\small text}` or `
-oindent{\small text}`
-- WRONG:   `\small{text}` or `
-oindent\small{text}` — leaks into the surrounding text
+- CORRECT: `{\small text}` or `\noindent{\small text}`
+- WRONG:   `\small{text}` or `\noindent\small{text}` — leaks into the surrounding text
 
 The same rule applies to all size and shape declarations.
 

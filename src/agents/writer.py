@@ -14,7 +14,11 @@ from src.citations import (
     reconcile_citations,
     venue_citation_target,
 )
-from src.latex_quality import LatexQualityReport, check_latex_quality
+from src.latex_quality import (
+    LatexQualityReport,
+    check_latex_quality,
+    repair_table_notes,
+)
 from src.manuscript_linter import (
     UNVERIFIED_BLOCK,
     UNVERIFIED_MARKER,
@@ -386,6 +390,24 @@ class Writer(BaseAgent):
                     "message": (
                         "Injected missing \\bibliographystyle/\\bibliography "
                         "before \\end{document} (F-A5 deterministic guard)."
+                    ),
+                }
+            )
+
+        # A tablenotes block inside a \resizebox with no threeparttable
+        # took the round-3 subgroup table and its label with it (18 LaTeX
+        # errors, "Table ??" in the text). Deterministic; see
+        # src.latex_quality.repair_table_notes.
+        paper_tex, n_tables = repair_table_notes(paper_tex)
+        if n_tables:
+            self.ctx.log.append(
+                {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "agent": self.agent_name,
+                    "message": (
+                        f"Put the table notes of {n_tables} table(s) inside a "
+                        "threeparttable (they were outside one, or inside a "
+                        "\\resizebox, which LaTeX cannot typeset)."
                     ),
                 }
             )
