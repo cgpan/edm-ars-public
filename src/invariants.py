@@ -2007,12 +2007,17 @@ _IMPUTATION_WORDS = {
     "mean": ("mean",),
     "iterativeimputer": ("iterativeimputer", "multiple imputation", "mice", "chained"),
 }
+#: "iterative imputation" is how prose names IterativeImputer. Without it
+#: the only claim one correct sentence offered was the "median
+#: imputation" that FOLLOWED five IterativeImputer variables, and all five
+#: were reported as median-imputed.
+_IMPUTATION_WORDS["iterative"] = _IMPUTATION_WORDS["iterativeimputer"]
 
 
 #: Both orders the papers actually use: "mode-imputed" / "mode
 #: imputation", and "imputed with the mode".
 _IMPUTATION_CLAIM = re.compile(
-    r"\b(?:(mode|median|mean|IterativeImputer|multiple imputation)"
+    r"\b(?:(mode|median|mean|IterativeImputer|iterative|multiple imputation)"
     r"[- ]?(?:imputed|imputation|imputing)"
     # "imputed WITH the mode", and also "imputed missing values USING
     # IterativeImputer" -- the short gap matters, because without it the
@@ -2020,7 +2025,7 @@ _IMPUTATION_CLAIM = re.compile(
     # second one, and four variables were attributed to it.
     r"|imput(?:ed|ing)\s+(?:\w+\s+){0,3}?(?:with|using|by|via)\s+"
     r"(?:the\s+|their\s+)?"
-    r"(mode|median|mean|IterativeImputer|multiple imputation))",
+    r"(mode|median|mean|IterativeImputer|iterative|multiple imputation))",
     re.IGNORECASE,
 )
 

@@ -1234,6 +1234,50 @@ def test_a_comma_and_clause_is_a_clause_too(tmp_path):
     assert "INV_IMPUTATION_METHOD_MISMATCH" not in _codes(run)
 
 
+_ACCESS_MISSINGNESS = {
+    "BYSTEXP": {"pct_missing": 9.0, "imputation_method": "IterativeImputer"},
+    "BYSES1": {"pct_missing": 5.4, "imputation_method": "IterativeImputer"},
+    "BYRACE": {"pct_missing": 5.1, "imputation_method": "IterativeImputer"},
+    "BYTXMSTD": {"pct_missing": 3.0, "imputation_method": "median"},
+    "BYSEX": {"pct_missing": 4.8, "imputation_method": "mode"},
+}
+
+#: An archived paper's methods sentence, verbatim. It is correct, and the
+#: check reported five of its variables as median-imputed.
+_ACCESS_SENTENCE = (
+    r"\begin{document} We imputed missing values using methods appropriate to "
+    r"each variable's type: iterative imputation (IterativeImputer) for the "
+    r"continuous and ordered-categorical variables with substantial "
+    r"missingness (BYSTEXP, BYSES1, BYMATHSE, BYRISKFC, BYRACE), median "
+    r"imputation for the two achievement scores (BYTXMSTD, BYTXRSTD), and "
+    r"mode imputation for the categorical variables with low missingness "
+    r"(BYPARED, BYSCHPRG, BYSEX). \end{document}"
+)
+
+
+def test_iterative_imputation_names_the_iterative_imputer(tmp_path):
+    run = _run(
+        tmp_path,
+        data_report__json={"missingness_summary": _ACCESS_MISSINGNESS},
+        paper__tex=_ACCESS_SENTENCE,
+    )
+    assert "INV_IMPUTATION_METHOD_MISMATCH" not in _codes(run)
+
+
+def test_iterative_imputation_is_still_a_claim_the_report_can_refute(tmp_path):
+    miss = json.loads(json.dumps(_ACCESS_MISSINGNESS))
+    miss["BYSES1"]["imputation_method"] = "median"
+    run = _run(
+        tmp_path,
+        data_report__json={"missingness_summary": miss},
+        paper__tex=_ACCESS_SENTENCE,
+    )
+    hits = _by_code(run, "INV_IMPUTATION_METHOD_MISMATCH")
+    assert [(h.evidence["variable"], h.evidence["claimed"]) for h in hits] == [
+        ("BYSES1", "iterative")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # a paper that says nothing passes every other check in this module
 # ---------------------------------------------------------------------------
