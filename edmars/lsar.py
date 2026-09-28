@@ -21,6 +21,14 @@ package the install would change; if there is any, nothing is installed
 unless the caller passes ``allow_changes=True`` after asking the user.
 Versions kept outside LSAR's pins are recorded and reported by
 :func:`checks`.
+
+A new EDM-ARS release can pin a newer LSAR, while the settings still
+point at the commit the previous release installed. :func:`outdated`
+tells the two apart, :func:`checks` warns about it, and :func:`update`
+installs ``LSAR_REF`` beside the old copy and removes the old one only
+after the new one loads. ``edmars setup reviewer`` and the installer's
+last step (``edmars after-install``, run by the NEW version, so its
+``LSAR_REF`` is the new pin) both use it.
 """
 
 from __future__ import annotations
@@ -313,6 +321,61 @@ def _read_install_record(home: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def installed_ref(settings: Mapping[str, Any]) -> str | None:
+    """The LSAR commit the settings' install holds, or None when it cannot be told.
+
+    Asked in order: the install record in the folder (it describes what
+    the folder holds), ``lsar.ref`` in the settings, the ref the record
+    was asked for, and the folder's own name (``LSAR-public-<commit>``,
+    as :func:`install` names it).
+    """
+    home_value = _get(settings, "lsar.home")
+    if not home_value:
+        return None
+    home = Path(str(home_value))
+    record = _read_install_record(home)
+    for value in (record.get("commit"), _get(settings, "lsar.ref"), record.get("ref")):
+        if value and str(value).strip():
+            return str(value).strip()
+    match = re.fullmatch(r"LSAR-public-([0-9a-fA-F]{40})", home.name)
+    return match.group(1) if match else None
+
+
+def _same_commit(a: str, b: str) -> bool:
+    """True when two refs name the same commit (a short commit id counts)."""
+    a, b = a.strip().lower(), b.strip().lower()
+    if a == b:
+        return True
+    hexes = re.fullmatch(r"[0-9a-f]{7,40}", a) and re.fullmatch(r"[0-9a-f]{7,40}", b)
+    return bool(hexes) and (a.startswith(b) or b.startswith(a))
+
+
+def _managed(home: Path) -> bool:
+    """True for a folder inside EDM-ARS's own LSAR folder (one install() made)."""
+    from edmars import paths
+
+    root = lsar_root()
+    return paths.is_within(home, root) and home.resolve() != root.resolve()
+
+
+def outdated(settings: Mapping[str, Any]) -> str | None:
+    """The installed LSAR's commit when it is not ``LSAR_REF``, else None.
+
+    None also when LSAR is not installed, when its commit cannot be told,
+    and for a folder outside EDM-ARS's own LSAR folder: someone's own
+    checkout is theirs to update. Settings from an older EDM-ARS keep the
+    commit that version pinned (e974bb2, say) and still load, so without
+    this nothing ever told the user the reviewer was behind.
+    """
+    home_value = _get(settings, "lsar.home")
+    if not home_value or not _managed(Path(str(home_value))):
+        return None
+    installed = installed_ref(settings)
+    if not installed or _same_commit(installed, LSAR_REF):
+        return None
+    return installed
+
+
 def _missing_modules() -> dict[str, str]:
     """LSAR's run-time imports this Python cannot find: module -> distribution."""
     return {module: dist for module, dist in RUNTIME_MODULES.items()
@@ -392,13 +455,23 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
         "related-work part of each review is thinner than it should be.",
         fix="Update LSAR when a fixed version is published: edmars setup reviewer",
     )
+    older = outdated(settings)
+    # The command is in the sentence itself, so there is no separate fix.
+    later = [Check(
+        "LSAR version", "warn",
+        "The automated reviewer is an older version; run `edmars setup reviewer` to "
+        f"update it (free apart from a small download). You have {older[:12]}; this "
+        f"EDM-ARS was tested with {LSAR_REF[:12]}.",
+    )] if older else []
+    if retired:
+        later.append(retired_check)
 
     if missing or deep_problems:
         reasons = [_packages_missing_text(missing)] if missing else []
         reasons += [p for p in deep_problems if not _same_missing_package(p, missing)]
         lead = "Turned on, but not ready" if enabled else "Installed (turned off), but not ready"
         out = [Check(title, "fail", f"{lead}: " + " ".join(reasons), fix="edmars setup reviewer")]
-        return out + ([retired_check] if retired else [])
+        return out + later
 
     out = [Check(title, "ok", f"{state}; version {ref[:12]} at {home}")]
     unmet = _read_install_record(home).get("unmet_pins") or []
@@ -410,8 +483,7 @@ def checks(settings: Mapping[str, Any], *, deep: bool = False) -> list[Check]:
         ))
     else:
         out.append(Check("LSAR's Python packages", "ok", "All present."))
-    if retired:
-        out.append(retired_check)
+    out += later
     if deep:
         out.append(Check("LSAR loads in Python", "ok",
                          "lsar.pipeline and the PDF layout model load in a fresh Python."))
@@ -772,6 +844,52 @@ def install(
     settings_mod.set_(settings, "lsar.home", str(home))
     settings_mod.set_(settings, "lsar.ref", commit or ref)
     settings_mod.save(settings)
+    return home
+
+
+def _running_study() -> str | None:
+    """The folder of the study that is running now, if any."""
+    try:
+        from edmars import runner
+
+        active = runner.active_run()
+    except Exception:  # noqa: BLE001 - no lock to read is no running study
+        return None
+    return str(active) if active is not None else None
+
+
+def update(
+    settings: dict[str, Any],
+    *,
+    allow_changes: bool = False,
+    session: Any | None = None,
+    on_step: Callable[[str], None] | None = None,
+) -> Path:
+    """Replace the installed LSAR with ``LSAR_REF``; remove the old copy last.
+
+    :func:`install` downloads ``LSAR_REF`` into its own folder, checks the
+    archive records that commit, installs its packages and proves it loads
+    before the settings are pointed at it. Only then is the old folder
+    removed (when it is one EDM-ARS made), so a failure at any step, such
+    as no network, leaves the old version installed and in use, and
+    :class:`LsarInstallError` says why.
+
+    Refused while a study runs: its review gate reads the old folder by
+    its full path, and would lose it halfway through a paid run.
+    """
+    running = _running_study()
+    if running is not None:
+        raise LsarInstallError(
+            f"A study is running ({running}), and it reviews its paper with the LSAR you "
+            "have now. Nothing was changed; update the reviewer after the study finishes "
+            "with `edmars setup reviewer`."
+        )
+    old_value = _get(settings, "lsar.home")
+    old = Path(str(old_value)) if old_value else None
+    home = install(settings, allow_changes=allow_changes, session=session, on_step=on_step)
+    if (old is not None and old.exists() and _managed(old)
+            and old.resolve() != Path(home).resolve()):
+        _rmtree(old)
     return home
 
 

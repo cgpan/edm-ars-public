@@ -1269,7 +1269,7 @@ def after_install_cmd(
     plain: PlainOpt = False,
     yes: YesOpt = False,
 ) -> None:
-    """The installer's last step: keep the reviewer working in the new environment."""
+    """The installer's last step: keep the reviewer working in the new environment, at the version it pins."""
     _modes(plain, yes)
     maintenance = _module("maintenance")
     raise _exit(maintenance.after_install(state_file))

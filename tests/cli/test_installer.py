@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -199,14 +200,14 @@ $params = $ast.FindAll({{ param($n) $n -is [System.Management.Automation.Languag
     assert report["params"] == 0
 
 
-def _function_probe(calls: str) -> str:
-    """A script that defines the installer's helpers and runs ``calls``."""
+def _function_probe(calls: str, extra: tuple[str, ...] = ()) -> str:
+    """A script that defines the installer's helpers (and ``extra``) and runs ``calls``."""
     wanted = ", ".join(
         f"'{name}'"
         for name in ("Test-UnderPath", "Merge-UserPath", "ConvertTo-CmdPath",
                      "Get-SyncProvider", "Test-Excluded", "Get-Download",
                      "Get-ShLauncherText", "Get-PathPlanLine", "Get-InstalledVersion",
-                     "Get-UpdateLine", "Invoke-AfterInstall")
+                     "Get-UpdateLine", "Invoke-AfterInstall", *extra)
     )
     return f"""
 $tokens = $null; $errors = $null
@@ -1325,14 +1326,83 @@ def test_both_installers_end_the_same_way_after_an_update() -> None:
     for text in ("Setup is already done; your settings, key, datasets and studies were kept.",
                  "The automated reviewer (LSAR) needs repair: run '",
                  "Until then every automated review is skipped. The reason is given above.",
+                 REVIEWER_OUTDATED_WARNING, REVIEWER_OUTDATED_NOTE,
+                 "(first updating LSAR", "from GitHub if this release was tested with a newer one).",
                  "Reinstalling EDM-ARS", "(it is already installed here).", "is installed again.",
                  "Could not check your settings and the automated reviewer (see above); 'edmars doctor' does."):
         assert text in sh and text in ps1, text
     assert '"install_kind": "$INSTALL_KIND"' in sh and "install_kind     = $installKind" in ps1
-    for text in (sh, ps1):
-        # The reviewer's warning comes after the last "To use EDM-ARS" line.
-        assert text.rindex("needs repair") > text.rindex("To use EDM-ARS, type:")
+    for text, note in ((sh, 'reviewer_note "$REVIEWER_STATE" "$RUN_CMD"'),
+                       (ps1, "Write-ReviewerNote $after.reviewer $runCmd")):
+        # The reviewer's note comes after the last "To use EDM-ARS" line,
+        # and is the only place that warns about the reviewer at the end.
+        assert text.count(note) == 1
+        assert text.rindex(note) > text.rindex("To use EDM-ARS, type:")
+        assert text.count("needs repair") == 1
         assert text.index("after-install") < text.rindex("Setup is already done")
+
+
+#: The installer's last lines for an older LSAR that could not be updated.
+REVIEWER_OUTDATED_WARNING = ("The automated reviewer (LSAR) is an older version and could not be "
+                             "updated: run '")
+REVIEWER_OUTDATED_NOTE = "Until then reviews use the older version. The reason is given above."
+
+
+def _reviewer_notes(say: Callable[[str], list[str]]) -> None:
+    """What each reviewer state from `edmars after-install` makes the installer say last."""
+    for state in ("", "none", "ok", "repaired", "updated"):
+        assert say(state) == [], state
+    failed = say("failed")
+    assert failed == ["", "  ! The automated reviewer (LSAR) needs repair: run 'my edmars setup reviewer'.",
+                      "    Until then every automated review is skipped. The reason is given above."]
+    outdated = say("outdated")
+    assert outdated[0] == ""
+    assert outdated[1] == ("  ! " + REVIEWER_OUTDATED_WARNING + "my edmars setup reviewer' to update it "
+                           "(free apart from a small download).")
+    assert outdated[2] == "    " + REVIEWER_OUTDATED_NOTE
+
+
+@pytest.mark.skipif(SH is None, reason="sh is not installed")
+def test_install_sh_ends_by_saying_an_older_reviewer_could_not_be_updated(tmp_path: Path) -> None:
+    # An LSAR set up by an earlier release is updated by the new edmars'
+    # after-install; offline, it keeps the older one and says "outdated".
+    # install.sh's own one-line say() and warn(), then the function.
+    helpers = ""
+    for name in ("say", "warn"):
+        found = re.search(rf"^{name}\(\) \{{.*\}}\n", _text(INSTALL_SH), re.MULTILINE)
+        assert found is not None, name
+        helpers += found.group(0)
+    body = "set -eu\n" + helpers + _sh_function("reviewer_note") + 'reviewer_note "$1" "$2"\necho end\n'
+    script = tmp_path / "harness.sh"
+    script.write_bytes(body.encode("utf-8"))
+
+    def say(state: str) -> list[str]:
+        result = subprocess.run([str(SH), _sh_path(script), state, "my edmars"],
+                                capture_output=True, text=True, timeout=60, env=_clean_env(tmp_path))
+        assert result.returncode == 0, result.stderr
+        lines = result.stdout.splitlines()
+        assert lines[-1] == "end"
+        return lines[:-1]
+
+    _reviewer_notes(say)
+
+
+@pytest.mark.skipif(not (ON_WINDOWS and POWERSHELL), reason="Windows PowerShell only")
+def test_ps1_ends_by_saying_an_older_reviewer_could_not_be_updated(tmp_path: Path) -> None:
+    calls = "\n".join(
+        f"Write-Host '>>{state}'; Write-ReviewerNote '{state}' 'my edmars'"
+        for state in ("", "none", "ok", "repaired", "updated", "failed", "outdated")
+    ) + "\nWrite-Host '>>'"
+    result = _powershell(_function_probe(calls, extra=("Say", "Warn", "Write-ReviewerNote")), tmp_path)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    marks = [i for i, line in enumerate(lines) if line.startswith(">>")]
+
+    def say(state: str) -> list[str]:
+        start = lines.index(">>" + state)
+        return lines[start + 1:next(i for i in marks if i > start)]
+
+    _reviewer_notes(say)
 
 
 @pytest.mark.skipif(SH is None or ON_WINDOWS, reason="needs a POSIX sh with POSIX paths")
@@ -1384,3 +1454,12 @@ def test_install_sh_update_keeps_what_was_set_up_and_says_so(tmp_path: Path) -> 
     assert "needs repair" not in update.stdout
     record = json.loads((base / "install.json").read_text(encoding="utf-8"))
     assert record["previous_version"] == "0.0.9" and record["install_kind"] == "update"
+
+    # An older reviewer the new release could not update (offline, say):
+    # it keeps working, and the last lines say how to update it.
+    older = _run_sh(tmp_path, *args, **env, FAKE_SETUP_STATE="done", FAKE_REVIEWER_STATE="outdated")
+    assert older.returncode == 0, older.stdout + older.stderr
+    tail = older.stdout.rstrip().splitlines()[-2:]
+    assert tail[0].startswith("  ! " + REVIEWER_OUTDATED_WARNING)
+    assert tail[1] == "    " + REVIEWER_OUTDATED_NOTE
+    assert "needs repair" not in older.stdout

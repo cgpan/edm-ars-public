@@ -404,14 +404,36 @@ update_line() {
 # arxiv, and every review was skipped). The command reinstalls them when
 # the settings record an LSAR install, checks that LSAR loads, and says
 # whether setup was already done; being the new edmars, it finds the
-# settings where every other command does. Sets SETUP_STATE (none,
-# partial or done) and REVIEWER_STATE (none, ok, repaired or failed);
-# both are empty when the command could not answer.
+# settings where every other command does. Being the new edmars, its
+# LSAR_REF (edmars/lsar.py) is also the LSAR this release was tested
+# with: an LSAR set up by an earlier release is updated to it first, and
+# kept in use when that cannot be done (no network, a study running).
+# Sets SETUP_STATE (none, partial or done) and REVIEWER_STATE (none, ok,
+# repaired, updated, outdated or failed); both are empty when the
+# command could not answer.
 after_install() {
     rm -f "$2"
     "$1" after-install --plain --state-file "$2" || true
     SETUP_STATE=$(sed -n 's/^setup=//p' "$2" 2>/dev/null | head -n 1) || SETUP_STATE=""
     REVIEWER_STATE=$(sed -n 's/^reviewer=//p' "$2" 2>/dev/null | head -n 1) || REVIEWER_STATE=""
+}
+
+# reviewer_note STATE RUN_CMD: the installer's last lines, when the
+# automated reviewer needs the user (STATE is REVIEWER_STATE). Last, so
+# they are not scrolled away.
+reviewer_note() {
+    case "$1" in
+        failed)
+            say ""
+            warn "The automated reviewer (LSAR) needs repair: run '$2 setup reviewer'."
+            say "    Until then every automated review is skipped. The reason is given above."
+            ;;
+        outdated)
+            say ""
+            warn "The automated reviewer (LSAR) is an older version and could not be updated: run '$2 setup reviewer' to update it (free apart from a small download)."
+            say "    Until then reviews use the older version. The reason is given above."
+            ;;
+    esac
 }
 
 # --------------------------------------------------------------------------
@@ -708,11 +730,12 @@ main() {
     fi
     if [ -n "$PREVIOUS" ]; then
         say "  8. Check the edmars command, and put the automated reviewer's (LSAR's) Python"
-        say "     packages into the new environment if it is set up. Your settings, keys,"
+        say "     packages into the new environment if it is set up (first updating LSAR"
+        say "     from GitHub if this release was tested with a newer one). Your settings,"
         if [ "$NO_ONBOARD" = 1 ]; then
-            say "     datasets and studies are kept."
+            say "     keys, datasets and studies are kept."
         else
-            say "     datasets and studies are kept; the setup wizard starts only if setup"
+            say "     keys, datasets and studies are kept; the setup wizard starts only if setup"
             say "     was not finished."
         fi
     elif [ "$NO_ONBOARD" = 1 ]; then
@@ -1158,12 +1181,7 @@ EOF
     fi
     say ""
     say "To use EDM-ARS, type:  $RUN_CMD$RUN_NOTE"
-    if [ "$REVIEWER_STATE" = "failed" ]; then
-        # Last, so it is not scrolled away: every review is skipped until then.
-        say ""
-        warn "The automated reviewer (LSAR) needs repair: run '$RUN_CMD setup reviewer'."
-        say "    Until then every automated review is skipped. The reason is given above."
-    fi
+    reviewer_note "$REVIEWER_STATE" "$RUN_CMD"
 }
 
 main "$@"
