@@ -194,7 +194,13 @@ Find it at data_registry/datasets/hsls09_public.yaml
   "n_test": 0,
   "outcome_variable": "string",
   "outcome_type": "binary|continuous",
-  "class_balance": {"class_0": 0.0, "class_1": 0.0},
+  "class_balance": {
+    "sample": "analytic sample (train + test)", "n": 0,
+    "counts": {"class_0": 0, "class_1": 0},
+    "shares": {"class_0": 0.0, "class_1": 0.0}
+  },
+  "class_balance_train": {"sample": "training split", "n": 0, "counts": {}, "shares": {}},
+  "class_balance_test": {"sample": "test split", "n": 0, "counts": {}, "shares": {}},
   "n_predictors_raw": 0,
   "n_predictors_encoded": 0,
   "missingness_summary": {
@@ -205,6 +211,15 @@ Find it at data_registry/datasets/hsls09_public.yaml
   "warnings": []
 }
 ```
+
+The three `class_balance*` fields are written by the orchestrator after
+ENGINEERING (and after a DataEngineer revision), counted from
+`train_y.csv` and `test_y.csv` (`src/class_balance.py`); they are `null`
+or absent for a continuous outcome. `class_balance` is the analytic sample,
+never a split. When the DataEngineer's own value says something else it is
+kept as `class_balance_reported_by_de` and `warnings` says what was
+corrected (round 3: generated code counted `y_train`, and the paper
+reported the training split as the analytic sample).
 
 ---
 

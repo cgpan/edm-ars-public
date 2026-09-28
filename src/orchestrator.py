@@ -26,6 +26,7 @@ from src.causal_data_contract import (
     assert_causal_soo_matrix_contract,
     repair_dummied_treatment,
 )
+from src.class_balance import correct_class_balance
 from src.context import PipelineContext, PipelineState
 from src.dataset_adapter import create_dataset_adapter
 from src.errors import code_for_exception, is_resumable, reopened_pre_critic_stop
@@ -1574,6 +1575,17 @@ class Orchestrator:
             )
         return None
 
+    def _correct_class_balance(self) -> None:
+        """Recount data_report's class balance from train_y/test_y.
+
+        Generated code computed it on the training split and the paper
+        reported those counts as the analytic sample's (round 3). See
+        ``src.class_balance``; it never raises.
+        """
+        correct_class_balance(
+            self.ctx, log=lambda message: self._log("Orchestrator", message)
+        )
+
     def _run_engineering(self) -> None:
         if "ENGINEERING" in self.ctx.completed_stages:
             self.ctx.current_state = PipelineState.ANALYZING
@@ -1686,6 +1698,10 @@ class Orchestrator:
                     "Orchestrator",
                     "Post-DE pre-flight retry produced a compliant matrix",
                 )
+            # The class split the paper reports comes from here, so it is
+            # counted from the y files rather than taken from generated
+            # code that counted y_train (src.class_balance).
+            self._correct_class_balance()
             self.ctx.completed_stages.append("ENGINEERING")
             self.ctx.current_state = PipelineState.ANALYZING
             self._log("Orchestrator", "ENGINEERING stage complete")
@@ -2713,6 +2729,7 @@ class Orchestrator:
             )
             if problem:
                 self._log("Orchestrator", f"Outcome check after revision: {problem}")
+            self._correct_class_balance()
             _emit_sample_metric(self.ctx, result, stage="REVISING")
         elif agent_name == "Analyst":
             self.ctx.results_object = result
