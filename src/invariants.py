@@ -2912,14 +2912,32 @@ def check_unbalanced_environments(a: RunArtifacts) -> list[Finding]:
     ]
 
 
+#: Environments LaTeX never typesets as text. acmart's CCSXML block is a
+#: comment environment holding XML (``<concept_id>``, ``<concept_desc>``),
+#: and it sits after ``\begin{document}`` in the template, so every ACM
+#: paper carried twelve "unescaped" underscores that are not in its text.
+_UNTYPESET_ENV = re.compile(r"(?s)\\begin\{(CCSXML|comment)\}.*?\\end\{\1\}")
+#: Display math, where ``_`` is a subscript and ``&`` an alignment point.
+_DISPLAY_MATH_ENV = re.compile(
+    r"(?s)\\begin\{(equation|align|alignat|gather|multline|flalign|eqnarray"
+    r"|displaymath|math)(\*?)\}.*?\\end\{\1\2\}"
+)
+
+
 def _prose_only(tex: str) -> str:
     """Body text with math, verbatim, comments and macro args removed."""
     body = tex.split(r"\begin{document}", 1)[-1]
     body = _VERBATIM.sub(" ", body)
     body = _COMMENT.sub(" ", body)
+    body = _UNTYPESET_ENV.sub(" ", body)
+    body = _DISPLAY_MATH_ENV.sub(" ", body)
     body = _MATH.sub(" ", body)
-    # Drop the arguments of commands where a bare special is legitimate.
-    body = re.sub(r"\\(?:url|href|path|verb|label|ref|[a-zA-Z]*cite[a-zA-Z]*)"
+    # Drop the arguments of commands where a bare special is legitimate:
+    # links, labels, citation keys, and file names (roc_curves.png is a
+    # file name to \includegraphics, not text).
+    body = re.sub(r"\\(?:url|href|path|verb|label|ref|[a-zA-Z]*cite[a-zA-Z]*"
+                  r"|includegraphics|input|include|bibliography|bibliographystyle"
+                  r"|addbibresource|graphicspath)"
                   r"\*?(?:\[[^\]]*\])*\{[^}]*\}", " ", body)
     return body
 

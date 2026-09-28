@@ -522,6 +522,74 @@ def test_alt_text_is_fine_under_acmart(tmp_path):
     assert "INV_ALT_TEXT_AS_BODY" not in _codes(run)
 
 
+#: The front matter of the ACM template the Writer fills
+#: (templates/paper_template_v2.tex), then one of the round-3 paper's
+#: seven figures. Its 19 "unescaped underscores" were the 12 in this
+#: CCSXML block and one in each figure's file name.
+_ACM_FRONT_MATTER = r"""\documentclass[sigconf]{acmart}
+\begin{document}
+\title{Do Ninth-Grade Non-Cognitive Factors Improve Prediction of College Enrollment?}
+\begin{CCSXML}
+<ccs2012>
+ <concept>
+  <concept_id>10010147.10010178</concept_id>
+  <concept_desc>Computing methodologies~Machine learning</concept_desc>
+  <concept_significance>500</concept_significance>
+ </concept>
+ <concept>
+  <concept_id>10003456.10003457.10003527</concept_id>
+  <concept_desc>Social and professional topics~Student assessment</concept_desc>
+  <concept_significance>500</concept_significance>
+ </concept>
+</ccs2012>
+\end{CCSXML}
+\ccsdesc[500]{Computing methodologies~Machine learning}
+\maketitle
+We trained five model families with drop\_first=True encoding.
+\begin{figure}
+\includegraphics[width=\columnwidth]{roc_curves.png}
+\caption{ROC curves for all five models on the held-out test set.}
+\Description{ROC curves for five models.}
+\label{fig:roc_curves}
+\end{figure}
+"""
+
+
+def test_ccsxml_and_figure_file_names_are_not_prose(tmp_path):
+    """Round-3 Mac paper: 19 reported underscores, none of them in its text."""
+    run = _run(tmp_path, paper__tex=_ACM_FRONT_MATTER + r"\end{document}")
+    assert "INV_UNESCAPED_LATEX_SPECIAL" not in _codes(run)
+
+
+def test_display_math_subscripts_are_not_prose(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            r"\begin{document} The estimand is \begin{equation} \hat{\mu}_{g,t} "
+            r"= \text{low\_ses}_{1} \end{equation} \begin{align*} a &= b_1 \\ "
+            r"c &= d_2 \end{align*} \end{document}"
+        ),
+    )
+    assert "INV_UNESCAPED_LATEX_SPECIAL" not in _codes(run)
+
+
+def test_a_bare_underscore_in_prose_still_fires(tmp_path):
+    """T14: "(F1SCH_ID)" in prose ran a page of text together in italic."""
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            _ACM_FRONT_MATTER
+            + r"we used the first follow-up school identifier (F1SCH_ID), which "
+            r"carries 752 real school IDs. \end{document}"
+        ),
+    )
+    hits = _by_code(run, "INV_UNESCAPED_LATEX_SPECIAL")
+    assert len(hits) == 1 and hits[0].severity == "major"
+    # The only underscore reported is the one in the prose.
+    assert len(hits[0].evidence["_"]) == 1
+    assert "F1SCH_ID" in hits[0].evidence["_"][0]
+
+
 def test_unused_class_option_is_reported(tmp_path):
     """The floatsintex typo, as LaTeX itself reports it."""
     run = _run(
