@@ -195,6 +195,19 @@ class RunState:
     #: is in run_cost.json, which counts answered calls.
     calls_cut_off: int = 0
     calls_failed: int = 0
+    #: The automated peer review's (the LSAR review gate's) share of
+    #: ``llm_calls`` and ``cost_usd``, as the pipeline reports it: the
+    #: gate's ``llm.end`` events (``component: "review"``) and ``gate.cost``
+    #: running totals while it runs, the review rows of token_usage.jsonl,
+    #: then run_cost.json's ``by_component.review``. None: nothing
+    #: reported, so the figures do not include the reviews. Pipelines
+    #: before fix/r3-gate never counted them: the round-3 Mac study showed
+    #: US$0.30 while its six reviews took the bill to US$0.57.
+    review_calls: int | None = None
+    review_cost_usd: float | None = None
+    #: The review share when the latest process started: a resumed gate's
+    #: ``gate.cost`` running total starts again at zero.
+    review_base: tuple[int, float] = (0, 0.0)
     last_seq: int = 0
     last_plain: str = ""
     alive: bool | None = None
@@ -336,8 +349,15 @@ def fmt_duration(seconds: float | None) -> str:
 # ---------------------------------------------------------------------------
 
 #: Event types whose ``plain`` text is not "recent news": too frequent,
-#: or (stage boundaries) already shown as the step rows themselves.
-_QUIET_TYPES = frozenset({"llm.start", "llm.end", "heartbeat", "agent.note", "stage.start", "stage.end"})
+#: or (stage boundaries) already shown as the step rows themselves. The
+#: review gate's running cost (``gate.cost``) is in the cost line, and its
+#: text names review folders ("LSAR review cycle_102 used 7 AI calls").
+_QUIET_TYPES = frozenset({"llm.start", "llm.end", "heartbeat", "agent.note", "stage.start", "stage.end",
+                          "gate.cost"})
+
+#: The ``component`` of the review gate's calls in ``llm.end`` events,
+#: token_usage.jsonl rows and run_cost.json (src/cost.py REVIEW_COMPONENT).
+REVIEW_COMPONENT = "review"
 
 
 def _add_recent(state: RunState, line: str | None) -> None:
@@ -565,19 +585,54 @@ def _cut_off_open_call(state: RunState) -> None:
         state.waiting_agent = None
 
 
+def reviews_not_counted(state: RunState) -> str | None:
+    """Whether the cost leaves out the automated peer review, and why.
+
+    "running": the review gate is running and has reported no cost yet
+    (its first review is under way, or the pipeline does not meter it);
+    "ended": the gate reviewed the paper and no review cost was ever
+    reported, as with every pipeline before fix/r3-gate; None when the
+    reviews are counted or none ran.
+    """
+    if state.review_calls is not None:
+        return None
+    if state.stage("REVIEWING").status == "running" and not state.finished:
+        return "running"
+    gate = state.gate if isinstance(state.gate, dict) else {}
+    ran = gate.get("ran") is True or state.metrics.get("gate_ran") is True \
+        or state.metrics.get("gate_score") is not None
+    return "ended" if ran else None
+
+
 def cost_is_lower_bound(state: RunState) -> bool:
     """True when some AI call's cost is not in the figure: a model with no
-    price, or a call that ended without an answer."""
-    return bool(state.cost_unpriced or state.calls_cut_off or state.calls_failed)
+    price, a call that ended without an answer, or a finished review gate
+    whose reviews were never counted."""
+    return bool(state.cost_unpriced or state.calls_cut_off or state.calls_failed) \
+        or reviews_not_counted(state) == "ended"
 
 
 def cost_line(state: RunState) -> str:
     """The cost as every screen shows it (live view, result screen,
-    summary.html), so the figures and their "at least" always agree."""
+    summary.html), so the figures and their "at least" always agree.
+
+    The automated peer review's share is named once the pipeline reports
+    it ("including US$0.204 for the automated peer review"); until then
+    the line says the reviews are not counted, while the gate runs
+    ("reviews not yet counted") and after it.
+    """
     n = state.llm_calls
     calls = f"{n} AI call{'s' if n != 1 else ''}"
     if state.calls_cut_off:
         calls += f", {state.calls_cut_off} cut off when the study was stopped"
+    missing = reviews_not_counted(state)
+    if missing == "running":
+        calls += "; reviews not yet counted"
+    elif missing == "ended":
+        calls += "; the automated peer reviews are not counted"
+    elif state.review_calls is not None:
+        if state.review_cost_usd:
+            calls += f", including US${state.review_cost_usd:.3f} for the automated peer review"
     lead = "Cost" if state.finished else "Cost so far"
     unanswered = state.calls_cut_off + state.calls_failed
     cost = state.cost_usd
@@ -595,9 +650,64 @@ def cost_line(state: RunState) -> str:
     return f"{lead}: {amount} ({calls})"
 
 
+#: run_cost.json's per-component subtotals: ``by_component`` (src/cost.py
+#: from fix/r3-gate) or ``components``.
+_COMPONENT_KEYS = ("by_component", "components")
+
+
+def cost_parts(cost_file: Any) -> dict[str, Any] | None:
+    """run_cost.json in either shape: the run's calls and cost, and the
+    review gate's share of them.
+
+    Files written before the review gate was metered carry only the run's
+    ``n_calls`` and ``cost_usd``, which leave LSAR's reviews out: their
+    ``review`` is None. Newer files add a subtotal per component
+    (``by_component``: ``pipeline`` and ``review``, each with ``n_calls``,
+    ``cost_usd`` and ``cost_status``) and ``review_cost_usd``, and their
+    top-level figures are the whole run's. A file whose top-level count
+    equals the pipeline subtotal's while the review made calls counts the
+    pipeline alone; the two subtotals are added up then.
+    """
+    if not isinstance(cost_file, dict):
+        return None
+    n = _int(cost_file.get("n_calls"))
+    cost = _num(cost_file.get("cost_usd"))
+    out: dict[str, Any] = {"n_calls": n, "cost_usd": cost, "review": None}
+    blocks: dict[str, Any] = next(
+        (cost_file[k] for k in _COMPONENT_KEYS if isinstance(cost_file.get(k), dict)), {})
+    review = blocks.get("review") if isinstance(blocks.get("review"), dict) else None
+    pipeline = blocks.get("pipeline") if isinstance(blocks.get("pipeline"), dict) else None
+    if review is None:
+        if "review_cost_usd" not in cost_file:
+            return out
+        review = {"cost_usd": cost_file.get("review_cost_usd")}
+    r_calls = _int(review.get("n_calls"))
+    r_cost = _num(review.get("cost_usd"))
+    if r_cost is None:
+        r_cost = _num(cost_file.get("review_cost_usd"))
+    p_calls = _int(pipeline.get("n_calls")) if pipeline else None
+    if r_calls and p_calls is not None and n == p_calls:
+        n = p_calls + r_calls
+        p_cost = _num(pipeline.get("cost_usd")) if pipeline else None
+        if p_cost is not None or r_cost is not None:
+            cost = round((p_cost or 0.0) + (r_cost or 0.0), 6)
+        out.update(n_calls=n, cost_usd=cost)
+    status = str(review.get("cost_status") or "")
+    unpriced = bool(_int(review.get("unpriced_calls"))) or status in ("partial", "unpriced") \
+        or (bool(r_calls) and r_cost is None)
+    out["review"] = {"n_calls": r_calls, "cost_usd": r_cost, "unpriced": unpriced}
+    return out
+
+
 #: Shown with the cost when a call was cut off by the stop.
 CUT_OFF_NOTE = ("An AI call that was cut off when the study was stopped may still be "
                 "billed by the AI service, so the real cost can be a little higher.")
+
+#: Shown with the cost of a finished study whose automated peer review
+#: ran but was never counted (a pipeline from before fix/r3-gate).
+REVIEWS_NOT_COUNTED_NOTE = (
+    "The pipeline that ran this study did not count the automated peer review's AI "
+    "calls, so the real cost is higher; your AI service's usage page shows what it billed.")
 
 #: The order in which the pipeline's REVISING cascade re-runs agents; a
 #: revision starts at the earliest one named.
@@ -715,6 +825,32 @@ def _pre_critic_verdict_words(state: RunState, data: Mapping[str, Any], plain: s
     return str(title or "Automatic checks stopped the study")
 
 
+def _gate_cost(state: RunState, data: Mapping[str, Any]) -> None:
+    """A ``gate.cost`` event: the review gate's running total in this
+    process (``cost_usd``, ``n_calls``, ``unpriced_calls``).
+
+    The gate also sends an ``llm.end`` per call, already counted; the
+    total only adds what those did not (a pipeline that sends totals
+    alone), so nothing is counted twice.
+    """
+    base_calls, base_cost = state.review_base
+    calls = _int(data.get("n_calls"))
+    cost = _num(data.get("cost_usd"))
+    counted_calls = state.review_calls or 0
+    if calls is not None:
+        if base_calls + calls > counted_calls:
+            state.llm_calls += base_calls + calls - counted_calls
+            state.review_calls = base_calls + calls
+        elif state.review_calls is None:
+            state.review_calls = counted_calls  # reported: nothing spent yet
+    if cost is not None and base_cost + cost > (state.review_cost_usd or 0.0) + 1e-9:
+        extra = base_cost + cost - (state.review_cost_usd or 0.0)
+        state.cost_usd = round((state.cost_usd or 0.0) + extra, 6)
+        state.review_cost_usd = round(base_cost + cost, 6)
+    if _int(data.get("unpriced_calls")):
+        state.cost_unpriced = True
+
+
 def _apply(state: RunState, ev: dict[str, Any]) -> None:
     etype = str(ev.get("type") or "")
     seq = ev.get("seq")
@@ -753,6 +889,7 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
                 # interrupted at the last thing it wrote.
                 _stage_end(state, st.key, last_seen, "interrupted")
         state.run_started_at = ts or state.run_started_at
+        state.review_base = (state.review_calls or 0, state.review_cost_usd or 0.0)
         state.finished = False
         state.final_state = None
         state.exit_code = None
@@ -792,6 +929,14 @@ def _apply(state: RunState, ev: dict[str, Any]) -> None:
             state.cost_unpriced = True
         if cost is not None:
             state.cost_usd = round((state.cost_usd or 0.0) + cost, 6)
+        if data.get("component") == REVIEW_COMPONENT:
+            # One of the review gate's calls: an LSAR review's or the
+            # paper revision's (fix/r3-gate meters both).
+            state.review_calls = (state.review_calls or 0) + 1
+            if cost is not None:
+                state.review_cost_usd = round((state.review_cost_usd or 0.0) + cost, 6)
+    elif etype == "gate.cost":
+        _gate_cost(state, data)
     elif etype == "llm.wait":
         state.llm_wait = {
             "seconds": _num(data.get("seconds")),
@@ -1232,6 +1377,7 @@ def usage_events(rows: Iterable[dict[str, Any]], pricing: dict[str, Any]) -> lis
                 "completion_tokens": row.get("completion_tokens"),
                 "cached_tokens": row.get("cached_prompt_tokens"),
                 "cost_usd": usage_cost(row, pricing),
+                "component": row.get("component"),
             },
         })
     return out
@@ -1571,6 +1717,9 @@ class StateReader:
         self._usage_calls = 0
         self._usage_cost: float | None = None
         self._usage_unpriced = False
+        #: The review gate's rows (component "review") among them.
+        self._review_calls = 0
+        self._review_cost: float | None = None
 
     def refresh(self) -> RunState:
         run_dir = self.run_dir
@@ -1603,6 +1752,10 @@ class StateReader:
                         self._usage_unpriced = True
                     else:
                         self._usage_cost = (self._usage_cost or 0.0) + cost
+                    if ev["data"].get("component") == REVIEW_COMPONENT:
+                        self._review_calls += 1
+                        if cost is not None:
+                            self._review_cost = (self._review_cost or 0.0) + cost
             logged = base.metrics.get("log_cost_total")
             if isinstance(logged, dict) and int(logged.get("n") or 0) >= self._usage_calls:
                 base.llm_calls = int(logged.get("n") or 0)
@@ -1613,6 +1766,10 @@ class StateReader:
                 base.llm_calls = self._usage_calls
                 base.cost_usd = round(self._usage_cost, 6) if self._usage_cost is not None else None
             base.cost_unpriced = self._usage_unpriced
+            if self._review_calls:
+                # Both totals above include these rows.
+                base.review_calls = self._review_calls
+                base.review_cost_usd = round(self._review_cost, 6) if self._review_cost is not None else None
         base.source = mode
         base.run_dir = str(run_dir)
         self._base = base
@@ -1924,18 +2081,24 @@ def _enrich(state: RunState, run_dir: Path, files: _FileCache, *, tail: bool) ->
     cost_file = files.load(run_dir / "run_cost.json")
     run_started_ts = state.started.timestamp() if state.started else None
     cost_mtime = _mtime(run_dir / "run_cost.json")
-    if isinstance(cost_file, dict) and (
+    parts = cost_parts(cost_file)
+    if parts is not None and (
         run_started_ts is None or (cost_mtime is not None and cost_mtime >= run_started_ts - 1)
     ):
-        n = _int(cost_file.get("n_calls"))
+        n = parts["n_calls"]
         # run_cost.json counts answered calls only; the calls that ended
         # without an answer stay counted on top, with an unknown cost.
         unanswered = state.calls_cut_off + state.calls_failed
         if n is not None and n >= state.llm_calls - unanswered:
             state.llm_calls = n + unanswered
-            cost = _num(cost_file.get("cost_usd"))
-            if cost is not None:
-                state.cost_usd = cost
+            if parts["cost_usd"] is not None:
+                state.cost_usd = parts["cost_usd"]
+            review = parts["review"]
+            if review is not None:
+                state.review_calls = review["n_calls"] if review["n_calls"] is not None else 0
+                state.review_cost_usd = review["cost_usd"]
+                if review["unpriced"]:
+                    state.cost_unpriced = True
 
     if state.updated is None:
         for name in ("pipeline.log", "events.jsonl", "runner.json"):
@@ -2308,10 +2471,13 @@ __all__ = [
     "EXPERIMENTAL_NOTE",
     "EXPERIMENTAL_WHY",
     "CUT_OFF_NOTE",
+    "REVIEWS_NOT_COUNTED_NOTE",
     "RunState",
     "as_dict",
     "cost_is_lower_bound",
     "cost_line",
+    "cost_parts",
+    "reviews_not_counted",
     "StageState",
     "StateReader",
     "STAGE_ORDER",

@@ -33,12 +33,14 @@ from edmars.runstate import (
     EXPERIMENTAL_LINE,
     EXPERIMENTAL_NOTE,
     EXPERIMENTAL_WHY,
+    REVIEWS_NOT_COUNTED_NOTE,
     RunState,
     fmt_ci,
     fmt_num,
     cost_line,
     fmt_score,
     load_state,
+    reviews_not_counted,
 )
 
 Line = tuple[str, str]  # (text, rich style)
@@ -327,6 +329,8 @@ def _cost(state: RunState, add: Any) -> None:
     add(cost_line(state), "dim")
     if state.calls_cut_off:
         add(CUT_OFF_NOTE, "dim")
+    if reviews_not_counted(state) == "ended":
+        add(REVIEWS_NOT_COUNTED_NOTE, "dim")
 
 
 def has_serious(outcome: Outcome) -> bool:
@@ -559,6 +563,8 @@ def render_summary_html(outcome: Outcome, state: RunState, run_dir: Path) -> str
     add(f'<p class="muted">{_e(" · ".join(meta))}</p>')
     if state.calls_cut_off:
         add(f'<p class="muted">{_e(CUT_OFF_NOTE)}</p>')
+    if reviews_not_counted(state) == "ended":
+        add(f'<p class="muted">{_e(REVIEWS_NOT_COUNTED_NOTE)}</p>')
     add(f'<p class="note">{_e(reminder())}</p>')
     add("</main></body></html>")
     return "\n".join(parts) + "\n"

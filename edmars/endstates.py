@@ -742,8 +742,11 @@ def _stopped(run_dir: Path, state: RunState, code: str, message: str,
     )
 
 
-def classify(run_dir: Path | str) -> Outcome:
-    """Decide how the run in ``run_dir`` ended (or that it is running)."""
+def classify(run_dir: Path | str, *, state: RunState | None = None) -> Outcome:
+    """Decide how the run in ``run_dir`` ended (or that it is running).
+
+    ``state`` is the folder's :func:`load_state`, when the caller already
+    read it (``edmars runs`` also shows its cost)."""
     run_dir = Path(run_dir)
     labels = messages().get("outcomes") or {}
     if not run_dir.is_dir():
@@ -757,7 +760,8 @@ def classify(run_dir: Path | str) -> Outcome:
             code=None,
             run_dir=str(run_dir),
         )
-    state = load_state(run_dir)
+    if state is None:
+        state = load_state(run_dir)
 
     if not state.finished:
         step, total = step_position(state)

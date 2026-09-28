@@ -1167,18 +1167,43 @@ def _candidates(settings: dict[str, Any]) -> list[Path]:
     return runs
 
 
+def _cost_fields(state: Any) -> dict[str, Any]:
+    """A study's cost for ``edmars runs --json``, as its screens word it.
+
+    ``cost_usd`` and ``n_calls`` are the whole study's, the automated peer
+    review included once the pipeline reports it (``review_cost_usd``,
+    ``review_n_calls``; null when it did not). ``cost_complete`` is false
+    when some calls are not in the figure: calls with no price or cut off
+    by a stop, or reviews that were not counted.
+    """
+    from edmars.runstate import cost_is_lower_bound, cost_line, reviews_not_counted
+
+    return {
+        "cost_usd": state.cost_usd,
+        "n_calls": state.llm_calls,
+        "review_cost_usd": state.review_cost_usd,
+        "review_n_calls": state.review_calls,
+        "cost_complete": not cost_is_lower_bound(state) and reviews_not_counted(state) is None,
+        "cost_text": cost_line(state),
+    }
+
+
 def list_runs(settings: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every study folder, newest first, with its current label."""
+    """Every study folder, newest first, with its current label and cost."""
     from edmars import endstates
+    from edmars.runstate import load_state
 
     active = active_run()
     out: list[dict[str, Any]] = []
     for path in _candidates(settings):
         runner = _read_runner(path)
         study = as_dict(runner.get("study"))
+        cost: dict[str, Any] = {}
         try:
-            outcome = endstates.classify(path)
+            state = load_state(path)
+            outcome = endstates.classify(path, state=state)
             label, kind = outcome.label, outcome.kind
+            cost = _cost_fields(state)
         except Exception:  # noqa: BLE001 -- one damaged folder must not hide the rest
             label, kind = "Unreadable", "stopped"
         question = study.get("research_question")
@@ -1195,6 +1220,7 @@ def list_runs(settings: dict[str, Any]) -> list[dict[str, Any]]:
             "label": label,
             "kind": kind,
             "active": active is not None and Path(active) == path,
+            **cost,
         })
     return out
 
