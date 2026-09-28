@@ -1601,13 +1601,33 @@ def check_bibliography_ampersands(a: RunArtifacts) -> list[Finding]:
     ]
 
 
+_DOCUMENTCLASS = re.compile(r"\\documentclass\s*(?:\[[^\]]*\])?\s*\{\s*([^}\s]+)\s*\}")
+
+
+def _document_class(tex: str) -> str | None:
+    r"""The class the manuscript loads, ignoring commented-out lines.
+
+    The journal template carries a commented ``%\documentclass`` line
+    beside the live one, so the first textual match is not enough.
+    """
+    m = _DOCUMENTCLASS.search(re.sub(r"(?<!\\)%.*", "", tex))
+    return m.group(1) if m else None
+
+
 def check_scaffolding_leaked(a: RunArtifacts) -> list[Finding]:
-    """Pipeline machinery typeset as reader-facing prose."""
+    """Pipeline machinery typeset as reader-facing prose.
+
+    ``\\Description`` is acmart's figure alt text. Under acmart it is the
+    required accessibility markup and prints nothing; under any other
+    class it is undefined. The pattern used to be counted in every paper,
+    whatever its class, so every ACM paper the template produced was told
+    it had leaked scaffolding.
+    """
     paper = a.paper
     if paper is None:
         return []
+    doc_class = _document_class(paper)
     patterns = [
-        (r"\\Description\{", "acmart \\Description in a non-acmart class"),
         (r"(?<![A-Za-z])\(P[1-9]\)", "bare pipeline step codes (P1)…(P6)"),
         (r"```", "markdown code fence"),
         (r"%%PLACEHOLDER:", "unfilled template placeholder"),
@@ -1615,10 +1635,21 @@ def check_scaffolding_leaked(a: RunArtifacts) -> list[Finding]:
         (r"\bis stated before it is applied\b", "spec checklist text transcribed as prose"),
         (r"\[---|\+---|—% confidence", "placeholder dash where a number belongs"),
     ]
+    if doc_class != "acmart":
+        patterns.insert(
+            0,
+            (
+                r"\\Description\{",
+                f"acmart \\Description in a non-acmart class ({doc_class or 'none declared'})",
+            ),
+        )
     out: list[Finding] = []
     for pat, label in patterns:
         hits = re.findall(pat, paper)
         if hits:
+            evidence: dict = {"pattern": pat, "count": len(hits)}
+            if pat.startswith(r"\\Description"):
+                evidence["document_class"] = doc_class
             out.append(
                 Finding(
                     code="INV_SCAFFOLDING_LEAKED",
@@ -1629,7 +1660,7 @@ def check_scaffolding_leaked(a: RunArtifacts) -> list[Finding]:
                         "legible to a reviewer as machine generation."
                     ),
                     artifact=a.paper_name or "paper.tex",
-                    evidence={"pattern": pat, "count": len(hits)},
+                    evidence=evidence,
                 )
             )
     return out
@@ -2989,7 +3020,7 @@ def check_alt_text_as_body(a: RunArtifacts) -> list[Finding]:
     paper = a.paper
     if paper is None:
         return []
-    if "acmart" in paper.split(r"\begin{document}", 1)[0]:
+    if _document_class(paper) == "acmart":
         return []
     hits = re.findall(r"\\Description\s*\{([^}]{0,120})", paper)
     if not hits:

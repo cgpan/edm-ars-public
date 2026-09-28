@@ -555,6 +555,42 @@ We trained five model families with drop\_first=True encoding.
 """
 
 
+def test_description_under_acmart_is_not_scaffolding(tmp_path):
+    """Round-3 Mac paper: "7 instance(s) of acmart \\Description in a
+    non-acmart class" -- in an acmart paper. The pattern was counted
+    without ever looking at the class.
+    """
+    tex = _ACM_FRONT_MATTER + r"\Description{Bar chart.}" * 6 + r"\end{document}"
+    run = _run(tmp_path, paper__tex=tex)
+    assert _by_code(run, "INV_SCAFFOLDING_LEAKED") == []
+    assert "INV_ALT_TEXT_AS_BODY" not in _codes(run)
+
+
+def test_description_outside_acmart_is_still_scaffolding(tmp_path):
+    """The journal template also carries a commented-out class line."""
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            "%\\documentclass[sigconf]{acmart}\n"
+            "\\documentclass[man,floatsintext,longtable]{apa7}\n\\begin{document}"
+            r"\Description{Bar chart of mean absolute SHAP values.}"
+            "\\end{document}"
+        ),
+    )
+    hits = _by_code(run, "INV_SCAFFOLDING_LEAKED")
+    assert len(hits) == 1 and hits[0].evidence["document_class"] == "apa7"
+    assert "INV_ALT_TEXT_AS_BODY" in _codes(run)
+
+
+def test_other_scaffolding_under_acmart_still_fires(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__tex=_ACM_FRONT_MATTER + "```latex\n\\end{document}",
+    )
+    hits = _by_code(run, "INV_SCAFFOLDING_LEAKED")
+    assert [h.evidence["pattern"] for h in hits] == ["```"]
+
+
 def test_ccsxml_and_figure_file_names_are_not_prose(tmp_path):
     """Round-3 Mac paper: 19 reported underscores, none of them in its text."""
     run = _run(tmp_path, paper__tex=_ACM_FRONT_MATTER + r"\end{document}")
