@@ -157,6 +157,22 @@ def test_the_final_check_that_flagged_the_study_no_longer_fires(tmp_path: Path) 
     assert check_class_balance_sample(RunArtifacts(str(tmp_path))) == []
 
 
+def test_the_final_check_holds_the_recounted_field_to_analytic_n(tmp_path: Path) -> None:
+    """The recount leaves analytic_n as the DataEngineer wrote it. When
+    that is not the number of rows in the y files, the paper's sample size
+    and its class split cannot both be right, and the check (which read
+    nothing in the labelled shape) has to say so."""
+    _round3_files(tmp_path)
+    ctx = _ctx(tmp_path, {**ROUND3_REPORT, "analytic_n": 17500})
+
+    _run(ctx)
+
+    hits = check_class_balance_sample(RunArtifacts(str(tmp_path)))
+    assert [h.evidence["problems"] for h in hits] == [
+        ["its n is 17,335, not analytic_n (17,500)"]
+    ]
+
+
 def test_a_value_that_already_describes_the_analytic_sample_is_not_a_correction(
     tmp_path: Path,
 ) -> None:

@@ -1756,6 +1756,112 @@ def test_class_balance_as_proportions_is_not_a_count_claim(tmp_path):
     assert "INV_CLASS_BALANCE_WRONG_SAMPLE" not in _codes(run)
 
 
+# The labelled shape the orchestrator's recount writes (src.class_balance):
+# the round-3 study, analytic 17,335 = train 13,773 + test 3,562.
+_R3_SPLITS = {"analytic_n": 17335, "n_train": 13773, "n_test": 3562}
+
+
+def _labelled(sample, n, counts) -> dict:
+    return {
+        "sample": sample,
+        "n": n,
+        "counts": counts,
+        "shares": {k: round(v / n, 4) for k, v in counts.items()},
+    }
+
+
+def test_labelled_class_balance_over_the_analytic_sample_is_fine(tmp_path):
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": _labelled(
+            "analytic sample (train + test)", 17335,
+            {"class_0": 4281, "class_1": 13054},
+        ),
+        "class_balance_train": _labelled(
+            "training split", 13773, {"class_0": 3319, "class_1": 10454}
+        ),
+    })
+    assert "INV_CLASS_BALANCE_WRONG_SAMPLE" not in _codes(run)
+
+
+def test_labelled_class_balance_that_labels_a_split(tmp_path):
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": _labelled(
+            "training split", 13773, {"class_0": 3319, "class_1": 10454}
+        ),
+    })
+    hits = _by_code(run, "INV_CLASS_BALANCE_WRONG_SAMPLE")
+    assert len(hits) == 1
+    assert hits[0].evidence["problems"] == [
+        "it is labelled 'training split', not the analytic sample",
+        "its n is 13,773, which is n_train, not analytic_n (17,335)",
+    ]
+
+
+def test_labelled_class_balance_whose_n_is_not_analytic_n(tmp_path):
+    """The recount's n comes from the y files and analytic_n from the
+    DataEngineer: when they disagree, the paper's sample size and its
+    class split cannot both be right."""
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": _labelled(
+            "analytic sample (train + test)", 17000,
+            {"class_0": 4200, "class_1": 12800},
+        ),
+    })
+    hits = _by_code(run, "INV_CLASS_BALANCE_WRONG_SAMPLE")
+    assert len(hits) == 1
+    assert hits[0].evidence["problems"] == [
+        "its n is 17,000, not analytic_n (17,335)"
+    ]
+    assert "17,335" in hits[0].message
+
+
+def test_labelled_class_balance_whose_counts_are_not_its_n(tmp_path):
+    """The analytic label and n, with the training split's counts under
+    them: the round-3 numbers, relabelled without being recounted."""
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": {
+            "sample": "analytic sample (train + test)",
+            "n": 17335,
+            "counts": {"class_0": 3319, "class_1": 10454},
+        },
+    })
+    hits = _by_code(run, "INV_CLASS_BALANCE_WRONG_SAMPLE")
+    assert len(hits) == 1
+    assert hits[0].evidence["sum"] == 13773
+    assert hits[0].evidence["problems"] == [
+        "its counts sum to 13,773, which is n_train, not its n (17,335)"
+    ]
+
+
+def test_labelled_class_balance_that_does_not_say_its_sample(tmp_path):
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": {"n": 17335, "counts": {"class_0": 4281, "class_1": 13054}},
+    })
+    hits = _by_code(run, "INV_CLASS_BALANCE_WRONG_SAMPLE")
+    assert [h.evidence["problems"] for h in hits] == [
+        ["it does not say which sample it counts"]
+    ]
+
+
+def test_labelled_class_balance_without_n_is_held_to_analytic_n(tmp_path):
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": {
+            "sample": "analytic sample (train + test)",
+            "counts": {"class_0": 962, "class_1": 2600},
+        },
+    })
+    hits = _by_code(run, "INV_CLASS_BALANCE_WRONG_SAMPLE")
+    assert [h.evidence["problems"] for h in hits] == [
+        ["its counts sum to 3,562, which is n_test, not analytic_n (17,335)"]
+    ]
+
+
 # ---------------------------------------------------------------------------
 # INV_SUPERLATIVE_CONTRADICTED
 # ---------------------------------------------------------------------------
