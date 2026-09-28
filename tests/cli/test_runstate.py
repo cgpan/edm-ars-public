@@ -546,6 +546,19 @@ def test_the_analysis_step_names_the_model_its_metrics_put_first(run_home: Path)
         "Best by AUC: RandomForest, AUC 0.81 [0.79–0.83] (the analysis named XGBoost)"
 
 
+def test_the_analysis_step_names_the_best_single_model_and_a_higher_ensemble(run_home: Path) -> None:
+    # results.json's best_model is the best single model by design; the
+    # round-3 Mac study's stacking ensemble scored higher.
+    found = dict(PREDICTION_RESULTS, all_models={
+        **PREDICTION_RESULTS["all_models"], "StackingEnsemble": {"auc": 0.79}})
+    state = load_state(make_run(run_home, results=found))
+    assert state.metrics["best_model"] == "XGBoost"
+    assert state.metrics["ensemble_model"] == "StackingEnsemble"
+    assert "claimed_best_model" not in state.metrics
+    assert _stage(state, "ANALYZING").detail == \
+        "Best single model: XGBoost, AUC 0.78 [0.76–0.80]; the stacking ensemble 0.79"
+
+
 def test_best_by_metric_respects_the_metrics_direction() -> None:
     models = {"A": {"auc": 0.7, "rmse": 0.5}, "B": {"AUC": 0.8, "rmse": 0.6}, "C": {"note": "failed"}}
     assert runstate.best_by_metric(models, "AUC") == (["B"], 0.8)

@@ -369,6 +369,101 @@ def test_the_key_result_keeps_the_claim_when_the_metrics_agree_or_cannot_say(
     assert results.result_sentence(load_state(_ready(run_home, results=found))) == expected
 
 
+# The round-3 Mac study's results.json (AUC values and XGBoost's interval
+# as the run wrote them), with the scope fields the orchestrator now adds
+# (src/best_model.py). best_model is the best single model by design; the
+# stacking ensemble scored higher, which is not a contradiction.
+R3_RESULTS = {
+    "best_model": "XGBoost",
+    "best_metric_value": 0.801488285622901,
+    "primary_metric": "AUC",
+    "all_models": {
+        "LogisticRegression": {"auc": 0.7884831280985126, "auc_ci_lower": 0.7728, "auc_ci_upper": 0.8042},
+        "RandomForest": {"auc": 0.7985067167759475, "auc_ci_lower": 0.7836, "auc_ci_upper": 0.8144},
+        "XGBoost": {"auc": 0.801488285622901, "auc_ci_lower": 0.7868867153371972,
+                    "auc_ci_upper": 0.8172237882287067},
+        "ElasticNet": {"auc": 0.7812581960658883, "auc_ci_lower": 0.7656, "auc_ci_upper": 0.7975},
+        "StackingEnsemble": {"auc": 0.802020230289461, "auc_ci_lower": 0.7868,
+                             "auc_ci_upper": 0.8175},
+    },
+    "best_model_scope": "individual",
+    "best_overall_model": "StackingEnsemble",
+    "best_overall_metric_value": 0.802020230289461,
+}
+R3_DATA_REPORT = {
+    "dataset": "hsls09_public", "original_n": 23503, "analytic_n": 17335,
+    "n_train": 13773, "n_test": 3562, "n_predictors_encoded": 42, "validation_passed": True,
+}
+R3_KEY_RESULT = ("Key result: Best single model: XGBoost, AUC 0.80 (95% CI 0.79-0.82); the "
+                 "stacking ensemble, which combines the models, scored 0.80. Both were measured "
+                 "on 3,562 students held out for testing.")
+
+
+def test_the_key_result_names_the_best_single_model_and_the_ensemble_beside_it(
+        run_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # The round-3 Mac study: the screen said "check the paper's claim"
+    # about a best_model that is the best single model, as designed.
+    run = _ready(run_home, results=R3_RESULTS, data_report=R3_DATA_REPORT)
+    _, out = _show(run, capsys)
+    flat = " ".join(out.split())
+    assert R3_KEY_RESULT in flat
+    assert "check the paper's claim" not in flat
+    assert "the analysis named" not in flat
+    html_text = (run / "summary.html").read_text(encoding="utf-8")
+    assert ("Best single model: XGBoost, AUC 0.80 (95% CI 0.79–0.82); the stacking ensemble, "
+            "which combines the models, scored 0.80. Both were measured on 3,562 students held "
+            "out for testing.") in html_text
+    assert "check the paper" not in html_text
+
+
+def test_an_older_results_file_without_the_scope_fields_reads_the_same(run_home: Path) -> None:
+    from edmars.runstate import load_state
+
+    older = {k: v for k, v in R3_RESULTS.items()
+             if k not in ("best_model_scope", "best_overall_model", "best_overall_metric_value")}
+    state = load_state(_ready(run_home, results=older, data_report=R3_DATA_REPORT))
+    assert f"Key result: {results.result_sentence(state)}".replace("–", "-") == R3_KEY_RESULT
+    assert state.metrics["ensemble_model"] == "StackingEnsemble"
+    assert "claimed_best_model" not in state.metrics
+
+
+def test_an_ensemble_behind_the_best_single_model_is_not_mentioned(run_home: Path) -> None:
+    from edmars.runstate import load_state
+
+    found = dict(R3_RESULTS, best_overall_model="XGBoost", best_overall_metric_value=0.8015,
+                 all_models={**R3_RESULTS["all_models"], "StackingEnsemble": {"auc": 0.79}})
+    assert results.result_sentence(load_state(_ready(run_home, results=found,
+                                                     data_report=R3_DATA_REPORT))) == (
+        "Best model: XGBoost, AUC 0.80 (95% CI 0.79–0.82), on 3,562 students held out for testing.")
+
+
+def test_an_ensemble_the_analysis_named_as_its_best_is_compared_with_every_model(
+        run_home: Path) -> None:
+    from edmars.runstate import load_state
+
+    found = dict(R3_RESULTS, best_model="StackingEnsemble", best_metric_value=0.802020230289461,
+                 best_model_scope="overall")
+    state = load_state(_ready(run_home, results=found, data_report=R3_DATA_REPORT))
+    assert results.result_sentence(state) == (
+        "Best model: StackingEnsemble, AUC 0.80 (95% CI 0.79–0.82), on 3,562 students held out "
+        "for testing.")
+    assert "ensemble_model" not in state.metrics
+
+
+def test_a_claim_contradicted_among_the_single_models_still_says_so(run_home: Path) -> None:
+    # The claim is compared with the single models: RandomForest beat
+    # XGBoost there, and the ensemble beat both.
+    from edmars.runstate import load_state
+
+    found = dict(CONTRADICTED_RESULTS, best_model_scope="individual",
+                 best_overall_model="StackingEnsemble", best_overall_metric_value=0.83,
+                 all_models={**CONTRADICTED_RESULTS["all_models"], "StackingEnsemble": {"auc": 0.83}})
+    assert results.result_sentence(load_state(_ready(run_home, results=found))) == (
+        "Best single model by AUC: RandomForest (AUC 0.81, 95% CI 0.79–0.83), on 3,467 students "
+        "held out for testing; the stacking ensemble, which combines the models, scored 0.83; "
+        "the analysis named XGBoost (AUC 0.78) as its best model — check the paper's claim.")
+
+
 def test_a_serious_finding_is_listed_before_the_scores_under_a_review_label(
         run_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # The round-3 Mac study: "Ready, below the review benchmark", with a

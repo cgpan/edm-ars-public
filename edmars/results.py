@@ -35,6 +35,7 @@ from edmars.runstate import (
     EXPERIMENTAL_WHY,
     REVIEWS_NOT_COUNTED_NOTE,
     RunState,
+    ensemble_words,
     fmt_ci,
     fmt_num,
     cost_line,
@@ -83,6 +84,11 @@ def result_sentence(state: RunState) -> str | None:
     metrics put first (edmars.runstate.prediction_metrics). When the
     analysis named another model as its best, both are shown: the paper
     is likely to repeat the analysis's claim.
+
+    The best model is the best single model, by design. A stacking
+    ensemble that scored higher is said beside it, not flagged: the
+    ensemble combines the models, and the paper interprets the single
+    one.
     """
     m = state.metrics
     if m.get("best_model"):
@@ -90,21 +96,32 @@ def result_sentence(state: RunState) -> str | None:
         value = m.get("best_metric_value")
         claimed = m.get("claimed_best_model")
         held_out = ""
-        if isinstance(m.get("n_test"), int) and m["n_test"] > 0:
-            held_out = f", on {m['n_test']:,} students held out for testing"
+        n_test = m["n_test"] if isinstance(m.get("n_test"), int) and m["n_test"] > 0 else None
+        if n_test:
+            held_out = f", on {n_test:,} students held out for testing"
+        ensemble = ""
+        if m.get("ensemble_model") and m.get("ensemble_metric_value") is not None:
+            ensemble = (f"; {ensemble_words(str(m['ensemble_model']))}, which combines the "
+                        f"models, scored {fmt_num(m['ensemble_metric_value'])}")
         if claimed and metric and value is not None:
             ci = _ci_words(m.get("best_ci")).strip().strip("()")
-            text = f"Best by {metric}: {m['best_model']} ({metric} {fmt_num(value)}"
+            lead = f"Best single model by {metric}" if ensemble else f"Best by {metric}"
+            text = f"{lead}: {m['best_model']} ({metric} {fmt_num(value)}"
             text += f", {ci})" if ci else ")"
-            text += held_out
+            text += held_out + ensemble
             text += f"; the analysis named {claimed}"
             if m.get("claimed_metric_value") is not None:
                 text += f" ({metric} {fmt_num(m['claimed_metric_value'])})"
             return text + " as its best model — check the paper's claim."
-        text = f"Best model: {m['best_model']}"
+        text = f"{'Best single model' if ensemble else 'Best model'}: {m['best_model']}"
         if metric and value is not None:
             text += f", {metric} {fmt_num(value)}"
             text += _ci_words(m.get("best_ci"))
+        if ensemble:
+            text += ensemble + "."
+            if n_test:
+                text += f" Both were measured on {n_test:,} students held out for testing."
+            return text
         return text + held_out + "."
     if m.get("estimate") is not None:
         ci_text = _ci_words(m.get("estimate_ci"))

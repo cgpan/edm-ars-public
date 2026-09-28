@@ -1723,6 +1723,68 @@ def best_by_metric(all_models: dict[str, Any], metric: str) -> tuple[list[str], 
     return [name for name, v in values.items() if v == best], best
 
 
+#: Model names that combine the others (src/best_model.py ENSEMBLE_NAME).
+_ENSEMBLE_NAME = re.compile(r"stack|ensemble|voting|blend", re.IGNORECASE)
+
+
+def is_ensemble(name: Any) -> bool:
+    return isinstance(name, str) and bool(_ENSEMBLE_NAME.search(name))
+
+
+def ensemble_words(name: str) -> str:
+    """An ensemble model as a sentence names it: "the stacking ensemble"."""
+    lower = name.lower()
+    for part, words in (("stack", "the stacking ensemble"), ("voting", "the voting ensemble"),
+                        ("blend", "the blended ensemble")):
+        if part in lower:
+            return words
+    return f"the ensemble ({name})"
+
+
+def _best_scope(results: dict[str, Any], claimed: str | None) -> str:
+    """Which models results.json's ``best_model`` is the best of.
+
+    "individual" by design (SPEC 4.3: the interpreted model, the
+    ensemble excluded), "overall" when the analysis named an ensemble.
+    results.json says so itself since round 3 (``best_model_scope``,
+    written by src/best_model.py); an older file is read the same way
+    from the name.
+    """
+    scope = results.get("best_model_scope")
+    if scope in ("individual", "overall"):
+        return str(scope)
+    return "overall" if is_ensemble(claimed) else "individual"
+
+
+def _ensemble_ahead(results: dict[str, Any], all_models: dict[str, Any], metric: str,
+                    best: str | None) -> tuple[str, float] | None:
+    """(ensemble, its value) when an ensemble scored better than ``best``,
+    the best single model; None otherwise.
+
+    From results.json's ``best_overall_model`` / ``best_overall_metric_value``
+    when it has them; an older file is measured from ``all_models``. A tie
+    goes to the single model, as src/best_model.py breaks it.
+    """
+    if not best:
+        return None
+    named = results.get("best_overall_model")
+    if isinstance(named, str) and named.strip():
+        if named.lower() == best.lower() or not is_ensemble(named):
+            return None
+        value = _num(results.get("best_overall_metric_value"))
+        if value is None:
+            value = _row_metric(_model_row(all_models, named), _metric_key(metric))
+        return (named, value) if value is not None else None
+    measured = best_by_metric(all_models, metric)
+    if measured is None:
+        return None
+    leaders, top = measured
+    if best.lower() in {name.lower() for name in leaders}:
+        return None
+    ensembles = [name for name in leaders if is_ensemble(name)]
+    return (ensembles[0], top) if ensembles else None
+
+
 def prediction_metrics(results: dict[str, Any]) -> dict[str, Any]:
     """The prediction study's main result, from results.json's metrics.
 
@@ -1734,6 +1796,12 @@ def prediction_metrics(results: dict[str, Any]) -> dict[str, Any]:
     kept as ``claimed_best_model`` (with its value, when known) so the
     screens can show both. A metric whose direction is unknown, or
     results without per-model values, fall back to the claim.
+
+    The claim is compared with the models it is about: the single models
+    when ``best_model`` is the best single model, which is the design.
+    A stacking ensemble that scored higher is not a contradiction. It is
+    kept as ``ensemble_model`` / ``ensemble_metric_value``, so the screens
+    can say the ensemble scored higher.
     """
     out: dict[str, Any] = {}
     claimed = results.get("best_model")
@@ -1743,8 +1811,13 @@ def prediction_metrics(results: dict[str, Any]) -> dict[str, Any]:
     all_models = as_dict(results.get("all_models"))
     if metric:
         out["primary_metric"] = _metric_label(str(metric))
+    scope = _best_scope(results, claimed)
+    pool = all_models
+    if scope == "individual":
+        singles = {name: row for name, row in all_models.items() if not is_ensemble(name)}
+        pool = singles or all_models
     best = claimed
-    measured = best_by_metric(all_models, str(metric)) if metric else None
+    measured = best_by_metric(pool, str(metric)) if metric else None
     if measured is not None:
         leaders, top = measured
         if claimed is None or claimed.lower() not in {name.lower() for name in leaders}:
@@ -1766,6 +1839,10 @@ def prediction_metrics(results: dict[str, Any]) -> dict[str, Any]:
         lo, hi = _find_ci(row, str(metric))
         if _num(lo) is not None and _num(hi) is not None:
             out["best_ci"] = [_num(lo), _num(hi)]
+    ahead = _ensemble_ahead(results, all_models, str(metric), best) \
+        if metric and scope == "individual" else None
+    if ahead is not None:
+        out["ensemble_model"], out["ensemble_metric_value"] = ahead
     out["n_models"] = len(all_models)
     return out
 
@@ -1859,13 +1936,20 @@ def key_result(metrics: dict[str, Any], task_type: str) -> str | None:
     if metrics.get("best_model"):
         claimed = metrics.get("claimed_best_model")
         metric = metrics.get("primary_metric")
-        text = f"Best by {metric}: {metrics['best_model']}" if claimed and metric \
-            else f"Best: {metrics['best_model']}"
+        ensemble = metrics.get("ensemble_model")
+        if ensemble:
+            text = f"Best single model: {metrics['best_model']}"
+        elif claimed and metric:
+            text = f"Best by {metric}: {metrics['best_model']}"
+        else:
+            text = f"Best: {metrics['best_model']}"
         if metric and metrics.get("best_metric_value") is not None:
             text += f", {metric} {fmt_num(metrics['best_metric_value'])}"
             ci = metrics.get("best_ci")
             if isinstance(ci, list) and len(ci) == 2:
                 text += f" {fmt_ci(ci[0], ci[1])}"
+        if ensemble and metrics.get("ensemble_metric_value") is not None:
+            text += f"; {ensemble_words(ensemble)} {fmt_num(metrics['ensemble_metric_value'])}"
         if claimed:
             text += f" (the analysis named {claimed})"
         return text
