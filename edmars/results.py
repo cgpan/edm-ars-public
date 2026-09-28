@@ -75,16 +75,35 @@ def _ci_words(ci: Any) -> str:
 
 
 def result_sentence(state: RunState) -> str | None:
-    """The study's main result as one sentence."""
+    """The study's main result as one sentence.
+
+    For a prediction study the best model is the one results.json's
+    metrics put first (edmars.runstate.prediction_metrics). When the
+    analysis named another model as its best, both are shown: the paper
+    is likely to repeat the analysis's claim.
+    """
     m = state.metrics
     if m.get("best_model"):
-        text = f"Best model: {m['best_model']}"
-        if m.get("primary_metric") and m.get("best_metric_value") is not None:
-            text += f", {m['primary_metric']} {fmt_num(m['best_metric_value'])}"
-            text += _ci_words(m.get("best_ci"))
+        metric = m.get("primary_metric")
+        value = m.get("best_metric_value")
+        claimed = m.get("claimed_best_model")
+        held_out = ""
         if isinstance(m.get("n_test"), int) and m["n_test"] > 0:
-            text += f", on {m['n_test']:,} students held out for testing"
-        return text + "."
+            held_out = f", on {m['n_test']:,} students held out for testing"
+        if claimed and metric and value is not None:
+            ci = _ci_words(m.get("best_ci")).strip().strip("()")
+            text = f"Best by {metric}: {m['best_model']} ({metric} {fmt_num(value)}"
+            text += f", {ci})" if ci else ")"
+            text += held_out
+            text += f"; the analysis named {claimed}"
+            if m.get("claimed_metric_value") is not None:
+                text += f" ({metric} {fmt_num(m['claimed_metric_value'])})"
+            return text + " as its best model — check the paper's claim."
+        text = f"Best model: {m['best_model']}"
+        if metric and value is not None:
+            text += f", {metric} {fmt_num(value)}"
+            text += _ci_words(m.get("best_ci"))
+        return text + held_out + "."
     if m.get("estimate") is not None:
         ci_text = _ci_words(m.get("estimate_ci"))
         method = m.get("method_name") or m.get("method")

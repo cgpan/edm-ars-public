@@ -298,3 +298,72 @@ def test_the_result_screen_and_summary_word_the_cost_as_the_live_view(
     assert line in flat and "may still be billed by the AI service" in flat
     html = (run / "summary.html").read_text(encoding="utf-8")
     assert line in html and "may still be billed by the AI service" in html
+
+
+# The round-3 Mac study: results.json's best_model named a model its own
+# all_models did not put first, the paper repeated the claim, and so did
+# the result screen's "Key result" line.
+CONTRADICTED_RESULTS = {
+    "best_model": "XGBoost",
+    "best_metric_value": 0.781,
+    "primary_metric": "AUC",
+    "all_models": {
+        "LogisticRegression": {"auc": 0.74, "auc_ci_lower": 0.72, "auc_ci_upper": 0.76},
+        "RandomForest": {"auc": 0.812, "auc_ci_lower": 0.794, "auc_ci_upper": 0.83},
+        "XGBoost": {"auc": 0.781, "auc_ci_lower": 0.762, "auc_ci_upper": 0.80},
+    },
+}
+
+
+def test_the_key_result_comes_from_the_metrics_when_the_claim_contradicts_them(
+        run_home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    run = _ready(run_home, results=CONTRADICTED_RESULTS)
+    _, out = _show(run, capsys)
+    flat = " ".join(out.split())
+    expected = ("Key result: Best by AUC: RandomForest (AUC 0.81, 95% CI 0.79-0.83), on 3,467 "
+                "students held out for testing; the analysis named XGBoost (AUC 0.78) as its best "
+                "model - check the paper's claim.")
+    assert expected in flat
+    assert "Best model: XGBoost" not in flat
+    html_text = (run / "summary.html").read_text(encoding="utf-8")
+    assert "Best by AUC: RandomForest (AUC 0.81, 95% CI 0.79–0.83)" in html_text
+    assert "the analysis named XGBoost (AUC 0.78) as its best model — check the paper&#x27;s claim." \
+        in html_text
+
+
+def test_a_lower_is_better_metric_picks_the_smallest_error(run_home: Path) -> None:
+    from edmars.runstate import load_state
+
+    run = _ready(run_home, results={
+        "best_model": "LinearRegression", "best_metric_value": 0.71, "primary_metric": "RMSE",
+        "all_models": {"LinearRegression": {"rmse": 0.71, "rmse_ci_lower": 0.69, "rmse_ci_upper": 0.73},
+                       "XGBoost": {"rmse": 0.61, "rmse_ci_lower": 0.59, "rmse_ci_upper": 0.63},
+                       "RandomForest": {"rmse": 0.65}}})
+    assert results.result_sentence(load_state(run)) == (
+        "Best by RMSE: XGBoost (RMSE 0.61, 95% CI 0.59–0.63), on 3,467 students held out for "
+        "testing; the analysis named LinearRegression (RMSE 0.71) as its best model — check the "
+        "paper's claim.")
+
+
+@pytest.mark.parametrize("found, expected", [
+    # A tie the analysis broke in favour of the simpler model: no contradiction.
+    ({"best_model": "LogisticRegression", "primary_metric": "AUC",
+      "all_models": {"LogisticRegression": {"auc": 0.8}, "XGBoost": {"auc": 0.8}}},
+     "Best model: LogisticRegression, AUC 0.80, on 3,467 students held out for testing."),
+    # The claim's value in best_metric_value is not the model's metric: the metric wins.
+    ({"best_model": "XGBoost", "best_metric_value": 0.9, "primary_metric": "auc_roc",
+      "all_models": {"XGBoost": {"test_auc": 0.78}, "MLP": {"test_auc": 0.7}}},
+     "Best model: XGBoost, AUC 0.78, on 3,467 students held out for testing."),
+    # A metric whose direction is unknown is not compared: the claim stands.
+    ({"best_model": "XGBoost", "best_metric_value": 0.4, "primary_metric": "custom_score",
+      "all_models": {"XGBoost": {"custom_score": 0.4}, "MLP": {"custom_score": 0.9}}},
+     "Best model: XGBoost, custom_score 0.40, on 3,467 students held out for testing."),
+    # No per-model values: the claim is all there is.
+    ({"best_model": "XGBoost", "best_metric_value": 0.78, "primary_metric": "AUC"},
+     "Best model: XGBoost, AUC 0.78, on 3,467 students held out for testing."),
+])
+def test_the_key_result_keeps_the_claim_when_the_metrics_agree_or_cannot_say(
+        run_home: Path, found: dict, expected: str) -> None:
+    from edmars.runstate import load_state
+
+    assert results.result_sentence(load_state(_ready(run_home, results=found))) == expected

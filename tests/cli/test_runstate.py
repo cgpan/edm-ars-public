@@ -529,3 +529,26 @@ def test_process_alive_checks_start_time() -> None:
     assert runstate.process_alive(pid, created) is True
     assert runstate.process_alive(pid, 1.0) is False
     assert runstate.process_alive(None) is None
+
+
+def test_the_analysis_step_names_the_model_its_metrics_put_first(run_home: Path) -> None:
+    # results.json's best_model is the analysis's claim; the round-3 Mac
+    # study's claim was contradicted by its own all_models.
+    found = dict(PREDICTION_RESULTS, all_models={
+        **PREDICTION_RESULTS["all_models"],
+        "RandomForest": {"auc": 0.812, "auc_ci_lower": 0.794, "auc_ci_upper": 0.83}})
+    state = load_state(make_run(run_home, results=found))
+    assert state.metrics["best_model"] == "RandomForest"
+    assert state.metrics["claimed_best_model"] == "XGBoost"
+    assert state.metrics["claimed_metric_value"] == pytest.approx(0.781)
+    assert state.metrics["best_ci"] == [0.794, 0.83]
+    assert _stage(state, "ANALYZING").detail == \
+        "Best by AUC: RandomForest, AUC 0.81 [0.79–0.83] (the analysis named XGBoost)"
+
+
+def test_best_by_metric_respects_the_metrics_direction() -> None:
+    models = {"A": {"auc": 0.7, "rmse": 0.5}, "B": {"AUC": 0.8, "rmse": 0.6}, "C": {"note": "failed"}}
+    assert runstate.best_by_metric(models, "AUC") == (["B"], 0.8)
+    assert runstate.best_by_metric(models, "RMSE") == (["A"], 0.5)
+    assert runstate.best_by_metric(models, "something_else") is None
+    assert runstate.best_by_metric({"A": {}}, "AUC") is None

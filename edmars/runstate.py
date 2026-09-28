@@ -1313,24 +1313,107 @@ def _metric_label(metric: str) -> str:
     return m
 
 
+#: Primary metrics for which a smaller value is better, and those for
+#: which a larger one is. A metric in neither set is not compared: the
+#: analysis's own ``best_model`` is shown, as before.
+_LOWER_IS_BETTER = frozenset({"rmse", "mae", "mse", "mape", "log_loss", "logloss",
+                              "brier", "brier_score", "cross_entropy"})
+_HIGHER_IS_BETTER = frozenset({"auc", "accuracy", "balanced_accuracy", "f1", "f2", "precision",
+                               "recall", "r2", "pr_auc", "average_precision", "kappa", "mcc"})
+
+
+def _metric_key(name: str) -> str:
+    """A metric or column name reduced for comparison: "AUC-ROC" and
+    "test_auc" -> "auc", "R²" -> "r2"."""
+    key = name.strip().lower().replace("-", "_").replace(" ", "_").replace("²", "2")
+    if key.startswith("test_"):
+        key = key[len("test_"):]
+    return {"auc_roc": "auc", "roc_auc": "auc", "auroc": "auc", "r_squared": "r2"}.get(key, key)
+
+
+def _row_metric(row: Any, key: str) -> float | None:
+    """One model's value of the metric ``key`` (a :func:`_metric_key`)."""
+    if not isinstance(row, dict):
+        return None
+    for name, value in row.items():
+        if isinstance(name, str) and _metric_key(name) == key and _num(value) is not None:
+            return _num(value)
+    return None
+
+
+def _model_row(all_models: dict[str, Any], name: Any) -> dict[str, Any] | None:
+    """``all_models``' row for ``name``, matched without regard to case."""
+    if not isinstance(name, str):
+        return None
+    row = all_models.get(name)
+    if isinstance(row, dict):
+        return row
+    for other, candidate in all_models.items():
+        if isinstance(other, str) and other.lower() == name.lower() and isinstance(candidate, dict):
+            return candidate
+    return None
+
+
+def best_by_metric(all_models: dict[str, Any], metric: str) -> tuple[list[str], float] | None:
+    """(models with the best value of ``metric``, that value) among
+    ``all_models``, respecting the metric's direction (the highest AUC,
+    the lowest RMSE). None when the metric's direction is unknown or no
+    model reports it. Ties keep ``all_models``' order."""
+    key = _metric_key(metric)
+    if key in _LOWER_IS_BETTER:
+        better = min
+    elif key in _HIGHER_IS_BETTER:
+        better = max
+    else:
+        return None
+    values: dict[str, float] = {}
+    for name, row in all_models.items():
+        found = _row_metric(row, key) if isinstance(name, str) else None
+        if found is not None:
+            values[name] = found
+    if not values:
+        return None
+    best = better(values.values())
+    return [name for name, v in values.items() if v == best], best
+
+
 def prediction_metrics(results: dict[str, Any]) -> dict[str, Any]:
+    """The prediction study's main result, from results.json's metrics.
+
+    ``best_model`` is the model with the best primary metric in
+    ``all_models``, not results.json's ``best_model`` field: that field
+    is the analysis's claim, and the round-3 Mac study's claim named a
+    model its own numbers did not put first (the paper repeated it, and
+    so did the result screen). When the claim names another model, it is
+    kept as ``claimed_best_model`` (with its value, when known) so the
+    screens can show both. A metric whose direction is unknown, or
+    results without per-model values, fall back to the claim.
+    """
     out: dict[str, Any] = {}
-    best = results.get("best_model")
+    claimed = results.get("best_model")
+    claimed = str(claimed) if isinstance(claimed, str) and claimed.strip() else None
     metric = results.get("primary_metric")
     value = results.get("best_metric_value")
     all_models = as_dict(results.get("all_models"))
-    if best:
-        out["best_model"] = str(best)
     if metric:
         out["primary_metric"] = _metric_label(str(metric))
-    row = all_models.get(best) if isinstance(best, str) else None
-    if not isinstance(row, dict) and isinstance(best, str):
-        for name, candidate in all_models.items():
-            if isinstance(name, str) and name.lower() == best.lower() and isinstance(candidate, dict):
-                row = candidate
-                break
+    best = claimed
+    measured = best_by_metric(all_models, str(metric)) if metric else None
+    if measured is not None:
+        leaders, top = measured
+        if claimed is None or claimed.lower() not in {name.lower() for name in leaders}:
+            best = leaders[0]
+            if claimed is not None:
+                out["claimed_best_model"] = claimed
+                claimed_value = _row_metric(_model_row(all_models, claimed), _metric_key(str(metric)))
+                if claimed_value is not None:
+                    out["claimed_metric_value"] = claimed_value
+        value = top  # the metric as measured, not best_metric_value
+    if best:
+        out["best_model"] = best
+    row = _model_row(all_models, best)
     if value is None and isinstance(row, dict) and metric:
-        value = row.get(str(metric).lower())
+        value = _row_metric(row, _metric_key(str(metric)))
     if _num(value) is not None:
         out["best_metric_value"] = _num(value)
     if isinstance(row, dict) and metric:
@@ -1428,12 +1511,17 @@ def psychometric_metrics(results: dict[str, Any]) -> dict[str, Any]:
 def key_result(metrics: dict[str, Any], task_type: str) -> str | None:
     """One short line with the study's main number, or None if unknown."""
     if metrics.get("best_model"):
-        text = f"Best: {metrics['best_model']}"
-        if metrics.get("primary_metric") and metrics.get("best_metric_value") is not None:
-            text += f", {metrics['primary_metric']} {fmt_num(metrics['best_metric_value'])}"
+        claimed = metrics.get("claimed_best_model")
+        metric = metrics.get("primary_metric")
+        text = f"Best by {metric}: {metrics['best_model']}" if claimed and metric \
+            else f"Best: {metrics['best_model']}"
+        if metric and metrics.get("best_metric_value") is not None:
+            text += f", {metric} {fmt_num(metrics['best_metric_value'])}"
             ci = metrics.get("best_ci")
             if isinstance(ci, list) and len(ci) == 2:
                 text += f" {fmt_ci(ci[0], ci[1])}"
+        if claimed:
+            text += f" (the analysis named {claimed})"
         return text
     if metrics.get("estimate") is not None:
         if metrics.get("estimate_kind") == "policy_gain":
