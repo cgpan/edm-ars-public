@@ -1,0 +1,29 @@
+# Packages the optional LSAR review gate needs in THIS environment.
+#
+# LSAR (https://github.com/cgpan/LSAR-public) is imported in-process by
+# src/review_gate.py, so its dependencies must be installed into the same
+# Python environment as EDM-ARS:
+#   pip install -r requirements-lsar.txt
+# Installing LSAR's own requirements.txt from your checkout does the same
+# job (LSAR's test tools are in its requirements-dev.txt):
+#   pip install -r <path to LSAR>/requirements.txt
+#
+# These are the runtime packages LSAR imports, with the ranges from LSAR's
+# requirements.txt. LSAR's file is the source of truth: when it changes,
+# change this file to match. Without them the gate cannot start and the
+# run records that the review did not run.
+anthropic>=0.39.0
+openai>=1.50.0
+httpx>=0.27.0
+requests>=2.31.0
+PyYAML>=6.0.1
+python-dotenv>=1.0.0
+Jinja2>=3.1.4
+tenacity>=8.2.0
+PyMuPDF>=1.24.0
+# Pinned exactly, as LSAR pins it: the converter every calibration anchor
+# was reviewed with. A different pymupdf4llm changes the text the review
+# and score are built from. (It also pins PyMuPDF to 1.27.2.2.)
+pymupdf4llm==1.27.2.2
+arxiv>=2.1.0
+fpdf2>=2.8.0

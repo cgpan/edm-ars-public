@@ -8,7 +8,7 @@ DeepSeek's API is OpenAI-compatible at https://api.deepseek.com.
 Key facts the integration relies on:
   - Env var: DEEPSEEK_API_KEY
   - Base URL: https://api.deepseek.com (OpenAI format)
-  - Model: deepseek-v4-pro (current; deepseek-v4-flash also available)
+  - Model: deepseek-v4-pro (current; the cheap tier is deepseek-flash)
   - Thinking mode: ENABLED by default in the API; DISABLED by the
     project's BaseAgent path via extra_body={"thinking": {"type":
     "disabled"}}. Avoids the F-3b9 thinking-block-overhead recurrence.
@@ -29,19 +29,27 @@ import pytest
 
 
 class TestDeepSeekProviderClassPresent:
-    def test_deepseek_provider_branch_exists_in_base_agent(self) -> None:
-        """BaseAgent.__init__ has a provider=='deepseek' branch."""
-        from src.agents import base as base_module
-        import inspect
+    def test_deepseek_client_is_built_on_the_openai_sdk(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deepseek stage gets an OpenAI-SDK client aimed at DeepSeek.
 
-        source = inspect.getsource(base_module.BaseAgent)
-        assert (
-            'provider == "deepseek"' in source
-            or "elif provider == 'deepseek'" in source
-        ), (
-            "BaseAgent.__init__ should have the 'deepseek' provider "
-            "branch added in 3b.10.5."
+        This used to grep BaseAgent's source for a provider=='deepseek'
+        branch. Client construction now lives in
+        src/agents/llm_client.build_client, shared with the review gate
+        (defect E3), so the check is on what the builder produces.
+        """
+        import openai  # type: ignore[import-not-found]
+
+        from src.agents.llm_client import LLMSettings, build_client
+        from src.agents.provider_resolver import ProviderConfig
+
+        monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+        client = build_client(
+            ProviderConfig(name="deepseek", model="deepseek-v4-pro"), LLMSettings()
         )
+        assert isinstance(client, openai.OpenAI)
+        assert str(client.base_url).rstrip("/") == "https://api.deepseek.com"
 
     def test_deepseek_in_known_providers(self) -> None:
         from src.agents.provider_resolver import _KNOWN_PROVIDERS

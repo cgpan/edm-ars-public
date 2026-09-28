@@ -176,6 +176,141 @@ def test_comparator_not_misnamed_when_the_paper_names_the_real_pair(tmp_path):
     assert "INV_COMPARATOR_MISNAMED" not in _codes(run)
 
 
+#: The first finished paper from the owner's Mac test (round 3): five
+#: models, and a comparison test recorded as XGBoost minus
+#: LogisticRegression. Values copied from that run's results.json.
+_R3_RESULTS = {
+    "best_model": "XGBoost",
+    "all_models": {
+        "LogisticRegression": {"auc": 0.7884831280985126},
+        "RandomForest": {"auc": 0.7985067167759475},
+        "XGBoost": {"auc": 0.801488285622901},
+        "ElasticNet": {"auc": 0.7812581960658883},
+        "StackingEnsemble": {"auc": 0.802020230289461},
+    },
+    "model_comparison_test": {
+        "auc_diff": 0.013005157524388355,
+        "model_a": "XGBoost",
+        "model_b": "LogisticRegression",
+        "contrast": "XGBoost - LogisticRegression",
+    },
+}
+
+#: Table 1 of that paper, then the sentence that follows it. The header
+#: row ends in "Bal. Acc.", so a split on terminal punctuation fell there
+#: and glued every model-name row to the comparison sentence.
+_R3_TABLE_THEN_COMPARISON = r"""\begin{document}
+\subsection{Model Comparison}
+Table~\ref{tab:models} reports the performance of all five models.
+
+\begin{table}
+\caption{Model comparison on the held-out test set ($n = 3{,}562$). AUC is the primary metric; 95\% confidence intervals are bootstrap (1,000 iterations).}
+\label{tab:models}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lrrrrr}
+\toprule
+Model & AUC & CI Low & CI High & Acc. & Bal. Acc. \\
+\midrule
+LogisticRegression & 0.788 & 0.773 & 0.804 & 0.761 & 0.616 \\
+RandomForest & 0.799 & 0.784 & 0.814 & 0.759 & 0.617 \\
+XGBoost & 0.801 & 0.787 & 0.817 & 0.765 & 0.623 \\
+ElasticNet & 0.781 & 0.766 & 0.797 & 0.753 & 0.576 \\
+StackingEnsemble & 0.802 & 0.787 & 0.817 & 0.765 & 0.630 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+The paired comparison between XGBoost and Logistic Regression showed a statistically significant difference: AUC difference $= 0.013$, 95\% CI [0.006, 0.021], cluster-bootstrap, $p < 0.05$. The advantage is small in magnitude.
+\end{document}
+"""
+
+
+def test_a_table_above_the_comparison_sentence_is_not_part_of_it(tmp_path):
+    """Round-3 Mac paper: a correct sentence reported as critical.
+
+    The sentence names XGBoost and Logistic Regression, which is the pair
+    results.json recorded. The finding named RandomForest, ElasticNet and
+    StackingEnsemble -- rows of the table above it.
+    """
+    run = _run(tmp_path, results__json=_R3_RESULTS, paper__tex=_R3_TABLE_THEN_COMPARISON)
+    assert "INV_COMPARATOR_MISNAMED" not in _codes(run)
+
+
+def test_the_comparison_sentence_still_fires_when_it_names_the_wrong_model(tmp_path):
+    """The same table and layout, with the sentence itself wrong."""
+    tex = _R3_TABLE_THEN_COMPARISON.replace(
+        "between XGBoost and Logistic Regression", "between XGBoost and Random Forest"
+    )
+    run = _run(tmp_path, results__json=_R3_RESULTS, paper__tex=tex)
+    hits = _by_code(run, "INV_COMPARATOR_MISNAMED")
+    assert len(hits) == 1
+    assert hits[0].evidence["named_in_paper"] == ["RandomForest", "XGBoost"]
+    assert "midrule" not in hits[0].evidence["sentence"]
+
+
+def test_a_comparator_spelled_as_prose_is_still_read(tmp_path):
+    """J53: the one sentence that named the wrong model spelled it out.
+
+    "...between Logistic Regression and the runner-up (Random Forest)"
+    where the test was LogisticRegression minus XGBoost. The CamelCase
+    key never appears in that sentence; only the table above it had
+    matched before, and for the wrong reason.
+    """
+    run = _run(
+        tmp_path,
+        results__json={
+            "all_models": {
+                "LogisticRegression": {"auc": 0.823899450821177},
+                "XGBoost": {"auc": 0.8184131758811203},
+                "RandomForest": {"auc": 0.8174343},
+            },
+            "model_comparison_test": {"auc_diff": 0.005486274940056712},
+        },
+        paper__tex=(
+            r"\begin{document} The paired cluster-bootstrap test of the AUC "
+            r"difference between Logistic Regression and the runner-up (Random "
+            r"Forest) yielded $\Delta$AUC = 0.005, 95\% CI [0.002, 0.009]. "
+            r"\end{document}"
+        ),
+    )
+    hits = _by_code(run, "INV_COMPARATOR_MISNAMED")
+    assert len(hits) == 1
+    assert hits[0].evidence["named_in_paper"] == ["LogisticRegression", "RandomForest"]
+
+
+def test_a_range_that_equals_the_difference_is_not_a_test_report(tmp_path):
+    """"All five models performed within 0.010 AUC of one another: ..."
+
+    0.010 is also the rounded auc_diff, so the sentence was read as the
+    test report and every model it lists as a comparator. The paper's
+    real test sentence names the right pair.
+    """
+    run = _run(
+        tmp_path,
+        results__json={
+            "all_models": {
+                "LogisticRegression": {"auc": 0.749},
+                "ElasticNet": {"auc": 0.759486570710109389},
+                "XGBoost": {"auc": 0.756},
+            },
+            "model_comparison_test": {
+                "auc_diff": 0.759486570710109389 - 0.749,
+                "model_a": "ElasticNet",
+                "model_b": "LogisticRegression",
+            },
+        },
+        paper__tex=(
+            r"\begin{document} All five models performed within 0.010 AUC of one "
+            r"another: Logistic Regression (0.749), XGBoost (0.756) and "
+            r"ElasticNet (0.760). The paired cluster-bootstrap comparison between "
+            r"ElasticNet and Logistic Regression yielded $\Delta$AUC = 0.010. "
+            r"\end{document}"
+        ),
+    )
+    assert "INV_COMPARATOR_MISNAMED" not in _codes(run)
+
+
 def test_unnamed_comparands_is_only_minor(tmp_path):
     """Measured base rate 17/18 -- a probe, not a detector.
 
@@ -387,6 +522,110 @@ def test_alt_text_is_fine_under_acmart(tmp_path):
     assert "INV_ALT_TEXT_AS_BODY" not in _codes(run)
 
 
+#: The front matter of the ACM template the Writer fills
+#: (templates/paper_template_v2.tex), then one of the round-3 paper's
+#: seven figures. Its 19 "unescaped underscores" were the 12 in this
+#: CCSXML block and one in each figure's file name.
+_ACM_FRONT_MATTER = r"""\documentclass[sigconf]{acmart}
+\begin{document}
+\title{Do Ninth-Grade Non-Cognitive Factors Improve Prediction of College Enrollment?}
+\begin{CCSXML}
+<ccs2012>
+ <concept>
+  <concept_id>10010147.10010178</concept_id>
+  <concept_desc>Computing methodologies~Machine learning</concept_desc>
+  <concept_significance>500</concept_significance>
+ </concept>
+ <concept>
+  <concept_id>10003456.10003457.10003527</concept_id>
+  <concept_desc>Social and professional topics~Student assessment</concept_desc>
+  <concept_significance>500</concept_significance>
+ </concept>
+</ccs2012>
+\end{CCSXML}
+\ccsdesc[500]{Computing methodologies~Machine learning}
+\maketitle
+We trained five model families with drop\_first=True encoding.
+\begin{figure}
+\includegraphics[width=\columnwidth]{roc_curves.png}
+\caption{ROC curves for all five models on the held-out test set.}
+\Description{ROC curves for five models.}
+\label{fig:roc_curves}
+\end{figure}
+"""
+
+
+def test_description_under_acmart_is_not_scaffolding(tmp_path):
+    """Round-3 Mac paper: "7 instance(s) of acmart \\Description in a
+    non-acmart class" -- in an acmart paper. The pattern was counted
+    without ever looking at the class.
+    """
+    tex = _ACM_FRONT_MATTER + r"\Description{Bar chart.}" * 6 + r"\end{document}"
+    run = _run(tmp_path, paper__tex=tex)
+    assert _by_code(run, "INV_SCAFFOLDING_LEAKED") == []
+    assert "INV_ALT_TEXT_AS_BODY" not in _codes(run)
+
+
+def test_description_outside_acmart_is_still_scaffolding(tmp_path):
+    """The journal template also carries a commented-out class line."""
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            "%\\documentclass[sigconf]{acmart}\n"
+            "\\documentclass[man,floatsintext,longtable]{apa7}\n\\begin{document}"
+            r"\Description{Bar chart of mean absolute SHAP values.}"
+            "\\end{document}"
+        ),
+    )
+    hits = _by_code(run, "INV_SCAFFOLDING_LEAKED")
+    assert len(hits) == 1 and hits[0].evidence["document_class"] == "apa7"
+    assert "INV_ALT_TEXT_AS_BODY" in _codes(run)
+
+
+def test_other_scaffolding_under_acmart_still_fires(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__tex=_ACM_FRONT_MATTER + "```latex\n\\end{document}",
+    )
+    hits = _by_code(run, "INV_SCAFFOLDING_LEAKED")
+    assert [h.evidence["pattern"] for h in hits] == ["```"]
+
+
+def test_ccsxml_and_figure_file_names_are_not_prose(tmp_path):
+    """Round-3 Mac paper: 19 reported underscores, none of them in its text."""
+    run = _run(tmp_path, paper__tex=_ACM_FRONT_MATTER + r"\end{document}")
+    assert "INV_UNESCAPED_LATEX_SPECIAL" not in _codes(run)
+
+
+def test_display_math_subscripts_are_not_prose(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            r"\begin{document} The estimand is \begin{equation} \hat{\mu}_{g,t} "
+            r"= \text{low\_ses}_{1} \end{equation} \begin{align*} a &= b_1 \\ "
+            r"c &= d_2 \end{align*} \end{document}"
+        ),
+    )
+    assert "INV_UNESCAPED_LATEX_SPECIAL" not in _codes(run)
+
+
+def test_a_bare_underscore_in_prose_still_fires(tmp_path):
+    """T14: "(F1SCH_ID)" in prose ran a page of text together in italic."""
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            _ACM_FRONT_MATTER
+            + r"we used the first follow-up school identifier (F1SCH_ID), which "
+            r"carries 752 real school IDs. \end{document}"
+        ),
+    )
+    hits = _by_code(run, "INV_UNESCAPED_LATEX_SPECIAL")
+    assert len(hits) == 1 and hits[0].severity == "major"
+    # The only underscore reported is the one in the prose.
+    assert len(hits[0].evidence["_"]) == 1
+    assert "F1SCH_ID" in hits[0].evidence["_"][0]
+
+
 def test_unused_class_option_is_reported(tmp_path):
     """The floatsintex typo, as LaTeX itself reports it."""
     run = _run(
@@ -458,10 +697,145 @@ def test_a_clean_compile_is_silent(tmp_path):
     assert "INV_LATEX_COMPILE_ERROR" not in codes
 
 
-def test_no_log_at_all_claims_nothing(tmp_path):
-    """No log means no compile was attempted -- not a failed one."""
+def test_a_manuscript_with_no_log_and_no_pdf_is_critical(tmp_path):
+    """pdflatex never ran (not installed / not on PATH): no paper.log and
+    no paper.pdf. This used to claim nothing -- "no log means no compile
+    was attempted" -- but the orchestrator compiles every manuscript it
+    writes, so the one blocking code could not fire and a run with no PDF
+    was released as clean (B1)."""
     run = _run(tmp_path, paper__tex=r"\begin{document}Body.\end{document}")
+    hits = _by_code(run, "INV_LATEX_NO_PDF")
+    assert len(hits) == 1
+    assert hits[0].severity == "critical"
+    assert hits[0].evidence["paper_log_present"] is False
+    assert hits[0].evidence["compile_ran"] is False
+    assert "never ran" in hits[0].message
+
+
+def test_no_log_names_the_missing_tool_from_the_compile_record(tmp_path):
+    """latex_compile.json is the only place the reason survives."""
+    run = _run(
+        tmp_path,
+        paper__tex=r"\begin{document}Body.\end{document}",
+        latex_compile__json={
+            "success": False,
+            "pdf_exists": False,
+            "missing_tool": "pdflatex",
+            "steps": [
+                {
+                    "cmd": "pdflatex -interaction=nonstopmode paper.tex",
+                    "returncode": -1,
+                    "stderr": "'pdflatex' not found - is it installed and on PATH?",
+                }
+            ],
+        },
+    )
+    hits = _by_code(run, "INV_LATEX_NO_PDF")
+    assert len(hits) == 1
+    assert hits[0].evidence["missing_tool"] == "pdflatex"
+    assert "pdflatex was not found" in hits[0].message
+
+
+def test_no_log_but_a_pdf_claims_nothing(tmp_path):
+    """A PDF with its log cleaned up afterwards is a delivered paper."""
+    run = _run(
+        tmp_path,
+        paper__tex=r"\begin{document}Body.\end{document}",
+        paper__pdf="%PDF-1.5 stub",
+    )
     assert "INV_LATEX_NO_PDF" not in _codes(run)
+
+
+def test_no_manuscript_no_log_claims_nothing(tmp_path):
+    """An aborted run wrote no paper, so there is nothing to compile."""
+    run = _run(tmp_path, results__json={"best_model": "X"})
+    assert "INV_LATEX_NO_PDF" not in _codes(run)
+
+
+# ---------------------------------------------------------------------------
+# INV_UNDEFINED_CITATION -- against the lines pdflatex actually writes
+# ---------------------------------------------------------------------------
+#
+# Captured from MiKTeX pdflatex 2025 on minimal documents (kernel \cite,
+# natbib \citep/\citet, biblatex+biber with a key missing from the .bib).
+# The previous pattern required "' undefined" right after the key and so
+# matched none of these: every real log reads "on page N" in between.
+
+_KERNEL_UNDEFINED = (
+    "LaTeX Warning: Citation `foo2020' on page 1 undefined on input line 3.\n"
+    "\n"
+    "\n"
+    # TeX hard-wraps the log at 79 characters, splitting a long key.
+    "LaTeX Warning: Citation `averyveryveryveryveryveryverylongcitationkeyname2020ab\n"
+    "cdefgh' on page 1 undefined on input line 3.\n"
+    "\n"
+    "LaTeX Warning: There were undefined references.\n"
+)
+_NATBIB_UNDEFINED = (
+    "Package natbib Warning: Citation `foo2020' on page 1 undefined on input line 4.\n"
+    "\n"
+    "Package natbib Warning: Citation `bar2019' on page 1 undefined on input line 4.\n"
+    "\n"
+    "Package natbib Warning: There were undefined citations.\n"
+)
+_BIBLATEX_UNDEFINED = (
+    "LaTeX Warning: Citation 'foo2020' on page 1 undefined on input line 5.\n"
+    "\n"
+    "LaTeX Warning: Citation 'bar2019' on page 1 undefined on input line 5.\n"
+    "\n"
+    "LaTeX Warning: Empty bibliography on input line 6.\n"
+)
+_BIBLATEX_OLD_MISSING_ENTRY = (
+    "Package biblatex Warning: The following entry could not be found\n"
+    "(biblatex)                in the database:\n"
+    "(biblatex)                ghost2019\n"
+    "(biblatex)                Please verify the spelling and rerun\n"
+    "(biblatex)                LaTeX afterwards.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "log, keys",
+    [
+        (
+            _KERNEL_UNDEFINED,
+            {"foo2020", "averyveryveryveryveryveryverylongcitationkeyname2020abcdefgh"},
+        ),
+        (_NATBIB_UNDEFINED, {"foo2020", "bar2019"}),
+        (_BIBLATEX_UNDEFINED, {"foo2020", "bar2019"}),
+        (_BIBLATEX_OLD_MISSING_ENTRY, {"ghost2019"}),
+    ],
+    ids=["kernel", "natbib", "biblatex", "biblatex-missing-entry"],
+)
+def test_undefined_citations_in_real_log_lines_fire(tmp_path, log, keys):
+    run = _run(tmp_path, paper__log=log, paper__pdf="%PDF-1.5 stub")
+    hits = _by_code(run, "INV_UNDEFINED_CITATION")
+    assert len(hits) == 1
+    assert hits[0].severity == "critical"
+    assert set(hits[0].evidence["undefined"]) == keys
+
+
+def test_a_log_with_only_the_summary_line_names_no_key(tmp_path):
+    """"There were undefined references" alone is not a key to report."""
+    run = _run(
+        tmp_path,
+        paper__log="LaTeX Warning: There were undefined references.\n",
+        paper__pdf="%PDF-1.5 stub",
+    )
+    assert "INV_UNDEFINED_CITATION" not in _codes(run)
+
+
+def test_a_resolved_bibliography_is_silent(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__log=(
+            "This is pdfTeX, Version 3.14\n"
+            "(./paper.bbl)\n"
+            "Output written on paper.pdf (1 page).\n"
+        ),
+        paper__pdf="%PDF-1.5 stub",
+    )
+    assert "INV_UNDEFINED_CITATION" not in _codes(run)
 
 
 # ---------------------------------------------------------------------------
@@ -774,6 +1148,69 @@ def test_a_correct_gap_is_not_flagged(tmp_path):
     assert "INV_STATED_GAP_ARITHMETIC" not in _codes(run)
 
 
+#: The round-3 Mac paper's two subgroup sentences, verbatim. Both are
+#: right: 0.835 - 0.743 = 0.092, and the SES cells are 0.8215 and 0.6784
+#: unrounded, 0.1431 apart.
+_R3_RACE_GAP = (
+    r"Among adequately sized groups, White students had the highest AUC "
+    r"(0.835, $n = 1{,}864$) and Hispanic students (race specified) the lowest "
+    r"(0.743, $n = 488$), a gap of 9.2 percentage points that exceeds the "
+    r"fairness threshold."
+)
+_R3_SES_GAP = (
+    r"For SES quintiles, AUC ranged from 0.678 (lowest quintile) to 0.822 "
+    r"(highest quintile), a gap of 14.3 percentage points."
+)
+
+
+def test_a_gap_in_percentage_points_between_proportions(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__tex=r"\begin{document} " + _R3_RACE_GAP + " " + _R3_SES_GAP + r" \end{document}",
+    )
+    assert "INV_STATED_GAP_ARITHMETIC" not in _codes(run)
+
+
+def test_a_wrong_gap_in_percentage_points_still_fires(tmp_path):
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            r"\begin{document} "
+            + _R3_RACE_GAP.replace("9.2 percentage points", "12.5 percentage points")
+            + r" \end{document}"
+        ),
+    )
+    hits = _by_code(run, "INV_STATED_GAP_ARITHMETIC")
+    assert len(hits) == 1
+    assert hits[0].evidence["stated_gap"] == "12.5"
+    assert hits[0].evidence["stated_in_points"] is True
+
+
+def test_the_points_scale_needs_a_unit(tmp_path):
+    """"a gap of 9.2" between 0.835 and 0.743 names no scale: still wrong."""
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            r"\begin{document} "
+            + _R3_RACE_GAP.replace("9.2 percentage points", "9.2")
+            + r" \end{document}"
+        ),
+    )
+    assert len(_by_code(run, "INV_STATED_GAP_ARITHMETIC")) == 1
+
+
+def test_a_gap_off_by_more_than_rounding_still_fires(tmp_path):
+    """J39, verbatim: the cells are 0.6690 and 0.7778, 0.1088 apart."""
+    run = _run(
+        tmp_path,
+        paper__tex=(
+            r"\begin{document} The range across the interpretable cells is "
+            r"0.669 to 0.778, a gap of 0.112. \end{document}"
+        ),
+    )
+    assert len(_by_code(run, "INV_STATED_GAP_ARITHMETIC")) == 1
+
+
 def test_an_auc_difference_is_not_a_gap_claim(tmp_path):
     """The measured false-positive driver.
 
@@ -899,6 +1336,113 @@ def test_a_two_clause_methods_sentence_attributes_by_clause(tmp_path):
         ),
     )
     assert "INV_IMPUTATION_METHOD_MISMATCH" not in _codes(run)
+
+
+_R3_IMPUTATION_SENTENCE = (
+    r"\begin{document} Two predictors exceeded the 20\% missingness threshold. "
+    r"Continuous predictors were imputed using IterativeImputer; categorical "
+    r"predictors (X1RACE, X1SEX) were imputed using the mode. \end{document}"
+)
+
+
+def test_a_variable_takes_the_method_of_its_own_clause(tmp_path):
+    """Round-3 Mac paper: two major findings on a correct sentence.
+
+    The claim that precedes X1RACE ("imputed using IterativeImputer")
+    belongs to the clause before the semicolon; the variables' own
+    clause names the mode, which is what data_report recorded.
+    """
+    run = _run(
+        tmp_path,
+        data_report__json={
+            "missingness_summary": {
+                "X1RACE": {"pct_missing": 4.3, "imputation_method": "mode"},
+                "X1SEX": {"pct_missing": 0.02, "imputation_method": "mode"},
+                "X1SES": {"pct_missing": 8.8, "imputation_method": "IterativeImputer"},
+            }
+        },
+        paper__tex=_R3_IMPUTATION_SENTENCE,
+    )
+    assert "INV_IMPUTATION_METHOD_MISMATCH" not in _codes(run)
+
+
+def test_the_clause_method_is_still_held_against_the_data_report(tmp_path):
+    """Same sentence, but the data report says X1RACE was not mode-imputed."""
+    run = _run(
+        tmp_path,
+        data_report__json={
+            "missingness_summary": {
+                "X1RACE": {"pct_missing": 4.3, "imputation_method": "IterativeImputer"},
+                "X1SEX": {"pct_missing": 0.02, "imputation_method": "mode"},
+            }
+        },
+        paper__tex=_R3_IMPUTATION_SENTENCE,
+    )
+    hits = _by_code(run, "INV_IMPUTATION_METHOD_MISMATCH")
+    assert [(h.evidence["variable"], h.evidence["claimed"]) for h in hits] == [
+        ("X1RACE", "mode")
+    ]
+
+
+def test_a_comma_and_clause_is_a_clause_too(tmp_path):
+    run = _run(
+        tmp_path,
+        data_report__json={
+            "missingness_summary": {
+                "X1RACE": {"pct_missing": 4.3, "imputation_method": "mode"},
+            }
+        },
+        paper__tex=(
+            r"\begin{document} Continuous predictors were imputed using "
+            r"IterativeImputer, and categorical predictors (X1RACE, X1SEX, and "
+            r"X1LOCALE) were imputed using the mode. \end{document}"
+        ),
+    )
+    assert "INV_IMPUTATION_METHOD_MISMATCH" not in _codes(run)
+
+
+_ACCESS_MISSINGNESS = {
+    "BYSTEXP": {"pct_missing": 9.0, "imputation_method": "IterativeImputer"},
+    "BYSES1": {"pct_missing": 5.4, "imputation_method": "IterativeImputer"},
+    "BYRACE": {"pct_missing": 5.1, "imputation_method": "IterativeImputer"},
+    "BYTXMSTD": {"pct_missing": 3.0, "imputation_method": "median"},
+    "BYSEX": {"pct_missing": 4.8, "imputation_method": "mode"},
+}
+
+#: An archived paper's methods sentence, verbatim. It is correct, and the
+#: check reported five of its variables as median-imputed.
+_ACCESS_SENTENCE = (
+    r"\begin{document} We imputed missing values using methods appropriate to "
+    r"each variable's type: iterative imputation (IterativeImputer) for the "
+    r"continuous and ordered-categorical variables with substantial "
+    r"missingness (BYSTEXP, BYSES1, BYMATHSE, BYRISKFC, BYRACE), median "
+    r"imputation for the two achievement scores (BYTXMSTD, BYTXRSTD), and "
+    r"mode imputation for the categorical variables with low missingness "
+    r"(BYPARED, BYSCHPRG, BYSEX). \end{document}"
+)
+
+
+def test_iterative_imputation_names_the_iterative_imputer(tmp_path):
+    run = _run(
+        tmp_path,
+        data_report__json={"missingness_summary": _ACCESS_MISSINGNESS},
+        paper__tex=_ACCESS_SENTENCE,
+    )
+    assert "INV_IMPUTATION_METHOD_MISMATCH" not in _codes(run)
+
+
+def test_iterative_imputation_is_still_a_claim_the_report_can_refute(tmp_path):
+    miss = json.loads(json.dumps(_ACCESS_MISSINGNESS))
+    miss["BYSES1"]["imputation_method"] = "median"
+    run = _run(
+        tmp_path,
+        data_report__json={"missingness_summary": miss},
+        paper__tex=_ACCESS_SENTENCE,
+    )
+    hits = _by_code(run, "INV_IMPUTATION_METHOD_MISMATCH")
+    assert [(h.evidence["variable"], h.evidence["claimed"]) for h in hits] == [
+        ("BYSES1", "iterative")
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1042,6 +1586,133 @@ def test_a_percentage_derivable_from_the_outcome_csvs_is_not_flagged(tmp_path):
     assert "INV_PERCENTAGE_FROM_SPEC_NOT_RUN" not in _codes(run)
 
 
+#: The round-3 Mac run's sample counts, from its data_report.json.
+_R3_DATA_REPORT = {
+    "original_n": 23503,
+    "analytic_n": 17335,
+    "n_train": 13773,
+    "n_test": 3562,
+    "class_balance": {"class_0": 3319, "class_1": 10454},
+    "missingness_summary": {
+        "X1STUEDEXPCT": {"pct_missing": 27.4, "imputation_method": "IterativeImputer"},
+        "X1PAREDU": {"pct_missing": 24.2, "imputation_method": "IterativeImputer"},
+        "X1RACE": {"pct_missing": 4.3, "imputation_method": "mode"},
+        "X1SEX": {"pct_missing": 0.02, "imputation_method": "mode"},
+    },
+}
+
+
+def test_a_percentage_derivable_from_the_sample_counts_is_not_flagged(tmp_path):
+    """Round-3 Mac paper: "approximately 26% missingness" is 1 - 17,335/23,503.
+
+    The spec guessed the same figure before the run, which is why the
+    check looked at it; the run's own counts give 26.2%, which prints as
+    26 at the precision the sentence uses.
+    """
+    run = _run(
+        tmp_path,
+        research_spec__json={
+            "potential_limitations": [
+                "X4EVRATNDCLG has approximately 26% missingness; complete-case "
+                "analysis on the outcome may introduce bias"
+            ]
+        },
+        data_report__json=_R3_DATA_REPORT,
+        results__json={"best_metric_value": 0.801488285622901},
+        paper__tex=(
+            r"\begin{document} However, the college enrollment outcome itself "
+            r"has approximately 26\% missingness, which may be non-random (MNAR); "
+            r"complete-case analysis may bias estimates. \end{document}"
+        ),
+    )
+    assert "INV_PERCENTAGE_FROM_SPEC_NOT_RUN" not in _codes(run)
+
+
+def test_a_count_ratio_is_held_to_the_printed_precision(tmp_path):
+    """26.2 derives from the counts; 26.8 and 25 do not, and stay flagged."""
+    for printed, fires in (("26.2", False), ("26.8", True), ("25", True)):
+        run = _run(
+            tmp_path,
+            research_spec__json={"note": f"expect about {printed}% missing outcome"},
+            data_report__json=_R3_DATA_REPORT,
+            paper__tex=(
+                r"\begin{document} The outcome has " + printed
+                + r"\% missingness. \end{document}"
+            ),
+        )
+        assert ("INV_PERCENTAGE_FROM_SPEC_NOT_RUN" in _codes(run)) is fires, printed
+
+
+def test_a_split_share_does_not_excuse_a_planned_whole_number(tmp_path):
+    """n_test / analytic_n is about 20% in every run; "20%" is not therefore derived.
+
+    Here the test share is 4,786 / 23,503 = 20.36% (an archived run's
+    counts), which prints as 20 at whole-number precision. A spec that
+    planned "about 20% non-completers" and a paper that prints it are
+    still flagged.
+    """
+    run = _run(
+        tmp_path,
+        research_spec__json={"note": "we expect about 20% non-completers"},
+        data_report__json={
+            "original_n": 23503, "analytic_n": 23503,
+            "n_train": 18717, "n_test": 4786,
+        },
+        paper__tex=r"\begin{document} About 20\% of students did not complete. \end{document}",
+    )
+    assert "INV_PERCENTAGE_FROM_SPEC_NOT_RUN" in _codes(run)
+
+
+def test_the_round_3_paper_keeps_its_true_findings_and_loses_the_false_ones(tmp_path):
+    """The round-3 Mac paper, as far as its evidence reconstructs it.
+
+    Six codes were false positives on it and must not fire. Two findings
+    on the same paper are real and must survive: data_report's
+    class_balance counts n_train, not the analytic sample, and the paper
+    calls XGBoost "the best" while StackingEnsemble's AUC is higher.
+    """
+    results = json.loads(json.dumps(_R3_RESULTS))
+    paper = (
+        _ACM_FRONT_MATTER
+        + r"\Description{ROC curves.}" * 6
+        + r"""
+XGBoost achieved the best discrimination (AUC $= 0.801$, 95\% clustered CI [0.781, 0.820]) and outperformed logistic regression by a small but statistically detectable margin (AUC difference $= 0.013$, 95\% CI [0.006, 0.021]).
+
+"""
+        + _R3_IMPUTATION_SENTENCE.replace(r"\begin{document}", "").replace(r"\end{document}", "")
+        + "\n\n"
+        + _R3_TABLE_THEN_COMPARISON.replace(r"\begin{document}", "").replace(r"\end{document}", "")
+        + "\n\n" + _R3_RACE_GAP + "\n\n" + _R3_SES_GAP + "\n\n"
+        + r"However, the college enrollment outcome itself has approximately 26\% "
+        r"missingness, which may be non-random (MNAR); complete-case analysis may "
+        r"bias estimates."
+        + "\n\\end{document}\n"
+    )
+    run = _run(
+        tmp_path,
+        results__json=results,
+        data_report__json=_R3_DATA_REPORT,
+        research_spec__json={
+            "potential_limitations": [
+                "X4EVRATNDCLG has approximately 26% missingness"
+            ]
+        },
+        paper__tex=paper,
+    )
+    codes = _codes(run)
+    for fp in (
+        "INV_COMPARATOR_MISNAMED",
+        "INV_IMPUTATION_METHOD_MISMATCH",
+        "INV_STATED_GAP_ARITHMETIC",
+        "INV_PERCENTAGE_FROM_SPEC_NOT_RUN",
+        "INV_UNESCAPED_LATEX_SPECIAL",
+        "INV_SCAFFOLDING_LEAKED",
+    ):
+        assert fp not in codes, fp
+    assert "INV_CLASS_BALANCE_WRONG_SAMPLE" in codes
+    assert "INV_SUPERLATIVE_CONTRADICTED" in codes
+
+
 # ---------------------------------------------------------------------------
 # INV_CLASS_BALANCE_WRONG_SAMPLE
 # ---------------------------------------------------------------------------
@@ -1083,6 +1754,112 @@ def test_class_balance_as_proportions_is_not_a_count_claim(tmp_path):
         },
     )
     assert "INV_CLASS_BALANCE_WRONG_SAMPLE" not in _codes(run)
+
+
+# The labelled shape the orchestrator's recount writes (src.class_balance):
+# the round-3 study, analytic 17,335 = train 13,773 + test 3,562.
+_R3_SPLITS = {"analytic_n": 17335, "n_train": 13773, "n_test": 3562}
+
+
+def _labelled(sample, n, counts) -> dict:
+    return {
+        "sample": sample,
+        "n": n,
+        "counts": counts,
+        "shares": {k: round(v / n, 4) for k, v in counts.items()},
+    }
+
+
+def test_labelled_class_balance_over_the_analytic_sample_is_fine(tmp_path):
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": _labelled(
+            "analytic sample (train + test)", 17335,
+            {"class_0": 4281, "class_1": 13054},
+        ),
+        "class_balance_train": _labelled(
+            "training split", 13773, {"class_0": 3319, "class_1": 10454}
+        ),
+    })
+    assert "INV_CLASS_BALANCE_WRONG_SAMPLE" not in _codes(run)
+
+
+def test_labelled_class_balance_that_labels_a_split(tmp_path):
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": _labelled(
+            "training split", 13773, {"class_0": 3319, "class_1": 10454}
+        ),
+    })
+    hits = _by_code(run, "INV_CLASS_BALANCE_WRONG_SAMPLE")
+    assert len(hits) == 1
+    assert hits[0].evidence["problems"] == [
+        "it is labelled 'training split', not the analytic sample",
+        "its n is 13,773, which is n_train, not analytic_n (17,335)",
+    ]
+
+
+def test_labelled_class_balance_whose_n_is_not_analytic_n(tmp_path):
+    """The recount's n comes from the y files and analytic_n from the
+    DataEngineer: when they disagree, the paper's sample size and its
+    class split cannot both be right."""
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": _labelled(
+            "analytic sample (train + test)", 17000,
+            {"class_0": 4200, "class_1": 12800},
+        ),
+    })
+    hits = _by_code(run, "INV_CLASS_BALANCE_WRONG_SAMPLE")
+    assert len(hits) == 1
+    assert hits[0].evidence["problems"] == [
+        "its n is 17,000, not analytic_n (17,335)"
+    ]
+    assert "17,335" in hits[0].message
+
+
+def test_labelled_class_balance_whose_counts_are_not_its_n(tmp_path):
+    """The analytic label and n, with the training split's counts under
+    them: the round-3 numbers, relabelled without being recounted."""
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": {
+            "sample": "analytic sample (train + test)",
+            "n": 17335,
+            "counts": {"class_0": 3319, "class_1": 10454},
+        },
+    })
+    hits = _by_code(run, "INV_CLASS_BALANCE_WRONG_SAMPLE")
+    assert len(hits) == 1
+    assert hits[0].evidence["sum"] == 13773
+    assert hits[0].evidence["problems"] == [
+        "its counts sum to 13,773, which is n_train, not its n (17,335)"
+    ]
+
+
+def test_labelled_class_balance_that_does_not_say_its_sample(tmp_path):
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": {"n": 17335, "counts": {"class_0": 4281, "class_1": 13054}},
+    })
+    hits = _by_code(run, "INV_CLASS_BALANCE_WRONG_SAMPLE")
+    assert [h.evidence["problems"] for h in hits] == [
+        ["it does not say which sample it counts"]
+    ]
+
+
+def test_labelled_class_balance_without_n_is_held_to_analytic_n(tmp_path):
+    run = _run(tmp_path, data_report__json={
+        **_R3_SPLITS,
+        "class_balance": {
+            "sample": "analytic sample (train + test)",
+            "counts": {"class_0": 962, "class_1": 2600},
+        },
+    })
+    hits = _by_code(run, "INV_CLASS_BALANCE_WRONG_SAMPLE")
+    assert [h.evidence["problems"] for h in hits] == [
+        ["its counts sum to 3,562, which is n_test, not analytic_n (17,335)"]
+    ]
 
 
 # ---------------------------------------------------------------------------

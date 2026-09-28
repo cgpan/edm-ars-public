@@ -514,6 +514,11 @@ class TestOrchestratorPreflightWiring:
             _inject_skills=MagicMock(),
             data_engineer=MagicMock(),
         )
+        # The stage recounts data_report's class balance once the data is
+        # accepted (src/class_balance.py); the real step runs on the stub.
+        fake._correct_class_balance = MagicMock(
+            side_effect=lambda: Orchestrator._correct_class_balance(fake)
+        )
         return fake
 
     def test_preflight_returns_none_for_prediction(self, tmp_path: Path) -> None:
@@ -567,6 +572,7 @@ class TestOrchestratorPreflightWiring:
             "revision_instructions", ""
         )
         assert "ENGINEERING" in fake.ctx.completed_stages
+        assert fake._correct_class_balance.call_count == 1
 
     def test_validation_failure_gets_targeted_retry(
         self, tmp_path: Path
@@ -594,6 +600,7 @@ class TestOrchestratorPreflightWiring:
             "revision_instructions", ""
         )
         assert "ENGINEERING" in fake.ctx.completed_stages
+        assert fake._correct_class_balance.call_count == 1
 
     def test_validation_failure_twice_aborts(self, tmp_path: Path) -> None:
         fake = self._fake_self(tmp_path)
@@ -620,3 +627,4 @@ class TestOrchestratorPreflightWiring:
         Orchestrator._run_engineering(fake)
         assert fake._abort.call_count == 1
         assert "post-retry" in fake._abort.call_args.args[0]
+        assert fake._correct_class_balance.call_count == 0

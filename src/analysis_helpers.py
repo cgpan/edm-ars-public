@@ -1615,7 +1615,7 @@ def run_moderation_analysis(X, y, focal_cols, moderator_col, n_boot=200,
 def run_incremental_validity(train_X, train_y, test_X, test_y,
                              focal_cols, baseline_cols=None,
                              school_ids=None, n_boot=1000,
-                             random_state=42):
+                             random_state=42, outcome_type=None):
     """Does the focal block add predictive power OVER a baseline block?
 
     This answers "does X predict Y above and beyond A and B", which is
@@ -1629,11 +1629,26 @@ def run_incremental_validity(train_X, train_y, test_X, test_y,
     the HELD-OUT test set:
         baseline : baseline_cols            (default: everything but focal)
         full     : baseline_cols + focal_cols
+    A column in neither list is left out of both models.
 
-    Returns the held-out AUC of each, their difference, and a bootstrap
-    CI on that difference (cluster-aware when ``school_ids`` is given,
-    since students are nested in schools and an iid interval would be
-    too narrow).
+    Binary outcome: nested logistic regressions; returns baseline_auc,
+    full_auc and delta_auc. Continuous outcome: nested OLS; returns
+    baseline_r2, full_r2, delta_r2 and both RMSEs. Either way the
+    difference gets a bootstrap CI over the test rows (cluster-aware when
+    ``school_ids`` is given, since students are nested in schools and an
+    iid interval would be too narrow).
+
+    ``outcome_type`` is data_report["outcome_type"] ("binary" or
+    "continuous"); None infers it (two distinct values: binary, more:
+    continuous). Until 2026-09-27 the helper fitted LogisticRegression
+    whatever the outcome, so on a GPA outcome it raised "Unknown label
+    type: continuous", and archived runs recorded the test as an error,
+    as skipped "for regression", or as null.
+
+    It never raises on data it cannot use: it returns
+    ``{"status": "skipped" | "error", "reason": ...}``, which the
+    pre-review check (pcc_07) reads as the test not having run. Only
+    ``"status": "ok"`` is the test.
 
     A SHAP ranking inside a single fitted model does not establish
     incremental validity -- a predictor can dominate a model's
@@ -1643,14 +1658,25 @@ def run_incremental_validity(train_X, train_y, test_X, test_y,
     """
     import numpy as np
     import pandas as pd
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import roc_auc_score
-    from sklearn.preprocessing import StandardScaler
 
-    train_X = pd.DataFrame(train_X).reset_index(drop=True)
-    test_X = pd.DataFrame(test_X).reset_index(drop=True)
-    ytr = np.asarray(train_y).astype(float).ravel()
-    yte = np.asarray(test_y).astype(float).ravel()
+    kind = _incremental_outcome_kind(outcome_type)
+    if kind == "unsupported":
+        return {"status": "skipped",
+                "reason": (f"outcome_type {outcome_type!r}: the nested "
+                           "comparison is defined here for binary and "
+                           "continuous outcomes only"),
+                "outcome_type": str(outcome_type)}
+    try:
+        train_X = pd.DataFrame(train_X).reset_index(drop=True)
+        test_X = pd.DataFrame(test_X).reset_index(drop=True)
+        ytr = np.asarray(train_y).astype(float).ravel()
+        yte = np.asarray(test_y).astype(float).ravel()
+    except (TypeError, ValueError) as exc:
+        return {"status": "error",
+                "reason": f"could not read the outcome as numbers: {exc}"}
+    if kind is None:
+        observed = np.unique(np.concatenate([ytr, yte]))
+        kind = "binary" if len(observed) <= 2 else "continuous"
 
     focal = [c for c in focal_cols if c in train_X.columns]
     if not focal:
@@ -1661,11 +1687,61 @@ def run_incremental_validity(train_X, train_y, test_X, test_y,
     if baseline_cols is None:
         base = [c for c in train_X.columns if c not in focal]
     else:
-        base = [c for c in baseline_cols if c in train_X.columns]
+        base = [c for c in baseline_cols
+                if c in train_X.columns and c not in focal]
     if not base:
         return {"status": "skipped",
                 "reason": "baseline block is empty; nothing to add over"}
 
+    try:
+        if kind == "binary":
+            out = _incremental_binary(train_X, ytr, test_X, yte, base,
+                                      focal, school_ids, n_boot,
+                                      random_state)
+        else:
+            out = _incremental_continuous(train_X, ytr, test_X, yte, base,
+                                          focal, school_ids, n_boot,
+                                          random_state)
+    except (ValueError, TypeError, IndexError, KeyError,
+            np.linalg.LinAlgError) as exc:
+        return {"status": "error", "outcome_type": kind,
+                "reason": f"{type(exc).__name__}: {exc}"}
+    if out.get("status") != "ok":
+        return out
+    out.update({
+        "outcome_type": kind,
+        "n_focal_cols": len(focal),
+        "n_baseline_cols": len(base),
+        "focal_cols": focal,
+        "baseline_cols": base,
+    })
+    return out
+
+
+def _incremental_outcome_kind(outcome_type):
+    """"binary", "continuous", None (infer it) or "unsupported"."""
+    if outcome_type is None:
+        return None
+    name = str(outcome_type).strip().lower()
+    if name in ("binary", "dichotomous", "classification"):
+        return "binary"
+    if name in ("continuous", "regression", "numeric"):
+        return "continuous"
+    return "unsupported"
+
+
+def _incremental_binary(train_X, ytr, test_X, yte, base, focal,
+                        school_ids, n_boot, random_state):
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+    from sklearn.preprocessing import StandardScaler
+
+    if len(np.unique(np.concatenate([ytr, yte]))) > 2:
+        return {"status": "error",
+                "reason": ("outcome_type is binary but the outcome has more "
+                           "than two values; pass outcome_type='continuous' "
+                           "or recode it to 0/1")}
     if len(np.unique(yte)) < 2:
         return {"status": "skipped", "reason": "test outcome is constant"}
 
@@ -1688,6 +1764,7 @@ def run_incremental_validity(train_X, train_y, test_X, test_y,
 
     return {
         "status": "ok",
+        "metric": "auc",
         "baseline_auc": auc_base,
         "full_auc": auc_full,
         "delta_auc": delta["auc_diff"],
@@ -1696,17 +1773,90 @@ def run_incremental_validity(train_X, train_y, test_X, test_y,
         "significant": delta["significant"],
         "se_method": delta["se_method"],
         "n_boot_effective": delta["n_boot_effective"],
-        "n_focal_cols": len(focal),
-        "n_baseline_cols": len(base),
-        "focal_cols": focal,
-        "interpretation": (
-            "The focal block adds predictive power over the baseline."
-            if delta["ci_lower"] > 0 else
-            "The focal block does NOT add detectable predictive power "
-            "over the baseline; any 'above and beyond' claim is "
-            "unsupported by this comparison."
-        ),
+        "interpretation": _incremental_interpretation(delta["ci_lower"]),
     }
+
+
+def _incremental_continuous(train_X, ytr, test_X, yte, base, focal,
+                            school_ids, n_boot, random_state):
+    import numpy as np
+    from sklearn.linear_model import LinearRegression
+
+    if float(np.var(yte)) == 0.0:
+        return {"status": "skipped", "reason": "test outcome is constant"}
+
+    def _predict(cols):
+        model = LinearRegression()
+        model.fit(train_X[cols], ytr)
+        return np.asarray(model.predict(test_X[cols]), dtype=float)
+
+    def _r2(y, pred):
+        total = float(np.sum((y - y.mean()) ** 2))
+        if total <= 0.0:
+            return None
+        return 1.0 - float(np.sum((y - pred) ** 2)) / total
+
+    def _rmse(y, pred):
+        return float(np.sqrt(np.mean((y - pred) ** 2)))
+
+    pred_base = _predict(base)
+    pred_full = _predict(base + focal)
+    r2_base = _r2(yte, pred_base)
+    r2_full = _r2(yte, pred_full)
+
+    rng = np.random.default_rng(random_state)
+    boots = []
+
+    def _resample(idx):
+        full = _r2(yte[idx], pred_full[idx])
+        baseline = _r2(yte[idx], pred_base[idx])
+        if full is not None and baseline is not None:
+            boots.append(full - baseline)
+
+    if school_ids is not None:
+        sid = np.asarray(school_ids)
+        if len(sid) != len(yte):
+            raise ValueError(
+                f"school_ids has {len(sid)} entries for {len(yte)} test rows")
+        clusters = np.unique(sid)
+        cluster_rows = {c: np.where(sid == c)[0] for c in clusters}
+        for _ in range(n_boot):
+            take = rng.choice(clusters, len(clusters), replace=True)
+            _resample(np.concatenate([cluster_rows[c] for c in take]))
+    else:
+        n = len(yte)
+        for _ in range(n_boot):
+            _resample(rng.integers(0, n, n))
+    if not boots:
+        return {"status": "error",
+                "reason": "no bootstrap resample had a varying outcome"}
+    lo, hi = np.percentile(boots, [2.5, 97.5])
+
+    return {
+        "status": "ok",
+        "metric": "r2",
+        "baseline_r2": r2_base,
+        "full_r2": r2_full,
+        "delta_r2": float(r2_full - r2_base),
+        "baseline_rmse": _rmse(yte, pred_base),
+        "full_rmse": _rmse(yte, pred_full),
+        "delta_rmse": _rmse(yte, pred_full) - _rmse(yte, pred_base),
+        "ci_lower": float(lo),
+        "ci_upper": float(hi),
+        "significant": bool(lo > 0 or hi < 0),
+        "se_method": ("cluster_bootstrap" if school_ids is not None
+                      else "bootstrap"),
+        "n_boot_effective": len(boots),
+        "interpretation": _incremental_interpretation(float(lo)),
+    }
+
+
+def _incremental_interpretation(ci_lower):
+    if ci_lower > 0:
+        return "The focal block adds predictive power over the baseline."
+    return ("The focal block does NOT add detectable predictive power "
+            "over the baseline; any 'above and beyond' claim is "
+            "unsupported by this comparison.")
 
 
 def group_shap_by_parent(feature_names, shap_mean_abs, sep="_"):

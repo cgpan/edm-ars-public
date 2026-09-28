@@ -64,6 +64,7 @@ is deprecated; v2 is canonical.
 | Placeholder | Content |
 |---|---|
 | `%%PLACEHOLDER:TITLE%%` | Paper title (concise, descriptive). |
+| `%%PLACEHOLDER:SHORTTITLE%%` | Running head (`\shorttitle`) printed at the top of every page, at most 60 characters (e.g. the title's first clause). Left out or too long, the pipeline derives one from the title. |
 | `%%PLACEHOLDER:ABSTRACT%%` | Abstract prose, 200–300 words. Plain text only. |
 | `%%PLACEHOLDER:KEYWORDS%%` | Comma-separated keywords. |
 | `%%PLACEHOLDER:PAPER_BODY%%` | All sections (Introduction through Discussion) generated from the outline. |

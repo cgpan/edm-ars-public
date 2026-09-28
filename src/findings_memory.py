@@ -177,6 +177,15 @@ class KnowledgeGraph:
 # ---------------------------------------------------------------------------
 
 
+def _set_aside_corrupt(path: str) -> None:
+    """Rename an unparseable memory file so a later save cannot erase it."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    try:
+        os.replace(path, f"{path}.corrupt-{stamp}")
+    except OSError:
+        pass
+
+
 class FindingsMemory:
     """Persistent cross-run knowledge store.
 
@@ -195,13 +204,27 @@ class FindingsMemory:
 
     @classmethod
     def load(cls, path: str) -> FindingsMemory:
-        """Load from YAML file; return empty instance if file missing or corrupt."""
+        """Load from YAML file; return empty instance if file missing or corrupt.
+
+        A file that is not valid YAML, or not a mapping, is moved aside to
+        ``<path>.corrupt-<UTC stamp>`` first (D7). It used to be treated as
+        empty and then overwritten by the next run's save, so the whole
+        cross-run history vanished without a trace.
+        """
         instance = cls(path)
         if not os.path.exists(path):
             return instance
         try:
             with open(path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
+            if not isinstance(data, dict):
+                raise yaml.YAMLError(f"top level is {type(data).__name__}, not a mapping")
+        except (yaml.YAMLError, UnicodeDecodeError):
+            _set_aside_corrupt(path)
+            return instance
+        except Exception:
+            return instance  # unreadable right now (e.g. permissions): start fresh
+        try:
             for run_data in data.get("runs", []):
                 try:
                     instance.runs.append(RunEntry.from_dict(run_data))
@@ -211,7 +234,7 @@ class FindingsMemory:
             if kg_data:
                 instance.knowledge_graph = KnowledgeGraph.from_dict(kg_data)
         except Exception:
-            pass  # corrupt file — start fresh
+            pass  # malformed content: start fresh
         return instance
 
     # ------------------------------------------------------------------

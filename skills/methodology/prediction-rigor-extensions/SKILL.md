@@ -1,7 +1,7 @@
 ---
 name: prediction-rigor-extensions
 layer: methodology
-description: Reviewer-grade rigor for prediction papers — moderation sub-questions must be COMPUTED via run_moderation_analysis, dummy SHAP grouped by parent variable, best-model claims paired-tested, calibration quantified.
+description: Reviewer-grade rigor for prediction papers — moderation sub-questions must be COMPUTED via run_moderation_analysis, "above and beyond" claims via run_incremental_validity, dummy SHAP grouped by parent variable, best-model claims paired-tested, calibration quantified.
 trigger_keywords:
   - moderation
   - interaction
@@ -28,15 +28,16 @@ rule_severity: mandatory
 
 # Prediction Rigor Extensions
 
-Four reviewer-named gaps, each with a certified deterministic helper.
+Five reviewer-named gaps, each with a certified deterministic helper.
 Generated code MUST call the helpers — reimplementation is a contract
 violation.
 
 ## 1. Every moderation sub-question must be COMPUTED
 
 If the research question or research_spec promises a moderation /
-interaction analysis ("above and beyond", "does X moderate", "varies by
-SES"), the Analyst MUST run it — never silently drop it:
+interaction analysis ("does X moderate", "varies by SES"), the Analyst
+MUST run it — never silently drop it. ("Above and beyond" is a
+different question; see section 1b.)
 
 ```python
 # Signature (use EXACTLY these parameter names):
@@ -60,6 +61,52 @@ block's incremental AUC within moderator tertiles with a bootstrap CI on
 the top-minus-bottom difference. If genuinely infeasible, results must
 carry `moderation_analysis: {"status": "skipped", "reason": ...}` AND the
 Writer must descope it explicitly in Limitations.
+
+## 1b. Every incremental-validity claim must be COMPUTED
+
+"Does X predict Y above and beyond (over and above) A and B" asks whether
+the focal block adds predictive power over a baseline block. That needs
+two nested models compared on the held-out test set. A SHAP ranking
+inside one model does not answer it, and neither does moderation.
+
+```python
+# Signature (use EXACTLY these parameter names):
+#   run_incremental_validity(train_X, train_y, test_X, test_y,
+#                            focal_cols, baseline_cols=None,
+#                            school_ids=None, n_boot=1000, random_state=42,
+#                            outcome_type=None)
+baseline_cols = [c for c in train_X.columns
+                 if c.startswith(("X1TXMTSCOR", "X1SES"))]   # the named A and B
+focal_cols = [c for c in train_X.columns
+              if c.startswith(("X1MTHID", "X1SCHOOLBEL"))]  # ONLY what the question credits
+results["incremental_validity"] = analysis_helpers.run_incremental_validity(
+    train_X, train_y_arr, test_X, test_y_arr,
+    focal_cols=focal_cols, baseline_cols=baseline_cols,
+    school_ids=test_school_ids,            # None when test_school_ids.csv is absent
+    outcome_type="binary")                 # data_report.json outcome_type: "binary" or "continuous"
+```
+
+The baseline is everything the question names after "above and beyond",
+controls included ("academic achievement, SES, and demographic controls"
+is three things); map it to predictor_set variables and take their
+ENCODED columns. focal_cols holds only the constructs the question
+credits. Never default focal_cols to "every other column": a column in
+focal_cols is credited to the focal constructs, while a column in neither
+list is left out of both models.
+
+The helper handles binary outcomes (baseline_auc, full_auc, delta_auc)
+and continuous ones (baseline_r2, full_r2, delta_r2 and both RMSEs), each
+with a bootstrap CI on the difference, and records the column lists it
+used. It returns `{"status": "skipped" | "error", "reason": ...}` instead
+of raising, so never wrap it in a try/except that writes null or a note.
+
+There is no descope for this one, and it is never "not applicable to
+regression": the claim is the paper's contribution. Only `"status":
+"ok"` satisfies the pre-review check (pcc_07); null, an empty record or
+a skipped/error record does not, and the study stops rather than publish
+the untested claim. Writer: report delta_auc (or delta_r2) with its CI;
+when the CI includes 0, say the focal block adds no detectable predictive
+power over the baseline.
 
 ## 2. Dummy SHAP grouped by parent variable
 
@@ -131,6 +178,7 @@ Writer reports Brier score and calibration slope/intercept alongside AUC
 | ID | Item | Severity | Check |
 |---|---|---|---|
 | `rig_01` | Moderation computed or descoped | critical | Any moderation phrasing in the RQ/spec → `results.moderation_analysis.status == "computed"`, else an explicit skipped-reason + Limitations descope. |
+| `rig_07` | Incremental validity computed | critical | "Above and beyond" / "over and above" / "incremental validity" in the RQ → `results.incremental_validity.status == "ok"` with delta and CI; prose claims match the CI. No descope. |
 | `rig_02` | Grouped SHAP present | major | `results.top_feature_groups` non-empty when SHAP ran. |
 | `rig_03` | Best-model claim tested | major | `results.model_comparison_test` present; prose claims match `significant`. |
 | `rig_06` | Comparands named | **critical** | `results.model_comparison_test.model_a` and `.model_b` are non-null and `comparands_unnamed` is absent. Any prose naming the compared models must match `contrast` exactly. An unnamed comparison cannot be written up. |

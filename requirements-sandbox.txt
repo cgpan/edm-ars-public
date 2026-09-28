@@ -11,3 +11,11 @@ scipy==1.14.1
 joblib==1.4.2
 threadpoolctl==3.5.0
 imbalanced-learn==0.12.4
+# Causal runs: the mandatory DoWhy refuters and the statsmodels IPW/GLM
+# recipes run inside generated code. Same versions as the tested host
+# lock (requirements.txt allows dowhy>=0.11,<0.13).
+dowhy==0.12
+statsmodels==0.14.6
+# dowhy needs cvxpy; cvxpy>=1.8 requires numpy>=2, which the numpy pin
+# above rules out. Pinned so the build resolves the same way every time.
+cvxpy==1.7.5

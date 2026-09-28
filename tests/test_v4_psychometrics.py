@@ -2,21 +2,16 @@
 
 The certification test runs the real gate against the real R
 installation (standing Arc-R rule: no downscaling). Skips cleanly on
-machines without R.
+machines without R -- or with R but without the packages the certified
+scripts load, which used to fail instead of skipping. The check is the
+session fixture ``r_ready`` in tests/conftest.py, so R starts only when
+one of these tests runs, not while this module is imported.
 """
 from __future__ import annotations
 
 import pytest
 
-try:
-    from src.r_bridge import RBridgeError, find_rscript
-
-    find_rscript()
-    _HAS_R = True
-except Exception:
-    _HAS_R = False
-
-needs_r = pytest.mark.skipif(not _HAS_R, reason="Rscript not available")
+needs_r = pytest.mark.usefixtures("r_ready")
 
 
 class TestRBridge:

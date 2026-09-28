@@ -1,5 +1,5 @@
 """Model tiering (2026-07-11): reasoning-light agents on
-deepseek-v4-flash, reasoning-heavy agents on deepseek-v4-pro.
+deepseek-flash, reasoning-heavy agents on deepseek-v4-pro.
 
 Pins (a) the shipped config.yaml tier assignment, and (b) the
 ReviewGate revision-writer deepseek branch (previously the gate only
@@ -98,19 +98,28 @@ class TestReviewGateProviderRouting:
 
         cfg = self._base_cfg()
         cfg["deepseek"].pop("models")
+        # An arbitrary model id: the test checks the fallback wiring,
+        # not the name. (It happens to be the retired flash id; nothing
+        # in the shipped configs routes to it.)
         cfg["review_gate"]["revision_model"] = "deepseek-v4-flash"
         gate = ReviewGate(cfg, str(tmp_path), log_fn=None)
         assert gate._llm_model == "deepseek-v4-flash"
 
-    def test_anthropic_default_branch_unchanged(
+    def test_anthropic_branch_uses_the_writer_model(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """The anthropic branch used to send review_gate.revision_model
+        straight to Anthropic. That key ships as ``deepseek-v4-pro``, so
+        every revision failed with model-not-found (E2). It now follows
+        models.revision_writer -> models.writer, and revision_model is a
+        DeepSeek-only fallback."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
         from src.review_gate import ReviewGate
 
         cfg = {
             "llm_provider": "anthropic",
-            "review_gate": {"revision_model": "claude-sonnet-4-6"},
+            "models": {"writer": "claude-sonnet-4-6"},
+            "review_gate": {"revision_model": "deepseek-v4-pro"},
         }
         gate = ReviewGate(cfg, str(tmp_path), log_fn=None)
         assert gate._llm_provider == "anthropic"

@@ -194,7 +194,13 @@ Find it at data_registry/datasets/hsls09_public.yaml
   "n_test": 0,
   "outcome_variable": "string",
   "outcome_type": "binary|continuous",
-  "class_balance": {"class_0": 0.0, "class_1": 0.0},
+  "class_balance": {
+    "sample": "analytic sample (train + test)", "n": 0,
+    "counts": {"class_0": 0, "class_1": 0},
+    "shares": {"class_0": 0.0, "class_1": 0.0}
+  },
+  "class_balance_train": {"sample": "training split", "n": 0, "counts": {}, "shares": {}},
+  "class_balance_test": {"sample": "test split", "n": 0, "counts": {}, "shares": {}},
   "n_predictors_raw": 0,
   "n_predictors_encoded": 0,
   "missingness_summary": {
@@ -205,6 +211,15 @@ Find it at data_registry/datasets/hsls09_public.yaml
   "warnings": []
 }
 ```
+
+The three `class_balance*` fields are written by the orchestrator after
+ENGINEERING (and after a DataEngineer revision), counted from
+`train_y.csv` and `test_y.csv` (`src/class_balance.py`); they are `null`
+or absent for a continuous outcome. `class_balance` is the analytic sample,
+never a split. When the DataEngineer's own value says something else it is
+kept as `class_balance_reported_by_de` and `warnings` says what was
+corrected (round 3: generated code counted `y_train`, and the paper
+reported the training split as the analytic sample).
 
 ---
 
@@ -307,6 +322,9 @@ Subprocess timeout: **300s** for model training steps; **600s** for SHAP computa
 {
   "best_model": "string",
   "best_metric_value": 0.0,
+  "best_model_scope": "individual",
+  "best_overall_model": "string",
+  "best_overall_metric_value": 0.0,
   "primary_metric": "AUC|RMSE",
   "all_models": {
     "LogisticRegression": {
@@ -327,6 +345,15 @@ Subprocess timeout: **300s** for model training steps; **600s** for SHAP computa
   "warnings": []
 }
 ```
+
+`best_model` is the best **individual** model (StackingEnsemble excluded,
+per the interpretability output rule above). After ANALYZING, and after an
+Analyst revision, the orchestrator adds `best_model_scope` (`"individual"`,
+or `"overall"` if the analysis named an ensemble), `best_overall_model` and
+`best_overall_metric_value` (ensemble included), computed from `all_models`
+in the primary metric's direction (`src/best_model.py`). When the ensemble
+scores higher, the paper reports both and calls `best_model` the best
+individual model.
 
 ---
 
@@ -528,6 +555,35 @@ CRITIQUING
     ├── REVISE + cycles = max ──────────────────────► WRITING (UNVERIFIED)
     └── ABORT ──────────────────────────────────────► ABORTED
 ```
+
+**Pre-Critic checks.** Each CRITIQUING cycle first runs the deterministic
+checks in `src/pre_critic_checks.py`, with no LLM call. When none is critical,
+the Critic runs as above. When one is critical, the Critic is skipped for that
+cycle:
+
+- A finding no revision can fix (the outcome in the predictor matrix, a data
+  report with `validation_passed: false`) → ABORTED with `PRE_CRITIC_ABORT`.
+- When every critical finding is revisable and names an agent the cascade can
+  re-run (for example a comparison the research question promises that the
+  analysis never ran), and cycles remain → REVISING that agent (§5.3), then
+  CRITIQUING again, where the checks run again. A `PRE_CRITIC_REVISE` warning
+  event names the agent.
+- A revisable finding still failing when the cycles run out → ABORTED with
+  `PRE_CRITIC_UNRESOLVED`. No paper is written: unlike an unresolved Critic
+  REVISE, this does not fall through to WRITING (UNVERIFIED). A revision
+  ordered by these checks that raises an error also stops the run rather than
+  writing UNVERIFIED.
+- The same stop comes sooner, with cycles left, when the revision a finding
+  was sent back for returns the agent's own word that another would not help:
+  the not-run record with a reason that the instruction asks for when a
+  promised test cannot run, or a second timeout of an analysis that trained
+  no model.
+
+Both codes are not resumable, with one exception: a `PRE_CRITIC_ABORT`
+recorded before findings were classified (its abort record has no `checks`)
+and led by a finding a revision can now fix (pcc_07, pcc_02) resumes at
+CRITIQUING, where the checks run again and the finding is revised.
+`run_status.json` carries the findings in `abort.checks`.
 
 ### 5.2 Checkpointing
 
@@ -826,6 +882,7 @@ Run directory naming: `run_{YYYYMMDD_HHMMSS}` (e.g., `run_20260310_142300`).
 |---|---|
 | `data_report.validation_passed == false` | ABORT; log reason; return context |
 | `analytic_n < 1000` | ABORT; log reason; return context |
+| Prediction: after ENGINEERING, the outcome is a column of `train_X.csv` or `test_X.csv` (its name, the name `train_y.csv` gives it, or its name plus an encoded level) | One targeted DataEngineer retry naming the columns, before the Analyst runs. Still there after the retry (or after a DataEngineer revision): drop exactly those columns, nothing else, say so in `data_report.warnings`, `pipeline.log` and an `OUTCOME_REMOVED_FROM_PREDICTORS` warning event, and continue. An outcome column that reaches CRITIQUING is still pcc_01 (`PRE_CRITIC_ABORT`) |
 | `JSONDecodeError` from `parse_llm_json()` | Log error; set state to ABORTED; return context |
 | Subprocess `returncode != 0` | Log stderr; skip failed model; continue with remaining models |
 | SHAP computation timeout (600s) | Log timeout; skip SHAP for that model; note in `results.warnings` |
@@ -833,6 +890,10 @@ Run directory naming: `run_{YYYYMMDD_HHMMSS}` (e.g., `run_20260310_142300`).
 | S2 API error or non-200 response | Log warning; set `literature_context = null`; Writer uses placeholders |
 | Max revision cycles reached without PASS | Set UNVERIFIED flag; proceed to WRITING |
 | Critic verdict = ABORT | Set state to ABORTED; return context with full Critic report |
+| Critical pre-Critic finding no revision can fix | Skip the Critic; ABORTED with `PRE_CRITIC_ABORT` (not resumable) |
+| Critical pre-Critic finding a revision can fix | Skip the Critic; REVISE the target agent while cycles remain (§5.1) |
+| Revisable pre-Critic finding unresolved after max revision cycles | ABORTED with `PRE_CRITIC_UNRESOLVED` (not resumable); no paper is written |
+| Revision for a pre-Critic finding returns a not-run record with a reason, or a second timeout | ABORTED with `PRE_CRITIC_UNRESOLVED` at once, cycles left or not; no paper is written |
 | Checkpoint found on startup | Load checkpoint; resume from `current_state`; skip completed stages |
 | AUC > 0.95 | Critic automatically flags as suspicious (potential leakage) |
 | Docker daemon not reachable (`sandbox.enabled: true`) | Emit RuntimeWarning; fall back to SubprocessExecutor; log warning |

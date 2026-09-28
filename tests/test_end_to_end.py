@@ -237,6 +237,28 @@ def _writer_stub(output_dir: str, **_kw: Any) -> str:
     return _PAPER_TEX
 
 
+@pytest.fixture(autouse=True)
+def _stub_latex_compile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Compile without TeX: write the log and PDF a clean compile leaves.
+
+    These tests used to run the real pdflatex/bibtex sequence and asserted
+    COMPLETED only because the machine happened to have TeX installed. A
+    manuscript with neither a log nor a PDF is now (correctly) a blocked
+    release, so without this stub the happy path would depend on the
+    test machine's TeX install rather than on the pipeline.
+    """
+
+    def fake_compile(output_dir: str, *_a: Any, **_k: Any) -> dict:
+        Path(output_dir, "paper.pdf").write_bytes(b"%PDF-1.5 stub")
+        Path(output_dir, "paper.log").write_text(
+            "This is pdfTeX, Version 3.14\nOutput written on paper.pdf.\n",
+            encoding="utf-8",
+        )
+        return {"success": True, "steps": []}
+
+    monkeypatch.setattr("src.orchestrator.compile_latex", fake_compile)
+
+
 # ── Helper builders ────────────────────────────────────────────────────────
 
 def _make_ctx(tmp_path: Path, max_revision_cycles: int = 2) -> PipelineContext:

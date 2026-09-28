@@ -1,26 +1,40 @@
-# config.yaml
-# llm_provider: which API to use — "anthropic" | "deepseek" | "openai" | "minimax"
+# config.yaml -- central configuration for EDM-ARS.
 #
-# Phase 3b.10.5: DeepSeek-V4-Pro replaced MiniMax as the project default.
-# 3b.9 surfaced F-3b9-ANALYST-CODEGEN-CRASH and F-3b9-WRITER-ONLY-BIBTEX
-# both attributable to MiniMax-M2.7 thinking-block overhead under larger
-# prompts. DeepSeek-V4-Pro has the same thinking-mode capability but
-# (unlike MiniMax) it can be disabled via the API; BaseAgent.call_llm
-# disables it for the deepseek branch by default.
+# API keys never go in this file. They are read from environment
+# variables or from a .env file at the repository root; copy
+# .env.example to .env to start (see README -> API keys).
 #
-# The MiniMax branch remains supported for backward-compat with 3b.5 /
-# 3b.7 / 3b.9 run artifacts; switch back via llm_provider: minimax.
-llm_provider: deepseek   # deepseek | minimax | openai | anthropic
+# llm_provider picks the API every agent calls. Each provider has its own
+# block below naming the model for each agent.
+#   deepseek   default; needs DEEPSEEK_API_KEY
+#   openai     OpenAI or any OpenAI-compatible server; needs OPENAI_API_KEY
+#              and an `openai:` block (see the commented example below)
+#   anthropic  Claude; needs ANTHROPIC_API_KEY; uses the `models:` block
+#   minimax    kept so runs made before DeepSeek became the default can be
+#              reproduced; needs MINIMAX_API_KEY
+# DeepSeek's thinking mode is switched off by BaseAgent.call_llm: the
+# thinking-block overhead broke code generation and the Writer when
+# MiniMax (which cannot turn it off) was the default.
+llm_provider: deepseek   # deepseek | openai | anthropic | minimax
 
+# Model per agent for llm_provider: anthropic. The loader requires this
+# block to exist whichever provider is active; with any other provider
+# it is not used. Anthropic has no built-in fallback model, so every
+# stage a run calls needs a line here (the pre-flight refuses a run
+# that is missing one).
 models:
   problem_formulator: claude-sonnet-4-6
   data_engineer: claude-sonnet-4-6
   analyst: claude-sonnet-4-6
   critic: claude-opus-4-6
   writer: claude-sonnet-4-6
+  outline_agent: claude-sonnet-4-6    # called while writer.outline_first is true
+  # revision_writer: claude-sonnet-4-6  # review gate revisions; defaults to writer
+  # verifier: claude-sonnet-4-6         # only with verification.judge_enabled; must accept images
 
 # DeepSeek model config (used when llm_provider: deepseek)
-# Requires DEEPSEEK_API_KEY in environment (set in .env or set_env.ps1).
+# Requires DEEPSEEK_API_KEY (an environment variable, or a line in the
+# .env file at the repository root -- see .env.example and README).
 # Endpoint is OpenAI-compatible; uses the openai SDK under the hood.
 #
 # Model tiering (2026-07-11): each agent routes independently, so
@@ -50,7 +64,7 @@ deepseek:
     # nothing in this project has ever looked at a figure.
     verifier: deepseek-flash
 
-# MiniMax model config (legacy; preserved for 3b.5/3b.7/3b.9 reproducibility)
+# MiniMax model config (legacy; kept so older runs can be reproduced).
 # Requires MINIMAX_API_KEY in environment.
 minimax:
   base_url: https://api.minimax.io/anthropic
@@ -61,6 +75,24 @@ minimax:
     critic: MiniMax-M2.7
     writer: MiniMax-M2.7
     revision_writer: MiniMax-M2.7
+
+# OpenAI, or any OpenAI-compatible server (used when llm_provider: openai).
+# There is deliberately no built-in model list for this provider: name a
+# model for every agent below, or that agent fails with an error naming
+# the missing key. Uncomment the block and replace each <model id>.
+# Requires OPENAI_API_KEY. For a local or third-party server, set base_url
+# here or OPENAI_BASE_URL in the environment.
+# openai:
+#   base_url: null
+#   models:
+#     problem_formulator: <model id>
+#     data_engineer: <model id>
+#     analyst: <model id>
+#     critic: <model id>            # SPEC: the strongest model you have
+#     writer: <model id>
+#     outline_agent: <model id>
+#     revision_writer: <model id>   # review gate revisions (gate only)
+#     verifier: <model id>          # optional judge; must accept images
 
 # K1 (2026-08-08) — token metering and cost accounting.
 #
@@ -76,25 +108,59 @@ minimax:
 #
 # VERIFY THESE AGAINST THE PROVIDER'S CURRENT PRICE LIST before quoting
 # a figure externally; they are the operator's input, not a measurement.
+# An entry that has not been checked carries `verified: false`, and a run
+# priced with it is labelled `estimated` in run_cost.json, never
+# `measured`.
+#
+# DeepSeek bills by time of day. Peak hours are 01:00-04:00 and
+# 06:00-10:00 UTC, Monday to Friday; every other hour (weekends included)
+# is off-peak, at half the peak rate. The keys input / cached_input /
+# output hold the PEAK rates, `off_peak` the half rates, and each call is
+# priced from its own UTC timestamp (src/cost.py rate_period). DeepSeek
+# also bills Chinese public holidays as off-peak; that calendar is not
+# modelled, so a weekday-peak call on such a holiday is over-counted,
+# never under-counted. Reasoning ("thinking") tokens are part of
+# completion_tokens and bill at the output rate; BaseAgent.call_llm turns
+# thinking off.
 pricing:
   currency: USD
   per_million_tokens:
+    # verified 2026-09-26 from https://api-docs.deepseek.com/quick_start/pricing
+    # (model version DeepSeek-V4-Pro-0813). The 2026-09-10 change log says
+    # deepseek-v4-pro keeps being served past 2026-09-14 "with the billing
+    # method remaining unchanged". The rates this entry held before
+    # (0.28 / 0.028 / 0.42) are not on that page; on a real study's token
+    # mix they came to about a third of the off-peak price and a sixth of
+    # the peak price.
     deepseek-v4-pro:
-      input: 0.28
-      cached_input: 0.028   # DeepSeek prices a prompt-cache hit ~10x lower
-      output: 0.42
-    # NOT VERIFIED against the current price list. These rates were
-    # carried over from the retired `deepseek-v4-flash` key when the id
-    # changed; the flash tier's real rates may differ. A wrong rate here
-    # is silent -- run_cost.json will report a number, just the wrong
-    # one. Confirm before quoting a figure externally.
+      input: 1.32           # cache miss, peak
+      cached_input: 0.044   # cache hit, peak
+      output: 3.96          # peak
+      off_peak: {input: 0.66, cached_input: 0.022, output: 1.98}
+      peak_windows_utc: &deepseek_peak
+        days: [mon, tue, wed, thu, fri]
+        hours: ["01:00-04:00", "06:00-10:00"]
+      verified: true
+      verified_on: "2026-09-26"
+      source: https://api-docs.deepseek.com/quick_start/pricing
+    # verified 2026-09-26 from https://api-docs.deepseek.com/quick_start/pricing
+    # (model version DeepSeek-V4.1-Flash, prices effective 2026-09-10).
     deepseek-flash:
-      input: 0.07
-      cached_input: 0.007
-      output: 0.28
+      input: 0.30           # cache miss, peak
+      cached_input: 0.006   # cache hit, peak
+      output: 1.20          # peak
+      off_peak: {input: 0.15, cached_input: 0.003, output: 0.60}
+      peak_windows_utc: *deepseek_peak
+      verified: true
+      verified_on: "2026-09-26"
+      source: https://api-docs.deepseek.com/quick_start/pricing
 
 pipeline:
-  task_type: prediction     # task type: prediction, causal_inference, etc.
+  # Study type: prediction | causal_soo | causal_itr | causal_did | psychometrics
+  # Only prediction starts from a free-text question (--prompt). The other
+  # four need a locked research spec (--research-spec <file>); the spec
+  # names its own study type, which takes precedence over this value.
+  task_type: prediction
   max_revision_cycles: 2
   random_state: 42
   cost_budget_usd: 5.0     # soft limit; log warning if exceeded, do not abort
@@ -115,13 +181,48 @@ class_imbalance:
   fbeta_beta: 2              # F2 emphasizes recall (at-risk detection)
   ablation_enabled: true     # train once without SMOTE for comparison
 
+# Where the AI-written analysis code runs.
+#
+# enabled: false -- the default, and the setting every validated run used.
+#   The code runs as an ordinary child process on your computer, with your
+#   user's permissions and network access; API keys are removed from its
+#   environment. See DISCLAIMER.md before you run anything.
+#
+# enabled: true -- EXPERIMENTAL. Runs the code in a Docker container with
+#   no network, but no validated run has used it, and it has known gaps:
+#   the image has no R, so psychometrics cannot run in it; and memory_limit
+#   "4g" is below what a full HSLS:09 load needs (the 2 GB CSV takes about
+#   6.6 GB in pandas), so HSLS runs can be killed for running out of
+#   memory. If the Docker daemon is not reachable, EDM-ARS falls back to
+#   the child process described above.
 sandbox:
-  enabled: true
+  enabled: false
+  # Interpreter for the generated code when the sandbox is off.
+  # null = the same Python that runs EDM-ARS (sys.executable).
+  python_executable: null
+  # Docker settings (used only when enabled: true).
   image: "edm-ars-sandbox:latest"
   memory_limit: "4g"
   cpu_count: 2
   network_disabled: true
-  auto_build: true
+  auto_build: true   # build the image from ./Dockerfile if it is missing
+
+# R bridge (psychometrics only). R 4.4+ must be installed with the
+# packages listed in README -> Prerequisites. EDM-ARS looks for Rscript on
+# PATH and in the usual install folders. If it cannot find it, set the
+# full path to the Rscript program here (for example
+# "C:/Program Files/R/R-4.5.1/bin/Rscript.exe" or "/usr/local/bin/Rscript"),
+# or set the EDM_ARS_RSCRIPT environment variable instead.
+r_bridge:
+  rscript_path: null
+
+# Every LLM provider call.
+llm:
+  request_timeout_s: 600    # seconds one API call may take before it counts
+                            # as timed out
+  max_network_retries: 3    # retries, with backoff, after a dropped
+                            # connection or a timeout; waits for rate limits
+                            # (HTTP 429) are handled separately
 
 semantic_scholar:
   base_url: https://api.semanticscholar.org/graph/v1
@@ -160,13 +261,44 @@ semantic_scholar:
   backoff_base_s: 1.0      # base delay for exponential backoff (seconds)
   backoff_factor: 2.0      # multiplier per retry: 1s → 2s → 4s
   backoff_jitter: true     # add ±25% random jitter to prevent thundering herd
+  # Contact email sent with Crossref lookups (Crossref's "polite pool",
+  # which is more reliable than anonymous use). null = send none. The
+  # CROSSREF_MAILTO environment variable overrides this value.
+  crossref_mailto: null
 
 arxiv:
   enabled: true
   max_results_per_query: 10    # papers per arXiv query (3 queries = up to 30 arXiv papers)
 
+# OpenAlex (openalex.org), a free index of scholarly works, searched with
+# the same words as arXiv. Since mid-September 2026 arXiv's front end has
+# refused (HTTP 406) every Python HTTP client on some computers, while
+# curl on the same computer gets through; OpenAlex stands in for it.
+#   when: arxiv_unavailable   only when every arXiv query was refused or
+#                             failed (not when arxiv.enabled is false)
+#   when: always              in every run, as a third source
+# Without a key OpenAlex allows about US$0.10 of requests a day (about
+# 100 searches; a run sends at most 3). An OPENALEX_API_KEY in the
+# environment raises that tenfold. No contact email is sent: OpenAlex
+# retired its mailto "polite pool" in February 2026.
+openalex:
+  enabled: true
+  when: arxiv_unavailable
+  max_results_per_query: 10    # works per OpenAlex query (at most 100)
+  request_delay_s: 1.0         # pause between OpenAlex queries
+  # title_and_abstract: match the words in titles and abstracts only.
+  # all: OpenAlex's search= parameter, which also matches full texts and
+  # returned far more off-topic works in a test. Same price.
+  search_in: title_and_abstract
+
+# Memory of earlier runs. After each run, its question, variables,
+# headline result and open questions are appended to `path` (a local
+# file). At the start of the next run that summary is included in the
+# ProblemFormulator's and Critic's prompts -- and so sent to the AI
+# provider -- to steer away from repeating a study. false = no memory
+# is read or written.
 findings_memory:
-  enabled: true                        # opt-in; false = all prior behavior unchanged
+  enabled: true
   path: findings_memory/memory.yaml
   n_candidate_specs: 3                  # number of candidate specs generated before selecting best
 
@@ -193,8 +325,10 @@ verification:
   # Promoted on measurement, one code at a time. Setting this list at all
   # overrides `blocking` above: ONLY these codes stop a run.
   #
-  # INV_LATEX_NO_PDF -- pdflatex said it produced no PDF, or no PDF sits
-  # beside the log that proves one was attempted. Measured over all 37
+  # INV_LATEX_NO_PDF -- pdflatex said it produced no PDF, no PDF sits
+  # beside the log that proves one was attempted, or pdflatex never ran
+  # (a manuscript with neither paper.log nor paper.pdf; this third case
+  # was added after the measurement below). Measured over all 37
   # archived manuscripts plus the four templates: one firing, on the one
   # paper that provably did not compile. Zero false positives. This is
   # the least arguable finding the battery can make -- the deliverable
@@ -209,15 +343,16 @@ verification:
   blocking_codes: [INV_LATEX_NO_PDF]
 
 review_gate:
-  # Requires LSAR (separate repository) and LSAR_HOME set.
-  # See README -> 'The review gate'. Off by default so a fresh
+  # Optional automated review by LSAR, a separate public repository:
+  # https://github.com/cgpan/LSAR-public. To turn it on you need a local
+  # checkout of LSAR, its Python packages installed into this same
+  # environment (pip install -r requirements-lsar.txt), a DeepSeek key
+  # (LSAR's own config uses DeepSeek), and LSAR_HOME set to the checkout
+  # folder. See README -> 'The review gate'. Off by default so a fresh
   # clone runs without it.
   enabled: false
-  # Arc L (user decision 2026-07-03): calibrated P25 gate; the file is
-  # rewritten by LSAR calibration_analyze.py under the CURRENT provider.
-  # LSAR lives in a separate repository. Set LSAR_HOME (or edit this
-  # path) to enable the calibrated review gate; leave review_gate
-  # disabled to run the pipeline without it.
+  # Calibrated P25 gate: the thresholds file ships with LSAR and was
+  # computed from reviews of published papers under LSAR's pinned models.
   calibration_path: '${LSAR_HOME}/calibration/anchors_edm.yaml'
   median_samples: 3          # borderline-triggered median review (MAD 1.9)
   median_trigger_band: 1.5
@@ -227,8 +362,14 @@ review_gate:
   max_cycles: 2
   pass_threshold: 5.5        # minimum overall score to pass
   dimension_floor: 3          # minimum score for any individual dimension
-  revision_model: "deepseek-v4-pro"   # deepseek-v4-pro | MiniMax-M2.7 | claude-sonnet-4-6
+  # Model that rewrites the paper between gate cycles. The gate first uses
+  # <provider>.models.revision_writer, then the provider's writer model;
+  # this value is only the last resort for the deepseek provider.
+  revision_model: "deepseek-v4-pro"
   revision_max_tokens: 16000
+  # A reply cut off at that limit is asked for once more with this budget
+  # (default: twice revision_max_tokens).
+  # revision_retry_max_tokens: 32000
 
 # V5 Arc T - ideation layer (idea tournament + venue routing).
 # Closes backlog H5: the code defaults now live here; every module reads
@@ -269,6 +410,19 @@ ideation:
 
 writer:
   outline_first: true
+  # conference: ACM sigconf paper (templates/paper_template_v2.tex;
+  #   LaTeX needs the acmart class and bibtex).
+  # journal: APA 7 manuscript, written section by section, ~8,000 words
+  #   (templates/paper_template_journal.tex; needs apa7, biblatex-apa, biber).
+  venue_format: conference
+
+# Journal byline (writer.venue_format: journal). Unset, the byline is
+# EDM-ARS alone. To credit people, list them here and keep EDM-ARS in the
+# list. Conference papers ignore this key: their authors are the block in
+# templates/paper_template_v2.tex (uncomment and fill in the AI and human
+# author blocks there).
+# paper:
+#   authors: ["EDM-ARS", "Your Name"]
 
 paths:
   data_registry: data_registry/

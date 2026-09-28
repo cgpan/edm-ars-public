@@ -119,8 +119,10 @@ estimators.
 }
 ```
 
-`results.best_model` is the family with the best primary metric
-(highest AUC / lowest RMSE) on the held-out test set. The
+`results.best_model` is the individual family (StackingEnsemble
+excluded) with the best primary metric (highest AUC / lowest RMSE) on
+the held-out test set; the orchestrator records the best of all models,
+ensemble included, as `best_overall_model`. The
 `prediction-quality-gate` skill applies a minimum-performance floor
 before SHAP; the `shap_model` recorded in `results.json` may differ
 from `best_model` if the best model failed the gate or if MLP timed

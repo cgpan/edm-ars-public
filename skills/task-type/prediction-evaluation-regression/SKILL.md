@@ -55,13 +55,17 @@ execution. Save at 150 dpi minimum.
 
 ## Best-model selection
 
-`results.best_model` = the family with the **lowest** test-set RMSE.
-Ties broken by simpler model first (LR > ElasticNet > RF > XGBoost
-> MLP).
+`results.best_model` = the **individual** model family with the
+**lowest** test-set RMSE. StackingEnsemble is never `best_model`: every
+interpretability output comes from the best individual model (SPEC
+§4.3; see `shap-explainer-selection`). Ties broken by simpler model
+first (LR > ElasticNet > RF > XGBoost > MLP).
 
-StackingEnsemble appears in `model_comparison.csv` but is excluded
-from the SHAP/interpretability "best individual model" — see
-`shap-explainer-selection`.
+StackingEnsemble still appears in `all_models` and
+`model_comparison.csv`. After the analysis the orchestrator adds
+`best_model_scope` (`"individual"`), `best_overall_model` and
+`best_overall_metric_value` (ensemble included) to results.json from
+`all_models`; do not write those three fields yourself.
 
 ## What goes in `results.json`
 

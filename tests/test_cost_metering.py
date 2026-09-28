@@ -30,6 +30,9 @@ from src.cost import (
     write_summary,
 )
 
+# Synthetic rates keyed by arbitrary model ids. "deepseek-v4-flash" is
+# the retired flash id, used here only as a name for a cheaper tier;
+# the shipped config prices and routes to "deepseek-flash".
 PRICING = {
     "deepseek-v4-pro": {"input": 0.28, "cached_input": 0.028, "output": 0.42},
     "deepseek-v4-flash": {"input": 0.07, "cached_input": 0.007, "output": 0.28},
@@ -299,3 +302,250 @@ class TestRedundantRecord:
 
         (tmp_path / "checkpoint.json").write_text("{ broken", encoding="utf-8")
         assert load_usage_from_checkpoint(str(tmp_path)) == []
+
+
+class TestUnpricedAndUnverifiedRates:
+    """E5: an unpriced entry in the breakdowns read as $0.00, and a rate
+    nobody had checked read exactly like a measured one."""
+
+    def test_unpriced_breakdown_entries_are_none_not_zero(self) -> None:
+        us = [
+            TokenUsage("writer", "deepseek-v4-pro", "d", 1_000, 1_000),
+            TokenUsage("critic", "claude-opus-4-6", "a", 1_000, 1_000),
+        ]
+        s = summarize(us, PRICING)
+        assert s.by_model["claude-opus-4-6"]["cost_usd"] is None
+        assert s.by_model["claude-opus-4-6"]["unpriced_calls"] == 1
+        assert s.by_agent["critic"]["cost_usd"] is None
+        assert s.by_agent["writer"]["cost_usd"] == cost_usd(us[0], PRICING)
+        assert s.cost_usd == cost_usd(us[0], PRICING)
+        assert s.unpriced_calls == 1
+        assert s.cost_status == "partial"
+
+    def test_mixed_entry_keeps_its_priced_part_and_counts_the_gap(self) -> None:
+        us = [
+            TokenUsage("writer", "deepseek-v4-pro", "d", 1_000, 0),
+            TokenUsage("writer", "mystery", "d", 1_000, 0),
+        ]
+        entry = summarize(us, PRICING).by_agent["writer"]
+        assert entry["cost_usd"] == cost_usd(us[0], PRICING)
+        assert entry["unpriced_calls"] == 1
+
+    def test_fully_verified_run_is_measured(self) -> None:
+        s = summarize([TokenUsage("w", "deepseek-v4-pro", "d", 10, 10)], PRICING)
+        assert s.cost_status == "measured"
+        assert s.unverified_rate_models == []
+
+    def test_unverified_rate_makes_the_cost_an_estimate(self, tmp_path: Path) -> None:
+        pricing = {
+            **PRICING,
+            "deepseek-flash": {"input": 0.07, "cached_input": 0.007,
+                               "output": 0.28, "unverified": True},
+        }
+        record_usage(str(tmp_path), TokenUsage("outline_agent", "deepseek-flash", "d", 1_000, 100))
+        record_usage(str(tmp_path), TokenUsage("writer", "deepseek-v4-pro", "d", 1_000, 100))
+        payload = write_summary(str(tmp_path), {"pricing": {"per_million_tokens": pricing}})
+        assert payload["cost_usd"] is not None
+        assert payload["cost_status"] == "estimated"
+        assert payload["unverified_rate_models"] == ["deepseek-flash"]
+        assert "ESTIMATE" in payload["note"]
+
+    def test_verified_false_is_the_same_flag(self) -> None:
+        from src.cost import rate_is_unverified
+
+        assert rate_is_unverified({"input": 1, "verified": False})
+        assert rate_is_unverified({"input": 1, "unverified": True})
+        assert not rate_is_unverified({"input": 1})
+        assert not rate_is_unverified(None)
+
+    def test_flag_keys_do_not_change_the_price(self) -> None:
+        flagged = {"m": {"input": 1.0, "output": 2.0, "unverified": True}}
+        plain = {"m": {"input": 1.0, "output": 2.0}}
+        u = TokenUsage("a", "m", "d", 1_000_000, 1_000_000)
+        assert cost_usd(u, flagged) == cost_usd(u, plain) == 3.0
+
+
+class TestReasoningTokens:
+    """DeepSeek documents ``completion_tokens_details.reasoning_tokens`` as a
+    breakdown OF ``completion_tokens`` (OpenAI and Anthropic count thinking
+    the same way), and bills all of ``completion_tokens`` as output."""
+
+    def test_deepseek_shape_keeps_reasoning_inside_completion(self) -> None:
+        r = SimpleNamespace(usage=SimpleNamespace(
+            prompt_tokens=5000, completion_tokens=1200,
+            prompt_cache_hit_tokens=4000, prompt_cache_miss_tokens=1000,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=900)))
+        u = extract_usage(r, "analyst", "deepseek-v4-pro", "deepseek")
+        assert u.completion_tokens == 1200
+        assert u.reasoning_tokens == 900
+
+    def test_reasoning_is_not_charged_twice(self) -> None:
+        plain = TokenUsage("a", "deepseek-v4-pro", "d", 1_000, 1_000_000)
+        thinking = TokenUsage("a", "deepseek-v4-pro", "d", 1_000, 1_000_000,
+                              reasoning_tokens=800_000)
+        assert cost_usd(thinking, PRICING) == cost_usd(plain, PRICING)
+
+
+#: A time-of-day entry shaped like the shipped DeepSeek ones, with round
+#: numbers so the expected costs are obvious.
+TOD = {
+    "tod-model": {
+        "input": 2.0, "cached_input": 0.2, "output": 4.0,
+        "off_peak": {"input": 1.0, "cached_input": 0.1, "output": 2.0},
+        "peak_windows_utc": {
+            "days": ["mon", "tue", "wed", "thu", "fri"],
+            "hours": ["01:00-04:00", "06:00-10:00"],
+        },
+    },
+}
+PEAK = 2.0 + 4.0      # 1M uncached input + 1M output at the peak rate
+OFF_PEAK = 1.0 + 2.0
+
+
+def _tod_call(timestamp: object) -> TokenUsage:
+    return TokenUsage("writer", "tod-model", "deepseek",
+                      prompt_tokens=1_000_000, completion_tokens=1_000_000,
+                      timestamp=timestamp)  # type: ignore[arg-type]
+
+
+class TestTimeOfDayRates:
+    """DeepSeek charges twice as much from 01:00 to 04:00 and from 06:00 to
+    10:00 UTC on weekdays as at any other time. With one flat rate, a
+    study run on a Saturday and one run on a Monday morning read the same,
+    and the rate that had been configured matched neither."""
+
+    def test_weekday_peak_hour_is_charged_the_peak_rate(self) -> None:
+        # 2026-09-28 is a Monday.
+        assert cost_usd(_tod_call("2026-09-28T07:30:00"), TOD) == PEAK
+
+    def test_weekday_outside_the_windows_is_off_peak(self) -> None:
+        assert cost_usd(_tod_call("2026-09-28T12:00:00"), TOD) == OFF_PEAK
+        assert cost_usd(_tod_call("2026-09-28T05:00:00"), TOD) == OFF_PEAK
+
+    def test_window_start_is_inside_and_end_is_outside(self) -> None:
+        assert cost_usd(_tod_call("2026-09-28T01:00:00"), TOD) == PEAK
+        assert cost_usd(_tod_call("2026-09-28T03:59:59"), TOD) == PEAK
+        assert cost_usd(_tod_call("2026-09-28T04:00:00"), TOD) == OFF_PEAK
+
+    def test_weekend_is_off_peak_all_day(self) -> None:
+        """The macOS test study ran on Saturday 2026-09-26, 13:41-13:55 UTC."""
+        for ts in ("2026-09-26T07:30:00", "2026-09-26T13:50:00",
+                   "2026-09-27T02:00:00"):
+            assert cost_usd(_tod_call(ts), TOD) == OFF_PEAK, ts
+
+    def test_aware_timestamps_are_converted_to_utc(self) -> None:
+        # 03:30 at UTC-4 is 07:30 UTC, inside the Monday window.
+        assert cost_usd(_tod_call("2026-09-28T03:30:00-04:00"), TOD) == PEAK
+        # 07:30 at UTC+9 on Monday is 22:30 UTC on Sunday.
+        assert cost_usd(_tod_call("2026-09-28T07:30:00+09:00"), TOD) == OFF_PEAK
+        assert cost_usd(_tod_call("2026-09-28T07:30:00Z"), TOD) == PEAK
+
+    def test_unknown_time_is_charged_the_peak_rate(self) -> None:
+        """Never price a call below what it can have cost."""
+        for ts in (None, "", "t0", "not a date"):
+            assert cost_usd(_tod_call(ts), TOD) == PEAK, ts
+
+    def test_unreadable_schedule_is_charged_the_peak_rate(self) -> None:
+        for schedule in (None, "weekdays", {"days": ["mon"], "hours": ["7-9"]},
+                         {"days": ["someday"], "hours": ["01:00-04:00"]},
+                         {"days": [], "hours": ["01:00-04:00"]}):
+            rates = {"tod-model": {**TOD["tod-model"], "peak_windows_utc": schedule}}
+            assert cost_usd(_tod_call("2026-09-26T13:50:00"), rates) == PEAK, schedule
+
+    def test_flat_entries_ignore_the_time(self) -> None:
+        u = TokenUsage("a", "deepseek-v4-pro", "d", 1_000_000, 0,
+                       timestamp="2026-09-28T07:30:00")
+        assert cost_usd(u, PRICING) == 0.28
+
+    def test_summary_counts_the_periods_and_stays_measured(self) -> None:
+        from src.cost import rate_period
+
+        calls = [_tod_call("2026-09-28T07:30:00"), _tod_call("2026-09-26T13:50:00"),
+                 _tod_call("2026-09-28T12:00:00")]
+        assert [rate_period(u, TOD["tod-model"]) for u in calls] == [
+            "peak", "off_peak", "off_peak"]
+        s = summarize(calls, TOD)
+        assert (s.peak_calls, s.off_peak_calls, s.untimed_calls) == (1, 2, 0)
+        assert s.cost_usd == PEAK + 2 * OFF_PEAK
+        assert s.cost_status == "measured"
+
+    def test_a_call_of_unknown_time_makes_the_run_an_estimate(
+        self, tmp_path: Path
+    ) -> None:
+        record_usage(str(tmp_path), _tod_call("2026-09-26T13:50:00"))
+        record_usage(str(tmp_path), _tod_call(None))
+        payload = write_summary(str(tmp_path),
+                                {"pricing": {"per_million_tokens": TOD}})
+        assert payload["untimed_calls"] == 1
+        assert payload["off_peak_calls"] == 1
+        assert payload["cost_status"] == "estimated"
+        assert payload["cost_usd"] == OFF_PEAK + PEAK
+        assert "ESTIMATE" in payload["note"] and "peak rate" in payload["note"]
+
+    def test_note_says_how_many_calls_were_peak(self, tmp_path: Path) -> None:
+        record_usage(str(tmp_path), _tod_call("2026-09-28T07:30:00"))
+        payload = write_summary(str(tmp_path),
+                                {"pricing": {"per_million_tokens": TOD}})
+        assert payload["cost_status"] == "measured"
+        assert "1 call(s) fell in its peak window" in payload["note"]
+        assert "public holiday" in payload["note"]
+
+    def test_checkpoint_rows_keep_their_time(self, tmp_path: Path) -> None:
+        """The recovery path must price at the hour too, not fall to peak."""
+        from src.cost import load_usage_from_checkpoint
+
+        (tmp_path / "checkpoint.json").write_text(json.dumps({"log": [
+            {"agent": "writer", "model": "tod-model", "prompt_tokens": 1_000_000,
+             "completion_tokens": 1_000_000, "cached_prompt_tokens": 0,
+             "timestamp": "2026-09-26T13:50:00"}]}), encoding="utf-8")
+        rows = load_usage_from_checkpoint(str(tmp_path))
+        assert summarize(rows, TOD).cost_usd == OFF_PEAK
+
+
+class TestShippedDeepSeekRates:
+    """The rates config.yaml ships, checked against how DeepSeek states them
+    (https://api-docs.deepseek.com/quick_start/pricing, 2026-09-26)."""
+
+    @staticmethod
+    def _pricing() -> dict:
+        import yaml
+
+        cfg = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "config.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        return load_pricing(cfg)
+
+    def test_off_peak_is_half_of_peak(self) -> None:
+        for model, rates in self._pricing().items():
+            if "off_peak" not in rates:
+                continue
+            for key in ("input", "cached_input", "output"):
+                assert rates["off_peak"][key] * 2 == rates[key], (model, key)
+
+    def test_every_time_of_day_entry_has_a_readable_schedule(self) -> None:
+        """An unreadable schedule would charge every call the peak rate."""
+        from src.cost import rate_period
+
+        for model, rates in self._pricing().items():
+            if "off_peak" not in rates:
+                continue
+            probe = TokenUsage("a", model, "deepseek", 1, 1,
+                               timestamp="2026-09-26T13:50:00")
+            assert rate_period(probe, rates) == "off_peak", model
+
+    def test_the_macos_study_is_priced_off_peak(self) -> None:
+        """The 2026-09-26 macOS study: 232,105 prompt tokens (114,560 cached)
+        and 42,175 completion tokens on deepseek-v4-pro, on a Saturday.
+        The old flat rates said US$0.0538; the account balance fell by
+        about US$0.20, which also paid for one call cut off by a stop."""
+        u = TokenUsage("x", "deepseek-v4-pro", "deepseek", 232_105, 42_175,
+                       114_560, timestamp="2026-09-26T13:50:00")
+        pricing = self._pricing()
+        rates = pricing["deepseek-v4-pro"]["off_peak"]
+        expected = ((232_105 - 114_560) * rates["input"]
+                    + 114_560 * rates["cached_input"]
+                    + 42_175 * rates["output"]) / 1_000_000
+        assert cost_usd(u, pricing) == expected
+        assert 0.10 < expected < 0.20

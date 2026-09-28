@@ -7,14 +7,18 @@ import re
 from datetime import datetime
 from typing import Any
 
-from src.agents.base import BaseAgent
+from src.agents.base import BaseAgent, literature_for_prompt
 from src.citations import (
     build_bibtex,
     format_citation_key_block,
     reconcile_citations,
     venue_citation_target,
 )
-from src.latex_quality import LatexQualityReport, check_latex_quality
+from src.latex_quality import (
+    LatexQualityReport,
+    check_latex_quality,
+    repair_table_notes,
+)
 from src.manuscript_linter import (
     UNVERIFIED_BLOCK,
     UNVERIFIED_MARKER,
@@ -137,6 +141,59 @@ def _extract_braced_arg(text: str, command: str) -> str:
             if depth == 0:
                 return text[start:i].strip()
     return ""
+
+
+#: Longest running-head title per template. acmart prints the short title
+#: in the page header opposite the conference line; APA 7 caps a running
+#: head at 50 characters.
+SHORT_TITLE_LIMIT = 60
+SHORT_TITLE_LIMIT_APA = 50
+
+#: Formatting commands whose argument is the text itself.
+_TEXT_COMMANDS = re.compile(r"\\(?:textbf|textit|emph|textsc|texttt|textrm|textsf)\{([^{}]*)\}")
+#: Words a truncated title must not end on.
+_TRAILING_WORDS = frozenset({
+    "a", "an", "and", "as", "at", "beyond", "by", "for", "from", "in", "into",
+    "of", "on", "or", "the", "to", "via", "with",
+})
+
+
+def short_title(title: str, limit: int = SHORT_TITLE_LIMIT) -> str:
+    """A running-head title of at most *limit* characters.
+
+    Round 3 on the owner's Mac: the 154-character title ("Do Ninth-Grade
+    Non-Cognitive Factors ... A School-Aware Machine Learning Analysis of
+    HSLS:09") ran across the whole page header and printed over
+    "Anonymous Conference": the v2 template gave acmart no short title,
+    so acmart used the full one.
+
+    The whole title when it fits; else its first clause (up to a ": " or
+    "? ") when that fits; else the title cut at a word boundary, without a
+    dangling "of" or "and", and ended with "...".
+    """
+    text = re.sub(r"\\thanks\{[^{}]*\}", "", str(title or ""))
+    text = text.replace("\\\\", " ")
+    while _TEXT_COMMANDS.search(text):
+        text = _TEXT_COMMANDS.sub(r"\1", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    clause = re.match(r"(.+?[?:])\s", text)
+    if clause:
+        first = clause.group(1).rstrip(":").strip()
+        if 15 <= len(first) <= limit:
+            return first
+    words: list[str] = []
+    for word in text.split(" "):
+        if len(" ".join(words + [word])) > limit - 3:
+            break
+        words.append(word)
+    while len(words) > 1 and words[-1].lower().strip(",;:") in _TRAILING_WORDS:
+        words.pop()
+    cut = " ".join(words).rstrip(",;:-") or text[: limit - 3]
+    if cut.count("{") != cut.count("}"):
+        cut = cut.replace("{", "").replace("}", "")
+    return cut + "..."
 
 
 # Sentinel used when template cannot be loaded at all
@@ -386,6 +443,24 @@ class Writer(BaseAgent):
                     "message": (
                         "Injected missing \\bibliographystyle/\\bibliography "
                         "before \\end{document} (F-A5 deterministic guard)."
+                    ),
+                }
+            )
+
+        # A tablenotes block inside a \resizebox with no threeparttable
+        # took the round-3 subgroup table and its label with it (18 LaTeX
+        # errors, "Table ??" in the text). Deterministic; see
+        # src.latex_quality.repair_table_notes.
+        paper_tex, n_tables = repair_table_notes(paper_tex)
+        if n_tables:
+            self.ctx.log.append(
+                {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "agent": self.agent_name,
+                    "message": (
+                        f"Put the table notes of {n_tables} table(s) inside a "
+                        "threeparttable (they were outside one, or inside a "
+                        "\\resizebox, which LaTeX cannot typeset)."
                     ),
                 }
             )
@@ -698,6 +773,36 @@ class Writer(BaseAgent):
         name = getattr(self.ctx, "dataset_name", "") or ""
         return self.DATASET_CITATIONS.get(name, name or "the study")
 
+    @staticmethod
+    def _short_title(llm_latex: str, title: str, template: str) -> str:
+        """The running-head title for the template's SHORTTITLE slot.
+
+        The Writer's own -- ``\\renewcommand{\\shorttitle}{...}`` (acmart),
+        ``\\shorttitle{...}`` (apa7) or ``\\title[short]{...}`` -- when it
+        gave one that fits; otherwise :func:`short_title` of the full
+        title. APA 7's running head allows 50 characters, acmart's header
+        about 60 beside the conference line.
+        """
+        limit = (
+            SHORT_TITLE_LIMIT_APA
+            if "\\shorttitle{%%PLACEHOLDER:SHORTTITLE%%}" in template
+            else SHORT_TITLE_LIMIT
+        )
+        given = ""
+        for pattern in (
+            r"\\renewcommand\s*\{?\\shorttitle\}?\s*\{([^{}]*)\}",
+            r"\\shorttitle\s*\{([^{}]*)\}",
+            r"\\title\s*\[([^\]]*)\]",
+        ):
+            found = re.search(pattern, llm_latex)
+            if found:
+                given = found.group(1)
+                break
+        given = re.sub(r"\s+", " ", given).strip()
+        if given and "PLACEHOLDER" not in given and len(given) <= limit:
+            return given
+        return short_title(title, limit)
+
     def _reassemble_from_template(self, llm_latex: str, template: str) -> str:
         """Extract content from the LLM's LaTeX and insert it into the clean template.
 
@@ -789,8 +894,9 @@ class Writer(BaseAgent):
         # --- Substitute into clean template ---
         result = template
         result = result.replace("%%PLACEHOLDER:TITLE%%", title)
-        short = title if len(title) <= 50 else title[:47].rstrip() + "..."
-        result = result.replace("%%PLACEHOLDER:SHORTTITLE%%", short)
+        result = result.replace(
+            "%%PLACEHOLDER:SHORTTITLE%%", self._short_title(llm_latex, title, template)
+        )
         result = result.replace("%%PLACEHOLDER:ABSTRACT%%", abstract)
         result = result.replace("%%PLACEHOLDER:KEYWORDS%%", keywords)
         result = result.replace("%%PLACEHOLDER:PAPER_BODY%%", body)
@@ -1132,7 +1238,7 @@ class Writer(BaseAgent):
             "",
             "## literature_context.json",
             "```json",
-            json.dumps(literature_context or {}, indent=2),
+            json.dumps(literature_for_prompt(literature_context or {}), indent=2),
             "```",
             "",
             # Arc P3: enumerate the legal citation keys explicitly. The
@@ -1206,7 +1312,7 @@ class Writer(BaseAgent):
             "",
             "## literature_context.json",
             "```json",
-            json.dumps(literature_context or {}, indent=2),
+            json.dumps(literature_for_prompt(literature_context or {}), indent=2),
             "```",
             "",
             # Arc P3: enumerate the legal citation keys explicitly. The

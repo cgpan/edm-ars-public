@@ -214,3 +214,165 @@ def check_latex_quality(latex: str) -> LatexQualityReport:
             )
 
     return report
+
+
+# ---------------------------------------------------------------------------
+# Deterministic repair: table notes outside a threeparttable
+# ---------------------------------------------------------------------------
+#
+# Round 3 on the owner's Mac: paper.log recorded 18 errors, from "You can't
+# use \prevdepth in restricted horizontal mode" to "\begin{table} on input
+# line 280 ended by \end{tablenotes}", and the subgroup table never
+# rendered -- its label went with it, so the text read "Table ?? reports
+# AUC separately by sex". Compiling the candidate shapes one by one
+# reproduces that error list exactly for a tablenotes block INSIDE a
+# \resizebox argument with no threeparttable around it: \resizebox sets its
+# argument in restricted horizontal mode, and a tablenotes list cannot live
+# there. The table skill taught "wrap the entire threeparttable block
+# inside \resizebox"; drop the threeparttable from that and this is what
+# is left.
+#
+# tablenotes belongs in a threeparttable, after the (possibly resized)
+# tabular and outside any box. That is decidable from the source, so it is
+# repaired here rather than asked of the model.
+
+_TABLE_FLOAT = re.compile(r"(\\begin\{(table\*?)\})(.*?)(\\end\{\2\})", re.DOTALL)
+_TABLENOTES = re.compile(r"\\begin\{tablenotes\}.*?\\end\{tablenotes\}", re.DOTALL)
+#: Box commands that set their last mandatory argument in restricted
+#: horizontal mode, and how many mandatory arguments each takes.
+_BOX_ARITY = {"resizebox": 3, "scalebox": 2, "adjustbox": 2}
+_BOX_START = re.compile(r"\\(resizebox|scalebox|adjustbox)\*?(?![A-Za-z])")
+_TABLE_START = re.compile(
+    r"\\(?:resizebox|scalebox|adjustbox)\*?(?![A-Za-z])|\\begin\{tabular[x*]?\}"
+)
+
+
+def _group_end(text: str, i: int, open_ch: str, close_ch: str) -> int | None:
+    """Index just past the group that opens at ``text[i]``, or None."""
+    depth = 0
+    j = i
+    while j < len(text):
+        ch = text[j]
+        if ch == "\\":
+            j += 2
+            continue
+        if ch == "%":  # a comment runs to the end of its line
+            nl = text.find("\n", j)
+            j = len(text) if nl < 0 else nl + 1
+            continue
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return None
+
+
+def _box_argument(text: str, match: re.Match) -> tuple[int, int, int] | None:
+    """``(content_start, content_end, box_end)`` of a box command's last
+    mandatory argument, or None when the source does not parse."""
+    wanted = _BOX_ARITY[match.group(1)]
+    i = match.end()
+    seen = 0
+    content = None
+    while seen < wanted:
+        while i < len(text) and text[i] in " \t\r\n":
+            i += 1
+        if i >= len(text):
+            return None
+        if text[i] == "[":
+            end = _group_end(text, i, "[", "]")
+            if end is None:
+                return None
+            i = end
+            continue
+        if text[i] != "{":
+            return None
+        end = _group_end(text, i, "{", "}")
+        if end is None:
+            return None
+        seen += 1
+        content = (i + 1, end - 1, end)
+        i = end
+    return content
+
+
+def _move_notes_out_of_boxes(body: str) -> tuple[str, bool]:
+    """Take tablenotes out of a box argument that holds no threeparttable
+    of its own, and put them right after the box."""
+    changed = False
+    pos = 0
+    while True:
+        m = _BOX_START.search(body, pos)
+        if m is None:
+            return body, changed
+        arg = _box_argument(body, m)
+        if arg is None:
+            pos = m.end()
+            continue
+        start, end, box_end = arg
+        content = body[start:end]
+        notes = [n.group(0) for n in _TABLENOTES.finditer(content)]
+        if not notes or "\\begin{threeparttable}" in content:
+            pos = box_end
+            continue
+        inner = _TABLENOTES.sub("", content).rstrip()
+        if not inner.endswith("%"):
+            inner += "%"
+        body = (
+            body[:start] + inner + "\n" + body[end:box_end]
+            + "\n" + "\n".join(notes) + body[box_end:]
+        )
+        changed = True
+        pos = start
+
+
+def repair_table_notes(latex: str) -> tuple[str, int]:
+    """Put every table's ``tablenotes`` inside a ``threeparttable``.
+
+    For each table float that uses ``tablenotes``:
+
+    * notes inside a ``\\resizebox`` / ``\\scalebox`` / ``\\adjustbox``
+      argument that holds no threeparttable of its own move to just after
+      the box;
+    * a float with no ``threeparttable`` gets one around its table, from
+      the first box or ``tabular`` to the last ``tablenotes``, so the
+      caption and label stay where the Writer put them.
+
+    A table already in a working shape -- including a whole threeparttable
+    inside a ``\\resizebox`` -- is left as it is. Returns the text and the
+    number of tables changed.
+    """
+    if "\\begin{tablenotes}" not in latex:
+        return latex, 0
+    repaired = 0
+
+    def fix(m: re.Match) -> str:
+        nonlocal repaired
+        begin, _, body, end = m.groups()
+        if "\\begin{tablenotes}" not in body:
+            return m.group(0)
+        new_body, moved = _move_notes_out_of_boxes(body)
+        wrapped = False
+        if "\\begin{threeparttable}" not in new_body:
+            first = _TABLE_START.search(new_body)
+            last = None
+            for last in _TABLENOTES.finditer(new_body):
+                pass
+            if first is not None and last is not None and first.start() < last.start():
+                new_body = (
+                    new_body[: first.start()]
+                    + "\\begin{threeparttable}\n"
+                    + new_body[first.start(): last.end()]
+                    + "\n\\end{threeparttable}"
+                    + new_body[last.end():]
+                )
+                wrapped = True
+        if moved or wrapped:
+            repaired += 1
+            return begin + new_body + end
+        return m.group(0)
+
+    return _TABLE_FLOAT.sub(fix, latex), repaired

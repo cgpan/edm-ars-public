@@ -14,6 +14,8 @@ import requests
 import yaml
 
 from src.agents.base import BaseAgent, parse_llm_json
+from src.citations import normalize_doi
+from src.errors import ProviderError
 
 # Backward-compatible re-export of HSLS:09 temporal ordering
 from src.dataset_adapter import HSLS09_TEMPORAL_ORDER as TEMPORAL_ORDER  # noqa: F401
@@ -22,6 +24,33 @@ from src.dataset_adapter import HSLS09_TEMPORAL_ORDER as TEMPORAL_ORDER  # noqa:
 # ---------------------------------------------------------------------------
 # Registry helpers
 # ---------------------------------------------------------------------------
+
+
+#: How the generation-mode task names each dataset. HSLS:09 keeps the
+#: exact wording every earlier prompt used.
+_DATASET_LABELS: dict[str, str] = {
+    "hsls09_public": "HSLS:09",
+    "els_2002": "ELS:2002",
+    "assistments_0910": "ASSISTments 2009-10",
+    "did_els_hsls_panel": "ELS:2002 x HSLS:09 cross-cohort panel",
+}
+
+
+def _dataset_label(registry: dict | None, dataset_name: str | None) -> str:
+    """Short name of the run's dataset for the PF task line (C1).
+
+    The generation branch always asked for "a prediction research question
+    using the HSLS:09 dataset", whatever dataset the run had loaded.
+    """
+    reg = registry if isinstance(registry, dict) else {}
+    fallback = dataset_name if isinstance(dataset_name, str) else ""
+    key = str(reg.get("name") or fallback or "")
+    return (
+        _DATASET_LABELS.get(key)
+        or str(reg.get("full_name") or "").strip()
+        or key
+        or "HSLS:09"
+    )
 
 
 def _build_registry_var_map(registry: dict) -> dict[str, dict]:
@@ -69,6 +98,33 @@ def _spec_one_liner(spec: dict) -> str:
 _JACCARD_THRESHOLD = 0.80
 _CROSSREF_BASE_URL = "https://api.crossref.org/works"
 _CROSSREF_TIMEOUT_S = 5
+_CROSSREF_PROJECT_URL = "https://github.com/cgpan/edm-ars-public"
+
+
+def _crossref_mailto(config: dict | None) -> str | None:
+    """Contact address for Crossref's polite pool, if the operator gave one.
+
+    ``CROSSREF_MAILTO`` in the environment wins over
+    ``semantic_scholar.crossref_mailto`` in config.yaml. Crossref asks
+    clients to identify themselves with a mailto; requests that do are
+    routed to a more reliable pool. None when neither is set -- the
+    project never invents an address.
+    """
+    env_value = (os.environ.get("CROSSREF_MAILTO") or "").strip()
+    if env_value:
+        return env_value
+    s2_cfg = (config or {}).get("semantic_scholar") or {}
+    value = s2_cfg.get("crossref_mailto") if isinstance(s2_cfg, dict) else None
+    value = str(value).strip() if value else ""
+    return value or None
+
+
+def _crossref_request_args(mailto: str | None) -> tuple[dict[str, str], dict[str, str]]:
+    """(extra query params, headers) for a Crossref request."""
+    if mailto:
+        agent = f"EDM-ARS (+{_CROSSREF_PROJECT_URL}; mailto:{mailto})"
+        return {"mailto": mailto}, {"User-Agent": agent}
+    return {}, {"User-Agent": f"EDM-ARS (+{_CROSSREF_PROJECT_URL})"}
 
 
 def _tokenize_title(title: str) -> set[str]:
@@ -114,15 +170,136 @@ def _retrieval_rank_or_last(paper: dict) -> int:
         return _RANK_MISSING
 
 
+# ---------------------------------------------------------------------------
+# OpenAlex records
+# ---------------------------------------------------------------------------
+
+#: A cap on a rebuilt abstract. A few OpenAlex "abstracts" are whole
+#: sections of a paper, and every record goes into the formulator's prompt.
+_OPENALEX_ABSTRACT_MAX_CHARS = 3000
+_HTML_TAG = re.compile(r"<[^>]+>")
+_ARXIV_DOI = re.compile(r"^10\.48550/arxiv\.(.+)$", re.IGNORECASE)
+_ARXIV_ABS_URL = re.compile(r"arxiv\.org/(?:abs|pdf)/([^?#\s]+?)(?:\.pdf)?/?$", re.IGNORECASE)
+
+
+def _openalex_abstract(inverted: Any) -> str:
+    """The abstract text rebuilt from OpenAlex's ``abstract_inverted_index``.
+
+    OpenAlex ships each abstract as ``{word: [positions]}``, not as text.
+    """
+    if not isinstance(inverted, dict) or not inverted:
+        return ""
+    slots: dict[int, str] = {}
+    for word, positions in inverted.items():
+        if not isinstance(positions, list):
+            continue
+        for pos in positions:
+            if isinstance(pos, int) and pos >= 0:
+                slots[pos] = str(word)
+    text = " ".join(slots[i] for i in sorted(slots))
+    return text[:_OPENALEX_ABSTRACT_MAX_CHARS]
+
+
+def _openalex_publication_types(item: dict, source: dict) -> list[str]:
+    """OpenAlex's work and source types in Semantic Scholar's words.
+
+    ``citations.classify_entry`` picks @article or @inproceedings from S2's
+    ``publicationTypes``. An OpenAlex "article" is a journal article only
+    when its source is a journal; anything unclear stays unlabelled, so the
+    entry falls back to the venue wording and the DOI instead of a guess.
+    """
+    work_type = str(item.get("type") or "").strip().lower()
+    source_type = str(source.get("type") or "").strip().lower()
+    if work_type in ("conference-paper", "proceedings-article") or source_type == "conference":
+        return ["Conference"]
+    if work_type == "review":
+        return ["Review"]
+    if work_type == "article" and source_type == "journal":
+        return ["JournalArticle"]
+    if work_type == "book":
+        return ["Book"]
+    if work_type == "book-chapter":
+        return ["BookSection"]
+    return []
+
+
+def _openalex_arxiv_id(doi: str, landing_page_url: str) -> str:
+    """The arXiv identifier of a work whose main copy is an arXiv preprint."""
+    match = _ARXIV_DOI.match(doi or "")
+    if match:
+        return match.group(1)
+    match = _ARXIV_ABS_URL.search(landing_page_url or "")
+    return match.group(1) if match else ""
+
+
+def _openalex_paper(item: Any, query: str, rank: int) -> dict | None:
+    """One OpenAlex work in the literature pool's record shape.
+
+    The shape is the Semantic Scholar record's (see ``_run_single_s2_query``)
+    so the prompt, the citation filter and the BibTeX builder treat both
+    alike. ``paperId`` is ``openalex_W…``: stable, and already a valid
+    BibTeX key. None for a work without an id or a title.
+    """
+    if not isinstance(item, dict):
+        return None
+    work_id = str(item.get("id") or "").rstrip("/").rsplit("/", 1)[-1]
+    title = " ".join(_HTML_TAG.sub("", str(item.get("display_name") or item.get("title") or "")).split())
+    if not re.fullmatch(r"W\d+", work_id) or not title:
+        return None
+    location = item.get("primary_location")
+    location = location if isinstance(location, dict) else {}
+    source = location.get("source")
+    source = source if isinstance(source, dict) else {}
+    doi = normalize_doi(item.get("doi"))
+    landing = str(location.get("landing_page_url") or "")
+    open_access = item.get("open_access")
+    authors = [
+        str((a.get("author") or {}).get("display_name") or "")
+        for a in (item.get("authorships") or [])
+        if isinstance(a, dict) and isinstance(a.get("author"), dict)
+    ]
+    year = item.get("publication_year")
+    cited = item.get("cited_by_count")
+    record: dict[str, Any] = {
+        "paperId": f"openalex_{work_id}",
+        "title": title,
+        "authors": [a for a in authors if a],
+        "year": year if isinstance(year, int) else None,
+        "abstract": _openalex_abstract(item.get("abstract_inverted_index")),
+        "venue": str(source.get("display_name") or location.get("raw_source_name") or ""),
+        "doi": doi,
+        "citationCount": cited if isinstance(cited, int) else None,
+        # OpenAlex has no influential-citation or reference counts on a
+        # search result; None says "no data", as for S2 records.
+        "influentialCitationCount": None,
+        "referenceCount": None,
+        "publicationDate": str(item.get("publication_date") or ""),
+        "fieldsOfStudy": [],
+        "publicationTypes": _openalex_publication_types(item, source),
+        "isOpenAccess": (open_access or {}).get("is_oa") if isinstance(open_access, dict) else None,
+        "url": landing if landing.startswith("http") else "",
+        "matched_query": query,
+        "retrieval_rank": rank,
+        "source": "openalex",
+    }
+    arxiv_id = _openalex_arxiv_id(doi, landing)
+    if arxiv_id:
+        record["arxiv_id"] = arxiv_id
+    return record
+
+
 def _verify_paper_three_layers(
     paper: dict,
     real_ids: set[str],
     real_title_tokens: list[tuple[set[str], dict]],
+    crossref_mailto: str | None = None,
 ) -> str:
     """Return 'VERIFIED', 'SUSPICIOUS', or 'HALLUCINATED' for a single paper.
 
     Layer 1: exact S2 paper ID match.
-    Layer 2: CrossRef title search with Jaccard similarity ≥ 0.80.
+    Layer 2: CrossRef title search with Jaccard similarity ≥ 0.80. The
+        request identifies the client (User-Agent) and, when configured,
+        carries ``mailto`` for Crossref's polite pool (E9).
     Layer 3: Jaccard against actual S2 result titles ≥ 0.80.
     """
     # Layer 1: exact S2 ID
@@ -135,9 +312,11 @@ def _verify_paper_three_layers(
 
     # Layer 2: CrossRef
     try:
+        extra_params, headers = _crossref_request_args(crossref_mailto)
         resp = requests.get(
             _CROSSREF_BASE_URL,
-            params={"query.title": title, "rows": 1, "select": "title"},
+            params={"query.title": title, "rows": 1, "select": "title", **extra_params},
+            headers=headers,
             timeout=_CROSSREF_TIMEOUT_S,
         )
         if resp.status_code == 200:
@@ -163,6 +342,18 @@ def _verify_paper_three_layers(
 
 class ProblemFormulator(BaseAgent):
     """Designs a prediction research question using HSLS:09 and Semantic Scholar literature."""
+
+    # Per-search bookkeeping for retrieval_status, reset by _search_literature.
+    _s2_query_outcomes: list[str] | None = None
+    _last_s2_outcome: str | None = None
+    _arxiv_query_outcomes: list[str] | None = None
+    _arxiv_http_status: int | None = None
+    _openalex_query_outcomes: list[str] | None = None
+    _openalex_http_status: int | None = None
+    _openalex_plan: str | None = None
+    #: The search words of the literature search in progress, by prompt;
+    #: None outside ``_search_literature``.
+    _lit_query_memo: dict[str | None, list[str]] | None = None
 
     def run(
         self,
@@ -248,6 +439,7 @@ class ProblemFormulator(BaseAgent):
         research_spec = parsed.get("research_spec") or {}
         literature_context = parsed.get("literature_context") or s2_context
         literature_context = self._filter_hallucinated_papers(literature_context, s2_context)
+        literature_context = self._with_retrieval_status(literature_context, s2_context)
 
         self._log_validation_warnings(research_spec, registry)
 
@@ -307,6 +499,7 @@ class ProblemFormulator(BaseAgent):
             lit = self._filter_hallucinated_papers(
                 parsed.get("literature_context") or s2_context, s2_context
             )
+            lit = self._with_retrieval_status(lit, s2_context)
             candidates.append(spec)
             literature_contexts.append(lit)
             prior_specs.append(_spec_one_liner(spec))
@@ -344,6 +537,15 @@ class ProblemFormulator(BaseAgent):
             # Arc P3: full retrieved pool (see _run_single).
             "retrieved_literature": s2_context,
         }
+
+    @staticmethod
+    def _with_retrieval_status(literature_context: dict, s2_context: dict) -> dict:
+        """Carry the search's ``retrieval_status`` onto the context the
+        model returned, which is what the orchestrator stores."""
+        status = (s2_context or {}).get("retrieval_status")
+        if status is None or not isinstance(literature_context, dict):
+            return literature_context
+        return {**literature_context, "retrieval_status": dict(status)}
 
     def _select_best_candidate(
         self,
@@ -439,6 +641,12 @@ class ProblemFormulator(BaseAgent):
                         "message": f"S2 keyword queries generated: {valid}",
                     })
                     return valid
+        except ProviderError:
+            # A rejected key, an empty account or a provider that stayed
+            # unreachable through every retry is not a reason to fall back
+            # to default queries: the next call would fail the same way,
+            # after the literature search and a second round of waits.
+            raise
         except Exception as exc:  # noqa: BLE001
             self.ctx.log.append({
                 "timestamp": datetime.utcnow().isoformat(),
@@ -446,6 +654,22 @@ class ProblemFormulator(BaseAgent):
                 "message": f"Query generation failed ({exc}); using defaults.",
             })
         return self._DEFAULT_S2_QUERIES
+
+    def _literature_queries(self, user_prompt: str | None) -> list[str]:
+        """The search words for every source of the current search.
+
+        Semantic Scholar and arXiv each asked the model for their own
+        words: two calls per run where one does, at the formulator's
+        temperature (0.7), so the two sources could search for different
+        things. Within ``_search_literature`` the words are asked for
+        once; a direct call outside it asks as before.
+        """
+        memo = self._lit_query_memo
+        if memo is None:
+            return self._generate_search_queries(user_prompt)
+        if user_prompt not in memo:
+            memo[user_prompt] = list(self._generate_search_queries(user_prompt))
+        return list(memo[user_prompt])
 
     # Arc P5 (F-P5-DEPTH-RECENCY-SKEW): the ranking signals are requested
     # here AND hand-mapped in the comprehension below. Adding a name to
@@ -493,7 +717,9 @@ class ProblemFormulator(BaseAgent):
                 where relevance ranking happened to place it.
         """
         last_exc: Exception | None = None
+        last_http: int | None = None
         retryable = True
+        self._last_s2_outcome = "failed"
 
         for attempt in range(max_retries + 1):
             try:
@@ -529,6 +755,7 @@ class ProblemFormulator(BaseAgent):
                     headers=headers,
                     timeout=15,
                 )
+                last_http = resp.status_code if isinstance(resp.status_code, int) else None
 
                 if 400 <= resp.status_code < 500 and resp.status_code != 429:
                     retryable = False
@@ -546,6 +773,7 @@ class ProblemFormulator(BaseAgent):
                     )
 
                 data = resp.json()
+                self._last_s2_outcome = "ok"
                 return [
                     {
                         "paperId": item.get("paperId", ""),
@@ -587,6 +815,7 @@ class ProblemFormulator(BaseAgent):
                 last_exc = exc
                 break
 
+        self._last_s2_outcome = "rate_limited" if last_http == 429 else "failed"
         self.ctx.log.append({
             "timestamp": datetime.utcnow().isoformat(),
             "agent": self.agent_name,
@@ -762,12 +991,16 @@ class ProblemFormulator(BaseAgent):
             headers["X-API-KEY"] = s2_api_key
 
         # Generate short keyword queries from user_prompt via lightweight LLM call
-        queries = self._generate_search_queries(user_prompt)
+        queries = self._literature_queries(user_prompt)
         per_query_limit = max(max_results, 10)  # fetch at least 10 per query before dedup
 
         # Run all queries and merge by paperId (dedup)
         seen_ids: set[str] = set()
         merged_papers: list[dict] = []
+        # One outcome per topical query ("ok" | "rate_limited" | "failed"),
+        # read back by _search_literature for retrieval_status.
+        topical_outcomes: list[str] = []
+        self._s2_query_outcomes = topical_outcomes
 
         for i, query in enumerate(queries):
             if i > 0:
@@ -790,6 +1023,11 @@ class ProblemFormulator(BaseAgent):
                 if pid and pid not in seen_ids:
                     seen_ids.add(pid)
                     merged_papers.append(paper)
+            outcome = self._take_s2_outcome(papers)
+            topical_outcomes.append(outcome)
+            self._lit_progress(
+                "semantic_scholar", i + 1, len(queries), len(papers), outcome
+            )
             self.ctx.log.append({
                 "timestamp": datetime.utcnow().isoformat(),
                 "agent": self.agent_name,
@@ -828,6 +1066,10 @@ class ProblemFormulator(BaseAgent):
                     seen_ids.add(pid)
                     merged_papers.append(paper)
                     n_new += 1
+            self._lit_progress(
+                "semantic_scholar_seminal", 1, 1, len(seminal),
+                self._take_s2_outcome(seminal),
+            )
             self.ctx.log.append({
                 "timestamp": datetime.utcnow().isoformat(),
                 "agent": self.agent_name,
@@ -867,21 +1109,53 @@ class ProblemFormulator(BaseAgent):
     # arXiv search
     # ------------------------------------------------------------------
 
-    _ARXIV_API_URL = "http://export.arxiv.org/api/query"
+    # https directly: the http address answers 301, so every query cost
+    # arXiv two requests.
+    _ARXIV_API_URL = "https://export.arxiv.org/api/query"
     _ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom"}
+    #: arXiv's API terms: "no more than one request every three seconds".
+    _ARXIV_DELAY_S = 3.0
+    _ARXIV_HEADERS = {
+        "User-Agent": f"EDM-ARS (+{_CROSSREF_PROJECT_URL})",
+        "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+    }
+    #: Statuses with which arXiv turns a client away rather than failing.
+    #: Its front end answers 406 with an empty body, without reaching the
+    #: API behind it, to some clients whose request misses its cache; the
+    #: headers do not change that (see _search_arxiv). Asking again in the
+    #: same search only adds load, so the remaining queries are skipped.
+    _ARXIV_REFUSAL_STATUSES = frozenset({403, 406, 429})
 
     def _search_arxiv(self, queries: list[str], max_results_per_query: int = 10) -> list[dict]:
         """Query arXiv API with multiple keyword queries and return merged, deduped results.
 
         Returns paper dicts compatible with the S2 paper schema (paperId uses
         the arXiv ID prefixed with ``arxiv:`` to avoid collision with S2 IDs).
+
+        Each query's outcome ("ok", "failed", "refused" or "skipped") is
+        kept in ``_arxiv_query_outcomes`` and the refusal's status (else
+        the first non-200 one) in ``_arxiv_http_status``, for
+        ``retrieval_status``. After a refusal
+        (``_ARXIV_REFUSAL_STATUSES``) the remaining queries are not sent.
+        A refusal is not fixed by headers: arXiv's front end turned away
+        requests from Python's urllib that carried exactly the headers
+        with which ``requests`` got 200, and on a Mac it turned away
+        ``requests`` with curl's headers while curl got 200.
         """
         seen_ids: set[str] = set()
         papers: list[dict] = []
+        outcomes: list[str] = []
+        self._arxiv_query_outcomes = outcomes
+        self._arxiv_http_status = None
+        refused: int | None = None
 
         for i, query in enumerate(queries):
+            if refused is not None:
+                outcomes.append("skipped")
+                self._lit_progress("arxiv", i + 1, len(queries), 0, "skipped")
+                continue
             if i > 0:
-                time.sleep(1.0)  # rate-limit courtesy
+                time.sleep(self._ARXIV_DELAY_S)
             try:
                 resp = requests.get(
                     self._ARXIV_API_URL,
@@ -892,14 +1166,34 @@ class ProblemFormulator(BaseAgent):
                         "sortBy": "relevance",
                         "sortOrder": "descending",
                     },
+                    headers=dict(self._ARXIV_HEADERS),
                     timeout=15,
                 )
                 if resp.status_code != 200:
-                    self.ctx.log.append({
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "agent": self.agent_name,
-                        "message": f"arXiv query '{query[:50]}' HTTP {resp.status_code}",
-                    })
+                    code = resp.status_code if isinstance(resp.status_code, int) else None
+                    outcome = "refused" if code in self._ARXIV_REFUSAL_STATUSES else "failed"
+                    if self._arxiv_http_status is None or outcome == "refused":
+                        # A refusal ends the search, so its status is the
+                        # one the warning names.
+                        self._arxiv_http_status = code
+                    outcomes.append(outcome)
+                    self._lit_progress(
+                        "arxiv", i + 1, len(queries), 0, outcome, http_status=code
+                    )
+                    rest = len(queries) - i - 1
+                    if outcome == "refused":
+                        refused = code
+                        self._note(
+                            f"arXiv refused query {i + 1}/{len(queries)} "
+                            f"'{query[:50]}' with HTTP {code}"
+                            + (f"; not sending the other {rest} arXiv "
+                               f"quer{'y' if rest == 1 else 'ies'}" if rest else "")
+                        )
+                    else:
+                        self._note(
+                            f"arXiv query {i + 1}/{len(queries)} '{query[:50]}' "
+                            f"failed with HTTP {code}"
+                        )
                     continue
 
                 root = ET.fromstring(resp.text)
@@ -935,6 +1229,8 @@ class ProblemFormulator(BaseAgent):
                     })
                     count += 1
 
+                outcomes.append("ok")
+                self._lit_progress("arxiv", i + 1, len(queries), count, "ok")
                 self.ctx.log.append({
                     "timestamp": datetime.utcnow().isoformat(),
                     "agent": self.agent_name,
@@ -944,6 +1240,8 @@ class ProblemFormulator(BaseAgent):
                     ),
                 })
             except Exception as exc:  # noqa: BLE001
+                outcomes.append("failed")
+                self._lit_progress("arxiv", i + 1, len(queries), 0, "failed")
                 self.ctx.log.append({
                     "timestamp": datetime.utcnow().isoformat(),
                     "agent": self.agent_name,
@@ -953,47 +1251,485 @@ class ProblemFormulator(BaseAgent):
         return papers
 
     # ------------------------------------------------------------------
-    # Combined literature search (S2 + arXiv)
+    # OpenAlex search (stands in for arXiv)
+    # ------------------------------------------------------------------
+
+    _OPENALEX_API_URL = "https://api.openalex.org/works"
+    _OPENALEX_HEADERS = {
+        "User-Agent": f"EDM-ARS (+{_CROSSREF_PROJECT_URL})",
+        "Accept": "application/json",
+    }
+    #: Only what ``_openalex_paper`` reads; a work's full ``locations``
+    #: list more than doubles the response.
+    _OPENALEX_SELECT = ",".join((
+        "id", "doi", "display_name", "publication_year", "publication_date",
+        "type", "authorships", "primary_location", "abstract_inverted_index",
+        "cited_by_count", "open_access",
+    ))
+    #: 429 is OpenAlex's answer both to more than 100 requests a second
+    #: and to a spent daily budget (US$0.10 a day without a key); the rest
+    #: of the search would be turned away the same way.
+    _OPENALEX_LIMIT_STATUSES = frozenset({429})
+    _OPENALEX_REFUSAL_STATUSES = frozenset({401, 403, 406})
+    _OPENALEX_WHEN = ("arxiv_unavailable", "always")
+    _OPENALEX_SEARCH_IN = ("title_and_abstract", "all")
+    _OPENALEX_FILTER_UNSAFE = re.compile(r"[,:|()!\"*]")
+
+    def _openalex_settings(self) -> dict[str, Any]:
+        """The ``openalex`` block of config.yaml, with its defaults.
+
+        A config without the block (an older ``config.yaml``) gets the
+        defaults: on, and asked only when arXiv does not answer. An
+        unknown value falls back to its default rather than stopping the
+        literature step, which runs first.
+        """
+        raw = self.config.get("openalex")
+        cfg = raw if isinstance(raw, dict) else {}
+        when = str(cfg.get("when") or "").strip().lower()
+        search_in = str(cfg.get("search_in") or "").strip().lower()
+        try:
+            delay = max(0.0, float(cfg.get("request_delay_s", 1.0)))
+        except (TypeError, ValueError):
+            delay = 1.0
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "when": when if when in self._OPENALEX_WHEN else "arxiv_unavailable",
+            "max_results_per_query": min(100, max(1, _int_cfg(cfg, "max_results_per_query", 10))),
+            "request_delay_s": delay,
+            "search_in": search_in if search_in in self._OPENALEX_SEARCH_IN else "title_and_abstract",
+        }
+
+    def _openalex_params(self, query: str, per_page: int, search_in: str) -> dict[str, Any]:
+        """Query parameters for one OpenAlex search.
+
+        ``title_and_abstract`` matches the words in titles and abstracts
+        only. OpenAlex calls this filter form older than ``search=``, but
+        ``search=`` also matches full texts: for "college enrollment
+        prediction machine learning" it ranked papers on medical imaging
+        and cardiovascular risk first, where the filter returned studies
+        of enrollment and dropout. Both cost the same.
+        """
+        params: dict[str, Any] = {"per_page": per_page, "select": self._OPENALEX_SELECT}
+        if search_in == "all":
+            params["search"] = query
+        else:
+            # A comma separates filters and a colon or pipe is syntax.
+            words = " ".join(self._OPENALEX_FILTER_UNSAFE.sub(" ", query).split())
+            params["filter"] = f"title_and_abstract.search:{words}"
+        return params
+
+    def _search_openalex(
+        self,
+        queries: list[str],
+        max_results_per_query: int = 10,
+        delay_s: float = 1.0,
+        search_in: str = "title_and_abstract",
+    ) -> list[dict]:
+        """Query OpenAlex with the search words arXiv was given.
+
+        Returns records in the literature pool's shape (``_openalex_paper``),
+        deduplicated by OpenAlex work id. Each query's outcome ("ok",
+        "failed", "rate_limited", "refused" or "skipped") is kept in
+        ``_openalex_query_outcomes`` and the stopping (else the first
+        failing) HTTP status in ``_openalex_http_status``. After a 429 or
+        a refusal the remaining queries are not sent.
+
+        No contact address is sent: OpenAlex retired its mailto "polite
+        pool" in February 2026. An ``OPENALEX_API_KEY`` in the environment
+        raises the daily budget tenfold; it goes in the Authorization
+        header, never in the URL, so no error message or log carries it.
+        """
+        seen_ids: set[str] = set()
+        papers: list[dict] = []
+        outcomes: list[str] = []
+        self._openalex_query_outcomes = outcomes
+        self._openalex_http_status = None
+        stopped_by: str | None = None
+        headers = dict(self._OPENALEX_HEADERS)
+        api_key = (os.environ.get("OPENALEX_API_KEY") or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        for i, query in enumerate(queries):
+            if stopped_by is not None:
+                outcomes.append("skipped")
+                self._lit_progress(
+                    "openalex", i + 1, len(queries), 0, "skipped", skipped_after=stopped_by
+                )
+                continue
+            if i > 0 and delay_s > 0:
+                time.sleep(delay_s)
+            try:
+                resp = requests.get(
+                    self._OPENALEX_API_URL,
+                    params=self._openalex_params(query, max_results_per_query, search_in),
+                    headers=headers,
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    code = resp.status_code if isinstance(resp.status_code, int) else None
+                    if code in self._OPENALEX_LIMIT_STATUSES:
+                        outcome = "rate_limited"
+                    elif code in self._OPENALEX_REFUSAL_STATUSES:
+                        outcome = "refused"
+                    else:
+                        outcome = "failed"
+                    if self._openalex_http_status is None or outcome != "failed":
+                        self._openalex_http_status = code
+                    outcomes.append(outcome)
+                    self._lit_progress(
+                        "openalex", i + 1, len(queries), 0, outcome, http_status=code
+                    )
+                    rest = len(queries) - i - 1
+                    if outcome == "failed":
+                        self._note(
+                            f"OpenAlex query {i + 1}/{len(queries)} '{query[:50]}' "
+                            f"failed with HTTP {code}"
+                        )
+                        continue
+                    stopped_by = outcome
+                    self._note(
+                        f"OpenAlex turned away query {i + 1}/{len(queries)} "
+                        f"'{query[:50]}' with HTTP {code}"
+                        + (f"; not sending the other {rest} OpenAlex "
+                           f"quer{'y' if rest == 1 else 'ies'}" if rest else "")
+                    )
+                    continue
+
+                results = resp.json().get("results") or []
+                count = 0
+                for rank, item in enumerate(results):
+                    paper = _openalex_paper(item, query, rank)
+                    if paper is None or paper["paperId"] in seen_ids:
+                        continue
+                    seen_ids.add(paper["paperId"])
+                    papers.append(paper)
+                    count += 1
+                outcomes.append("ok")
+                self._lit_progress("openalex", i + 1, len(queries), count, "ok")
+                self._note(
+                    f"OpenAlex query {i + 1}/{len(queries)} '{query[:50]}': "
+                    f"{count} results, {len(papers)} unique total"
+                )
+            except Exception as exc:  # noqa: BLE001 -- a source must not stop the search
+                outcomes.append("failed")
+                self._lit_progress("openalex", i + 1, len(queries), 0, "failed")
+                self._note(
+                    f"OpenAlex query {i + 1}/{len(queries)} '{query[:50]}' failed: "
+                    f"{type(exc).__name__}: {' '.join(str(exc).split())[:200]}"
+                )
+
+        return papers
+
+    def _openalex_wanted(self, arxiv_enabled: bool, settings: dict[str, Any]) -> str:
+        """Whether this search asks OpenAlex, as the state it reports when
+        it does not: "disabled", "not_needed", or "ask".
+
+        With ``when: arxiv_unavailable`` OpenAlex stands in for an arXiv
+        that was asked and did not answer: every query refused or failed.
+        An arXiv turned off in config.yaml was not asked, so OpenAlex is
+        not either; ``when: always`` asks it in every search.
+        """
+        if not settings["enabled"]:
+            return "disabled"
+        if settings["when"] == "always":
+            return "ask"
+        outcomes = getattr(self, "_arxiv_query_outcomes", None)
+        if not arxiv_enabled or not outcomes or "ok" in outcomes:
+            return "not_needed"
+        return "ask"
+
+    @staticmethod
+    def _new_to_pool(
+        candidates: list[dict], pool: list[dict], within: bool = False
+    ) -> list[dict]:
+        """The candidates not already in ``pool``: same DOI, or a title
+        with Jaccard similarity >= 0.80 to a title there.
+
+        ``within`` also drops a candidate matching one kept before it (an
+        OpenAlex preprint and its published version are separate works).
+        """
+        pool_tokens = [t for t in (_tokenize_title(p.get("title", "")) for p in pool) if t]
+        pool_dois = {normalize_doi(p.get("doi")).lower() for p in pool} - {""}
+        kept: list[dict] = []
+        for paper in candidates:
+            doi = normalize_doi(paper.get("doi")).lower()
+            tokens = _tokenize_title(paper.get("title", ""))
+            if doi and doi in pool_dois:
+                continue
+            if any(_jaccard_similarity(tokens, t) >= _JACCARD_THRESHOLD for t in pool_tokens):
+                continue
+            kept.append(paper)
+            if within:
+                if tokens:
+                    pool_tokens.append(tokens)
+                if doi:
+                    pool_dois.add(doi)
+        return kept
+
+    # ------------------------------------------------------------------
+    # Combined literature search (S2 + arXiv + OpenAlex)
     # ------------------------------------------------------------------
 
     def _search_literature(self, user_prompt: str | None) -> dict:
-        """Search both Semantic Scholar and arXiv, merge, deduplicate by title.
+        """Search Semantic Scholar and arXiv, and OpenAlex when arXiv does
+        not answer; merge, deduplicate by DOI and title.
 
-        Returns the same dict format as ``_search_semantic_scholar()``.
+        Returns the same dict format as ``_search_semantic_scholar()``,
+        plus ``retrieval_status`` (CONTRACT section 6)::
+
+            {"semantic_scholar": "ok|failed|rate_limited|skipped",
+             "arxiv": "ok|failed|refused|disabled",
+             "openalex": "ok|failed|rate_limited|refused|not_needed|disabled",
+             "n_papers": int, "degraded": bool,
+             "n_semantic_scholar": int, "n_arxiv": int, "n_openalex": int}
+
+        plus ``"arxiv_http_status": int`` when arXiv returned nothing and
+        answered with an HTTP error ("refused" is 403, 406 or 429), and
+        ``"openalex_http_status": int`` likewise for OpenAlex.
+        ``openalex`` is "not_needed" when arXiv answered (see
+        ``_openalex_wanted``).
+
+        ``degraded`` is true when S2 contributed no papers or the pool is
+        empty. A run that went on with placeholders or arXiv alone used to
+        finish COMPLETED with the failure recorded only in checkpoint.json
+        (E9). It is now written to pipeline.log, emitted as a warning
+        event, and carried into run_status.json by the orchestrator.
         """
+        self._s2_query_outcomes = None
+        self._arxiv_query_outcomes = None
+        self._arxiv_http_status = None
+        self._openalex_query_outcomes = None
+        self._openalex_http_status = None
+        self._openalex_plan = None
+        arxiv_enabled = bool(self.config.get("arxiv", {}).get("enabled", True))
+        self._lit_query_memo = {}
+        try:
+            result = self._search_literature_sources(user_prompt, arxiv_enabled)
+        finally:
+            self._lit_query_memo = None
+        status = self._retrieval_status(result, arxiv_enabled)
+        result["retrieval_status"] = status
+        if status["degraded"]:
+            hint = (
+                " Set SEMANTIC_SCHOLAR_API_KEY for a dedicated rate limit."
+                if not os.environ.get("SEMANTIC_SCHOLAR_API_KEY") else ""
+            )
+            message = (
+                "Literature retrieval degraded: Semantic Scholar "
+                f"{status['semantic_scholar']} ({status['n_semantic_scholar']} papers), "
+                f"{self._arxiv_phrase(status)}, "
+                f"{self._openalex_phrase(status)}"
+                f"{status['n_papers']} papers in total. Related work and "
+                "citations will be thin or placeholders." + hint
+            )
+            self._note(message)
+            self._emit(
+                "warning",
+                plain="The literature search came back thin",
+                code="LITERATURE_DEGRADED",
+                message=message,
+                retrieval_status=status,
+            )
+        return result
+
+    def _take_s2_outcome(self, papers: list[dict]) -> str:
+        """Outcome of the S2 request that just ran, then forget it."""
+        outcome = getattr(self, "_last_s2_outcome", None)
+        self._last_s2_outcome = None
+        if outcome is None:
+            # _run_single_s2_query was replaced (tests); judge by results.
+            return "ok" if papers else "failed"
+        return str(outcome)
+
+    @staticmethod
+    def _arxiv_phrase(status: dict) -> str:
+        """arXiv's part of the degraded-literature warning."""
+        state = status.get("arxiv")
+        code = status.get("arxiv_http_status")
+        n = status.get("n_arxiv", 0)
+        if state == "refused" and code is not None:
+            return f"arXiv refused the request (HTTP {code}, {n} papers)"
+        if state == "failed" and code is not None:
+            return f"arXiv failed (HTTP {code}, {n} papers)"
+        return f"arXiv {state} ({n} papers)"
+
+    @staticmethod
+    def _openalex_phrase(status: dict) -> str:
+        """OpenAlex's part of the degraded-literature warning, with its
+        trailing separator; empty when OpenAlex was not asked."""
+        state = status.get("openalex")
+        if state in (None, "not_needed", "disabled"):
+            return ""
+        code = status.get("openalex_http_status")
+        n = status.get("n_openalex", 0)
+        if code is not None and state in ("failed", "refused", "rate_limited"):
+            return f"OpenAlex {state} (HTTP {code}, {n} papers), "
+        return f"OpenAlex {state} ({n} papers), "
+
+    def _lit_progress(
+        self, source: str, query_index: int, n_queries: int,
+        papers_found: int, status: str, http_status: int | None = None,
+        skipped_after: str = "refused",
+    ) -> None:
+        """One ``lit.progress`` event per literature request.
+
+        ``http_status`` is the error status of a request that failed with
+        one; a query skipped after a refusal (or, for OpenAlex, after a
+        429: ``skipped_after="rate_limited"``) has status ``"skipped"``.
+        """
+        label = {
+            "semantic_scholar": "Semantic Scholar",
+            "semantic_scholar_seminal": "Semantic Scholar (seminal works)",
+            "arxiv": "arXiv",
+            "openalex": "OpenAlex",
+        }.get(source, source)
+        if status == "refused" and http_status is not None:
+            plain = f"{label} refused the request (HTTP {http_status})"
+        elif status == "rate_limited" and http_status is not None:
+            plain = f"{label} turned the request away: too many requests (HTTP {http_status})"
+        elif status == "skipped":
+            why = ("turned away an earlier request as too many"
+                   if skipped_after == "rate_limited" else "refused an earlier request")
+            plain = f"Skipped {label} ({query_index}/{n_queries}): {label} {why}"
+        else:
+            plain = f"Searching {label} ({query_index}/{n_queries}): {papers_found} found"
+        extra: dict[str, Any] = {} if http_status is None else {"http_status": http_status}
+        self._emit(
+            "lit.progress",
+            plain=plain,
+            source=source,
+            query_index=query_index,
+            n_queries=n_queries,
+            papers_found=papers_found,
+            status=status,
+            **extra,
+        )
+
+    def _retrieval_status(self, result: dict, arxiv_enabled: bool) -> dict:
+        """Summarise what each source returned (CONTRACT section 6)."""
+        papers = result.get("papers") or []
+        n_arxiv = sum(1 for p in papers if p.get("source") == "arxiv")
+        n_openalex = sum(1 for p in papers if p.get("source") == "openalex")
+        n_s2 = len(papers) - n_arxiv - n_openalex
+
+        s2_outcomes = getattr(self, "_s2_query_outcomes", None)
+        if s2_outcomes is None:
+            # The S2 search did not run its query loop (it was replaced);
+            # judge by what it returned.
+            s2_state = "ok" if n_s2 else "failed"
+        elif not s2_outcomes:
+            s2_state = "skipped"
+        elif "ok" in s2_outcomes:
+            s2_state = "ok"
+        elif "rate_limited" in s2_outcomes:
+            s2_state = "rate_limited"
+        else:
+            s2_state = "failed"
+
+        if not arxiv_enabled:
+            arxiv_state = "disabled"
+        else:
+            arxiv_outcomes = getattr(self, "_arxiv_query_outcomes", None)
+            if arxiv_outcomes is None:
+                arxiv_state = "ok" if n_arxiv else "failed"
+            elif "ok" in arxiv_outcomes:
+                arxiv_state = "ok"
+            elif "refused" in arxiv_outcomes:
+                arxiv_state = "refused"
+            else:
+                arxiv_state = "failed"
+
+        openalex_state = self._openalex_state(n_openalex)
+
+        status: dict[str, Any] = {
+            "semantic_scholar": s2_state,
+            "arxiv": arxiv_state,
+            "openalex": openalex_state,
+            "n_papers": len(papers),
+            # Unchanged by OpenAlex: a pool without Semantic Scholar also
+            # lacks its seminal-works query.
+            "degraded": n_s2 == 0 or len(papers) == 0,
+            "n_semantic_scholar": n_s2,
+            "n_arxiv": n_arxiv,
+            "n_openalex": n_openalex,
+        }
+        http_status = getattr(self, "_arxiv_http_status", None)
+        if arxiv_state in ("failed", "refused") and isinstance(http_status, int):
+            status["arxiv_http_status"] = http_status
+        oa_http = getattr(self, "_openalex_http_status", None)
+        if openalex_state in ("failed", "refused", "rate_limited") and isinstance(oa_http, int):
+            status["openalex_http_status"] = oa_http
+        return status
+
+    def _openalex_state(self, n_openalex: int) -> str:
+        """OpenAlex's entry in ``retrieval_status``: the plan when it was
+        not asked, else the same rule as the other sources."""
+        plan = getattr(self, "_openalex_plan", None)
+        if plan in ("disabled", "not_needed"):
+            return str(plan)
+        outcomes = getattr(self, "_openalex_query_outcomes", None)
+        if outcomes is None:
+            # Not asked through _search_openalex (replaced in tests, or the
+            # sources search itself was replaced); judge by the pool.
+            if plan is None and not n_openalex:
+                return "not_needed"
+            return "ok" if n_openalex else "failed"
+        for state in ("ok", "rate_limited", "refused"):
+            if state in outcomes:
+                return state
+        return "failed"
+
+    def _search_literature_sources(
+        self, user_prompt: str | None, arxiv_enabled: bool
+    ) -> dict:
+        """The S2 + arXiv (+ OpenAlex) search itself (see ``_search_literature``)."""
         # 1. Run S2 search (primary source)
         s2_context = self._search_semantic_scholar(user_prompt)
         s2_papers = s2_context.get("papers", [])
 
         # 2. Run arXiv search with same queries
         arxiv_cfg = self.config.get("arxiv", {})
-        if not arxiv_cfg.get("enabled", True):
-            return s2_context
+        queries: list[str] | None = None
+        arxiv_papers: list[dict] = []
+        if arxiv_enabled:
+            queries = self._literature_queries(user_prompt)
+            arxiv_per_query = int(arxiv_cfg.get("max_results_per_query", 10))
+            arxiv_papers = self._search_arxiv(queries, max_results_per_query=arxiv_per_query)
 
-        queries = self._generate_search_queries(user_prompt)
-        arxiv_per_query = int(arxiv_cfg.get("max_results_per_query", 10))
-        arxiv_papers = self._search_arxiv(queries, max_results_per_query=arxiv_per_query)
-
-        if not arxiv_papers:
-            return s2_context
-
-        # 3. Deduplicate arXiv papers against S2 results by title Jaccard
-        s2_title_tokens = [
-            _tokenize_title(p.get("title", ""))
-            for p in s2_papers
-        ]
-        new_papers: list[dict] = []
-        for arxiv_paper in arxiv_papers:
-            arxiv_tokens = _tokenize_title(arxiv_paper.get("title", ""))
-            is_dup = any(
-                _jaccard_similarity(arxiv_tokens, s2_t) >= 0.80
-                for s2_t in s2_title_tokens
-                if s2_t
+        # 3. OpenAlex, with the same queries, when arXiv did not answer:
+        #    arXiv's front end refuses some Python clients outright.
+        oa_settings = self._openalex_settings()
+        plan = self._openalex_wanted(arxiv_enabled, oa_settings)
+        self._openalex_plan = plan
+        openalex_papers: list[dict] = []
+        if plan == "ask":
+            if queries is None:
+                queries = self._literature_queries(user_prompt)
+            if oa_settings["when"] == "arxiv_unavailable":
+                how = "refused" if "refused" in (self._arxiv_query_outcomes or []) else "failed"
+                n_q = len(queries)
+                self._note(
+                    f"arXiv {how}; asking OpenAlex with the same {n_q} "
+                    f"quer{'y' if n_q == 1 else 'ies'}"
+                )
+            openalex_papers = self._search_openalex(
+                queries,
+                max_results_per_query=oa_settings["max_results_per_query"],
+                delay_s=oa_settings["request_delay_s"],
+                search_in=oa_settings["search_in"],
             )
-            if not is_dup:
-                new_papers.append(arxiv_paper)
 
-        merged = s2_papers + new_papers
+        if not arxiv_papers and not openalex_papers:
+            return dict(s2_context)
+
+        # 4. Deduplicate against the pool by DOI and title Jaccard
+        new_papers = self._new_to_pool(arxiv_papers, s2_papers)
+        new_openalex = self._new_to_pool(
+            openalex_papers, s2_papers + new_papers, within=True
+        )
+
+        merged = s2_papers + new_papers + new_openalex
         merged.sort(key=lambda p: p.get("year") or 0, reverse=True)
 
         # Trim to combined max. Second year-descending trim site: without
@@ -1014,7 +1750,9 @@ class ProblemFormulator(BaseAgent):
             "agent": self.agent_name,
             "message": (
                 f"Literature search merged: {len(s2_papers)} S2 + "
-                f"{len(new_papers)} arXiv (deduped) = {len(merged)} total papers"
+                f"{len(new_papers)} arXiv (deduped)"
+                + (f" + {len(new_openalex)} OpenAlex (deduped)" if plan == "ask" else "")
+                + f" = {len(merged)} total papers"
             ),
         })
 
@@ -1052,7 +1790,13 @@ class ProblemFormulator(BaseAgent):
             "",
             "## Retrieved Literature (Semantic Scholar + arXiv)",
             "```json",
-            json.dumps(s2_context, indent=2),
+            # retrieval_status is bookkeeping for run_status.json, not
+            # literature; leaving it out keeps this block what it was.
+            json.dumps(
+                {k: v for k, v in s2_context.items() if k != "retrieval_status"}
+                if isinstance(s2_context, dict) else s2_context,
+                indent=2,
+            ),
             "```",
         ]
         # V3.2 Arc D: deterministic design-feasibility report + gap
@@ -1150,7 +1894,8 @@ class ProblemFormulator(BaseAgent):
                 "",
                 "## Task",
                 (
-                    "Design a prediction research question using the HSLS:09 dataset. "
+                    "Design a prediction research question using the "
+                    f"{_dataset_label(registry, getattr(self.ctx, 'dataset_name', None))} dataset. "
                     "Select 8-12 of the most relevant papers from the retrieved literature "
                     "(copy their paperId, title, authors, year, abstract exactly) to populate "
                     "literature_context.papers. Ground the novelty claim using these papers. "
@@ -1193,8 +1938,11 @@ class ProblemFormulator(BaseAgent):
         verified: list[dict] = []
         suspicious: list[dict] = []
 
+        mailto = _crossref_mailto(self.config)
         for paper in literature_context.get("papers", []):
-            status = _verify_paper_three_layers(paper, real_ids, real_title_tokens)
+            status = _verify_paper_three_layers(
+                paper, real_ids, real_title_tokens, crossref_mailto=mailto
+            )
             if status == "VERIFIED":
                 verified.append({**paper, "verification_status": "VERIFIED"})
             elif status == "SUSPICIOUS":

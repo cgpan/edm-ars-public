@@ -25,8 +25,11 @@ import types
 import pytest
 
 from src.pre_critic_checks import (
+    _RQ_COMMITMENTS,
     PreCriticResult,
     _check_research_question_is_answered,
+    _commitment_instruction,
+    _named_after,
     run_pre_critic_checks,
 )
 
@@ -144,3 +147,428 @@ def test_the_check_runs_for_every_task_type(tmp_path) -> None:
         assert any(f.check_id == "pcc_07" for f in result.failures), (
             f"pcc_07 did not fire for {task_type}"
         )
+
+
+# ---------------------------------------------------------------------------
+# A record that says the test did not run is not the test
+# ---------------------------------------------------------------------------
+
+_ABOVE_AND_BEYOND = (
+    "Do ninth-grade non-cognitive factors predict college enrollment above "
+    "and beyond academic achievement and socioeconomic status?"
+)
+
+
+@pytest.mark.parametrize(
+    "status", ["skipped", "failed", "error", "not_run", "Skipped "],
+)
+def test_a_not_run_incremental_record_does_not_satisfy_it(status: str) -> None:
+    """run_incremental_validity returns {"status": "skipped", ...} when its
+    column lists match nothing. The key name used to count as evidence, so
+    the question's central test could be skipped and the paper written."""
+    failures = _run(
+        _ABOVE_AND_BEYOND,
+        {"incremental_validity": {"status": status,
+                                  "reason": "no focal column present"}},
+    )
+    assert [f.check_id for f in failures] == ["pcc_07"]
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        {"incremental_validity": None,
+         "warnings": ["run_incremental_validity failed: Unknown label type: "
+                      "continuous."]},
+        {"incremental_validity": {}},
+        {"incremental_validity": "skipped - not applicable to regression"},
+        {"incremental_validity": {"reason": "helper raised ValueError"}},
+        {"incremental_validity_reason": "not computed"},
+        {"incremental_validity": {"status": "not_applicable", "reason": "r"}},
+        {"incremental_validity": {"status": "n/a"}},
+        {"incremental_validity": {"status": "unavailable"}},
+        {"incremental_validity": {"status": "not computed"}},
+        {"incremental_validity": {"status": "skipped_regression"}},
+        {"incremental_validity": {"status": "ok", "delta_auc": None}},
+        {"incremental_validity": {"status": "skipped", "delta_auc": 0.02}},
+        {"incremental_validity": [{"status": "error", "reason": "r"}]},
+        {"rigor": {"incremental_validity": {"status": "skipped"}}},
+    ],
+    ids=[
+        "null-plus-warning", "empty-dict", "bare-string", "reason-no-status",
+        "sibling-reason-key", "not_applicable", "n/a", "unavailable",
+        "not-computed", "skipped_regression", "ok-with-null-delta",
+        "skipped-with-a-number", "list-of-errors", "nested-skipped",
+    ],
+)
+def test_only_a_record_that_ran_satisfies_it(results: dict) -> None:
+    """The check used to reject a list of not-run statuses, and every
+    other shape passed on the key name alone. The null-plus-warning shape
+    is what an archived GPA run's Analyst wrote when the helper raised.
+    Now only a record that says it ran counts."""
+    assert [f.check_id for f in _run(_ABOVE_AND_BEYOND, results)] == ["pcc_07"]
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        {"incremental_validity": {"status": "ok", "delta_auc": 0.03,
+                                  "ci_lower": 0.01, "ci_upper": 0.05}},
+        {"incremental_validity": {"status": "OK ", "delta_r2": 0.04}},
+        {"incremental_validity": {"status": "computed", "lrt_p": 0.01}},
+        {"incremental_validity": {"delta_r2": 0.04, "ci_lower": 0.02}},
+        {"nested_model_comparison": {"baseline_auc": 0.7, "delta_auc": 0.02}},
+        {"rigor": {"incremental_validity": {"status": "ok", "delta_auc": 0.0}}},
+        {"incremental_validity": [{"status": "ok", "delta_auc": 0.01}]},
+    ],
+    ids=["helper-binary", "continuous", "computed-status", "no-status-delta",
+         "nested-model-key", "nested-deeper", "list-of-records"],
+)
+def test_a_record_that_ran_satisfies_it_wherever_it_sits(results: dict) -> None:
+    assert _run(_ABOVE_AND_BEYOND, results) == []
+
+
+def test_a_sentence_about_the_comparison_is_not_the_comparison() -> None:
+    failures = _run(
+        _ABOVE_AND_BEYOND,
+        {
+            "all_models": {"LogisticRegression": {"auc": 0.81}},
+            "warnings": ["incremental_validity was not computed"],
+            "errors": ["nested_model comparison raised ValueError"],
+        },
+    )
+    assert [f.check_id for f in failures] == ["pcc_07"]
+
+
+def test_a_computed_incremental_record_still_satisfies_it() -> None:
+    assert _run(
+        _ABOVE_AND_BEYOND,
+        {
+            "incremental_validity": {
+                "status": "ok", "baseline_auc": 0.78, "full_auc": 0.81,
+                "delta_auc": 0.03, "ci_lower": 0.01, "ci_upper": 0.05,
+            },
+            "warnings": [],
+        },
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("question", "results"),
+    [
+        ("Does the effect vary by sex?",
+         {"moderation_analysis": {"status": "skipped",
+                                  "reason": "moderator not in matrix"}}),
+        ("Is the model well calibrated?",
+         {"calibration": {"status": "skipped",
+                          "reason": "not applicable to regression"}}),
+    ],
+    ids=["moderation-descoped", "calibration-regression"],
+)
+def test_descoped_records_the_contract_allows_still_count(
+    question: str, results: dict
+) -> None:
+    """prediction-rigor-extensions lets moderation be recorded as skipped
+    and descoped, and the Analyst prompt tells regression runs to record
+    calibration as skipped. Only the incremental promise is strict."""
+    assert _run(question, results) == []
+
+
+# ---------------------------------------------------------------------------
+# The baseline the instruction quotes is the whole baseline the question names
+# ---------------------------------------------------------------------------
+
+#: runs/phase_a_els_prediction_20260704: three baseline items, two commas.
+_ELS_QUESTION = (
+    "Do student educational expectations in 10th grade predict "
+    "postsecondary attendance by 2006 above and beyond academic achievement, "
+    "SES, and demographic controls? Specifically, does the predictive "
+    "contribution of expectations vary between students?"
+)
+
+
+@pytest.mark.parametrize(
+    ("question", "phrase", "baseline"),
+    [
+        (_ELS_QUESTION, "above and beyond",
+         "academic achievement, SES, and demographic controls"),
+        ("Does X predict Y above and beyond prior achievement (X1TXMTSCOR), "
+         "SES (X1SES), and sex?", "above and beyond",
+         "prior achievement (X1TXMTSCOR), SES (X1SES), and sex"),
+        ("Does X predict Y over and above prior achievement, family SES and "
+         "parental education", "over and above",
+         "prior achievement, family SES and parental education"),
+        ("Do non-cognitive factors, over and above prior achievement, SES, "
+         "and sex, predict college enrollment?", "over and above",
+         "prior achievement, SES, and sex"),
+        ("Does belonging predict GPA ABOVE AND BEYOND achievement and SES, "
+         "and does this vary by sex?", "above and beyond", "achievement and SES"),
+        ("Does X predict Y above and beyond SES (quintiles; X1SESQ5) and "
+         "achievement?", "above and beyond",
+         "SES (quintiles; X1SESQ5) and achievement"),
+        ("Does X add above and beyond a baseline of prior achievement, which "
+         "is the strongest predictor?", "above and beyond",
+         "a baseline of prior achievement"),
+        ("Does X add above and beyond SES in predicting enrollment?",
+         "above and beyond", "SES"),
+        ("What is the incremental validity of X?", "incremental valid", ""),
+    ],
+    ids=["els-comma-list", "parentheticals", "list-without-oxford-comma",
+         "inserted-clause", "next-clause", "semicolon-in-parens",
+         "relative-clause", "in-predicting", "names-no-baseline"],
+)
+def test_the_named_baseline_is_read_to_the_end_of_its_list(
+    question: str, phrase: str, baseline: str,
+) -> None:
+    """Every "," and "(" used to end the baseline, so the ELS question's
+    baseline reached the Analyst as "academic achievement" and the default
+    focal block took in SES and the demographic controls."""
+    assert _named_after(question, phrase) == baseline
+
+
+def _instruction(question: str, outcome_type: str = "binary",
+                 task_type: str = "prediction") -> str:
+    ctx = types.SimpleNamespace(
+        research_spec={
+            "research_question": question,
+            "predictor_set": [{"variable": v} for v in
+                              ("BYTXMSTD", "BYSES1", "BYSEX", "BYSTEXP")],
+        },
+        results_object={"all_models": {"LogisticRegression": {"auc": 0.8}}},
+        data_report={"outcome_type": outcome_type},
+    )
+    result = PreCriticResult()
+    _check_research_question_is_answered(ctx, result, task_type=task_type)
+    [failure] = result.failures
+    return failure.revision_instruction
+
+
+def test_the_instruction_quotes_the_whole_baseline_and_no_focal_default() -> None:
+    text = _instruction(_ELS_QUESTION)
+    assert '"academic achievement, SES, and demographic controls"' in text
+    assert "every other predictor" not in text
+    assert "Put no baseline or control variable in focal_cols" in text
+
+
+def test_a_continuous_outcome_is_sent_to_the_helper_too() -> None:
+    """The helper fitted LogisticRegression whatever the outcome, so the
+    instruction had the Analyst write its own regression code for a GPA
+    outcome, and archived GPA runs recorded the test as an error."""
+    text = _instruction(_ELS_QUESTION, outcome_type="continuous")
+    assert "analysis_helpers.run_incremental_validity(" in text
+    assert "outcome_type='continuous'" in text
+    assert "delta_r2" in text
+    assert "LinearRegression" not in text
+
+
+def test_the_instruction_says_what_the_orchestrator_does_with_a_skip() -> None:
+    strict = _instruction(_ELS_QUESTION)
+    assert "the study then stops without a paper" in strict
+    descoped = _commitment_instruction(
+        _RQ_COMMITMENTS[3], "vary by", "Does the effect vary by sex?",
+        types.SimpleNamespace(), "prediction",
+    )
+    assert "stops" not in descoped and "Limitations" in descoped
+
+
+# ---------------------------------------------------------------------------
+# Wordings of the incremental promise the fixed phrases missed
+# ---------------------------------------------------------------------------
+
+#: The owner's Mac, round 2 (2026-09-27), verbatim. None of the fixed
+#: phrases ("above and beyond", "over and above", "incremental valid",
+#: "incremental predictive", "beyond baseline") is in it.
+_ROUND_2_QUESTION = (
+    "Do ninth-grade non-cognitive factors (math/science identity, "
+    "self-efficacy, school belonging) improve prediction of college "
+    "enrollment by February 2016 beyond what baseline academic achievement "
+    "and socioeconomic status alone provide, and is the resulting model "
+    "equally calibrated across sex and SES subgroups in the full HSLS:09 "
+    "public sample?"
+)
+
+
+def test_the_round_2_question_commits_to_the_nested_comparison() -> None:
+    [failure] = [
+        f for f in _run(_ROUND_2_QUESTION, {"calibration": {"brier": 0.1}})
+        if "incremental" in f.message
+    ]
+    assert "'beyond what'" in failure.message
+    assert failure.revisable is True
+    assert (
+        '"baseline academic achievement and socioeconomic status"'
+        in failure.revision_instruction
+    )
+    assert _run(
+        _ROUND_2_QUESTION,
+        {"calibration": {"brier": 0.1},
+         "incremental_validity": {"status": "ok", "delta_auc": 0.02}},
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("question", "matched"),
+    [
+        ("Does X improve prediction of Y beyond prior achievement and SES?",
+         "beyond prior"),
+        ("Does the engagement block add predictive value beyond prior "
+         "achievement and SES?", "add predictive value"),
+        ("Does the engagement block add discriminative value beyond prior "
+         "achievement and SES?", "add discriminative value"),
+        ("Does the engagement block add held-out predictive value beyond the "
+         "prior-achievement + SES block?", "add held-out predictive value"),
+        ("Do protected attributes carry unique predictive signal beyond "
+         "academic and attitudinal factors alone?", "unique predictive signal"),
+        ("Do science identity and self-efficacy predict a STEM major beyond "
+         "what prior math achievement and SES explain?", "beyond what"),
+        ("Do non-cognitive factors predict Y over and beyond SES?",
+         "over and beyond"),
+        ("Do non-cognitive factors incrementally predict enrollment?",
+         "incrementally predict"),
+        ("What is the unique contribution of belonging to predicting GPA?",
+         "unique contribution"),
+        ("Does X predict Y net of prior achievement and SES?", "net of prior"),
+        ("Can self-efficacy predict STEM entry, controlling for prior "
+         "achievement and demographic factors?", "controlling for prior"),
+    ],
+    ids=["improve-prediction-beyond", "adds-predictive-value",
+         "adds-discriminative-value", "held-out-value", "unique-signal",
+         "beyond-what-explain", "over-and-beyond", "incrementally",
+         "unique-contribution", "net-of", "controlling-for"],
+)
+def test_other_wordings_of_the_promise_are_caught(
+    question: str, matched: str
+) -> None:
+    [failure] = _run(question, {"all_models": {"RF": {"auc": 0.8}}})
+    assert f"{matched!r}" in failure.message
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Which ninth-grade factors predict persistence beyond the first year "
+        "of college?",
+        "How accurately can early-warning indicators predict outcomes beyond "
+        "high school?",
+        "Does XGBoost improve prediction beyond a baseline logistic regression?",
+        "Does a stacking ensemble improve accuracy beyond traditional logistic "
+        "regression?",
+        "Which factors predict enrollment, and do the results extend beyond "
+        "prior research findings?",
+        "Do incremental gains in math achievement predict college enrollment?",
+        "Does the model predict enrollment accurately, adjusting for school "
+        "clustering?",
+        "Does the model's accuracy hold beyond the base year?",
+        "Which students are at risk of dropping out beyond ninth grade?",
+    ],
+    ids=["beyond-first-year", "beyond-high-school", "model-comparison",
+         "traditional-model", "prior-research", "incremental-gains",
+         "adjusting-for-clustering", "beyond-the-base-year",
+         "beyond-ninth-grade"],
+)
+def test_beyond_in_ordinary_prose_is_not_a_promise(question: str) -> None:
+    """A bare "beyond" names a time, a place or a model, not a baseline
+    block of predictors."""
+    assert _run(question, {"all_models": {"RF": {"auc": 0.8}}}) == []
+
+
+@pytest.mark.parametrize(
+    ("task_type", "question"),
+    [
+        ("causal_soo", "What is the effect of algebra in 8th grade on "
+         "11th-grade math, controlling for prior achievement and SES?"),
+        ("causal_soo", "Does X affect Y net of socioeconomic status?"),
+        ("psychometrics", "Do item parameters differ across groups beyond "
+         "what sampling error explains?"),
+        ("psychometrics", "Do added items provide incremental information "
+         "about math self-efficacy?"),
+    ],
+    ids=["causal-controlling-for", "causal-net-of", "psy-beyond-what",
+         "psy-incremental-information"],
+)
+def test_adjustment_language_outside_prediction_is_not_a_promise(
+    task_type: str, question: str
+) -> None:
+    """Only a prediction study reads these wordings as a nested comparison
+    of predictor blocks; the fixed phrases still apply to every type."""
+    ctx = types.SimpleNamespace(
+        research_spec={"research_question": question},
+        results_object={"estimates": {}},
+        data_report={},
+    )
+    result = PreCriticResult()
+    _check_research_question_is_answered(ctx, result, task_type=task_type)
+    assert result.failures == []
+
+
+def test_over_and_beyond_is_a_promise_for_every_task_type() -> None:
+    ctx = types.SimpleNamespace(
+        research_spec={"research_question": "Does X affect Y over and beyond SES?"},
+        results_object={"estimates": {}},
+        data_report={},
+    )
+    result = PreCriticResult()
+    _check_research_question_is_answered(ctx, result, task_type="causal_soo")
+    assert [f.check_id for f in result.failures] == ["pcc_07"]
+
+
+def test_no_fixture_question_is_misread() -> None:
+    """Every research question kept in runs/fixtures (causal, DiD, ITR and
+    psychometric studies) promises no nested comparison of predictor
+    blocks, and none may be read as one."""
+    import json
+    from pathlib import Path
+
+    fixtures = sorted(
+        (Path(__file__).resolve().parents[1] / "runs" / "fixtures").glob("*.json")
+    )
+    questions = []
+    for path in fixtures:
+        spec = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(spec, dict) and spec.get("research_question"):
+            questions.append(
+                (spec.get("task_type") or "prediction", spec["research_question"])
+            )
+    assert len(questions) >= 5
+    for task_type, question in questions:
+        ctx = types.SimpleNamespace(
+            research_spec={"research_question": question},
+            results_object={"all_models": {"RF": {"auc": 0.8}}},
+            data_report={},
+        )
+        result = PreCriticResult()
+        _check_research_question_is_answered(ctx, result, task_type=task_type)
+        assert not [f for f in result.failures if "incremental" in f.message], (
+            task_type, question
+        )
+
+
+@pytest.mark.parametrize(
+    ("question", "phrase", "baseline"),
+    [
+        (_ROUND_2_QUESTION, "beyond what",
+         "baseline academic achievement and socioeconomic status"),
+        ("Do the scales predict Y beyond what 9th-grade achievement and SES "
+         "already explain?", "beyond what", "9th-grade achievement and SES"),
+        ("Does X predict Y net of prior achievement and SES?", "net of prior",
+         "prior achievement and SES"),
+        ("Can X predict Y, after controlling for prior achievement and "
+         "demographic factors?", "controlling for prior",
+         "prior achievement and demographic factors"),
+        ("Does X add predictive value beyond prior achievement and SES for the "
+         "students who drop out?", "add predictive value",
+         "prior achievement and SES"),
+        ("Do the constructs predict Y above and beyond the contributions of "
+         "prior achievement and SES among U.S. high school students?",
+         "above and beyond", "prior achievement and SES"),
+        ("Does X predict Y over and beyond SES, and does it vary by sex?",
+         "over and beyond", "SES"),
+    ],
+    ids=["round-2", "already-explain", "net-of", "controlling-for",
+         "adds-value-then-beyond", "contributions-of-among", "over-and-beyond"],
+)
+def test_the_baseline_of_the_new_wordings_is_read(
+    question: str, phrase: str, baseline: str,
+) -> None:
+    """Round 2's baseline used to run on into "... alone provide"."""
+    assert _named_after(question, phrase) == baseline

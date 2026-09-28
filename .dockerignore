@@ -1,0 +1,13 @@
+# The sandbox image needs exactly one file from the project: the Dockerfile
+# COPYs requirements-sandbox.txt and nothing else. Without this file the
+# auto-build (src/sandbox.py DockerSandbox._build_image) and
+# `docker compose build sandbox` uploaded the whole project as build
+# context -- data/raw (the HSLS CSV alone is ~2 GB), output/, runs/*/output*,
+# .venv, .git and the .env holding API keys -- to the Docker daemon.
+#
+# An allowlist, so a new data or secrets folder can never be swept in.
+# If the Dockerfile ever COPYs another file, re-include it below
+# (tests/test_docker_packaging.py checks that every COPY source is).
+*
+!Dockerfile
+!requirements-sandbox.txt
