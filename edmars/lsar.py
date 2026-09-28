@@ -45,15 +45,20 @@ from edmars import estimates, fetch
 from edmars.model import Check
 
 LSAR_REPO = "https://github.com/cgpan/LSAR-public"
-#: The exact LSAR commit EDM-ARS installs: LSAR 0.4.1, the head of LSAR's
-#: ``fix/released-issues`` branch (the scoring-failure fix and the current
-#: ``deepseek-flash`` model id). A full commit id, never a branch name, so
-#: the reviewer that produces the gate scores does not change with whatever
-#: is pushed next. :func:`install` refuses an archive whose recorded commit
-#: is not this one. When that branch is merged, keep this id if the merge
-#: keeps the commit (merge or fast-forward); after a squash merge, set it to
-#: the new commit on master.
-LSAR_REF = "e974bb2226fa39f7989c7dd0c7dbc46989f8ea42"
+#: The exact LSAR commit EDM-ARS installs: the head of LSAR's
+#: ``fix/released-issues`` branch. It has the scoring-failure fix, the
+#: current ``deepseek-flash`` model id, a ``token_usage.json`` row per call
+#: (time, stage, reasoning tokens, calls the J1 guard refused) written
+#: however a review ends, which the review gate prices, and working
+#: related-work summaries (DeepSeek thinking off for stages 1-3, a larger
+#: summarizer budget). Its version string is still 0.4.1, as it was at the
+#: previous pin e974bb2, so only the commit id tells the two apart. A full
+#: commit id, never a branch name, so the reviewer that produces the gate
+#: scores does not change with whatever is pushed next. :func:`install`
+#: refuses an archive whose recorded commit is not this one. When that
+#: branch is merged, keep this id if the merge keeps the commit (merge or
+#: fast-forward); after a squash merge, set it to the new commit on master.
+LSAR_REF = "96a3d4a25725d18129bb216fc151cff747387309"
 
 #: Files the review gate reads under LSAR_HOME (EDM config.yaml review_gate).
 REQUIRED_FILES: tuple[str, ...] = (
